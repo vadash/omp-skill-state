@@ -27,7 +27,7 @@ At step `t` the model receives exactly:
 A_t = (P, t, O_t)
 ```
 
-- `P` — the procedure spec: the skill body, verbatim, immutable for the run.
+- `P` — the procedure spec: the skill body as the harness renders it for the user invocation (body, skill directory, user arguments), immutable for the run.
 - `t` — the execution state: a JSON object satisfying the state schema.
 - `O_t` — the observation: the tool results and user turn of the current step, under a byte cap.
 
@@ -141,13 +141,13 @@ Persistence: after each accepted patch the runtime sends the state as a custom m
 On every `context` event while engaged, the runtime returns a replacement message array containing, in order:
 
 1. The runtime's operating rules, a custom message sent once at engage and passed through unchanged.
-2. `P`, the skill body, a custom message sent once at engage and passed through unchanged.
+2. `P`, the skill body as rendered for the invocation, a custom message sent once at engage and passed through unchanged. The rendered skill prompt is used rather than the raw file so the user's invocation arguments stay in every step.
 3. `t`, the current state as a fenced JSON block, the latest stored state message passed through unchanged. Changes only when a patch is accepted.
 
 Items 1 to 3 are stored transcript messages, not synthesised text. The projection returns the stored objects themselves. That is what makes them count as stable for caching (below).
 4. `O_t`, the current step's observations, as the original observation messages with their roles preserved.
-5. The last assistant `toolCall` and its `toolResult` pair, when the step's observation is itself a tool result. This keeps provider tool pairing intact so no repair is needed.
-6. The current user turn, when it is a user prompt rather than a tool result.
+5. The last assistant `toolCall` and its `toolResult` pair, when the step's observation is itself a tool result. Every result must answer a `toolCall` block of that assistant message; otherwise the call is not projected. This keeps provider tool pairing intact so no repair is needed.
+6. The current user turn, when it is a user prompt rather than a tool result: every trailing user message of the batch. A trailing assistant message with no observation yet contributes nothing.
 
 Everything else is dropped: all earlier assistant turns, all earlier tool results, all earlier user turns, and every injected live-state block — `goal-mode-context`, `plan-mode-context`, the eager-todo and mid-run-todo nudges, TTSR injections, and todo reminders.
 
@@ -182,6 +182,7 @@ Strict schemas: the harness preserves `strict: true` on tool definitions and sen
 
 - The cap applies to the step's combined observation text, not to each result.
 - Over the cap, the runtime truncates from the end of the largest result and inserts a marker naming what was cut and how to re-read it.
+- Markers are never cut. When every result is cut to nothing, the observation is the markers alone, so the cap's floor is one marker per result.
 - The cap is per step. Exactly one observation set is ever in the prompt, so the cap is a ceiling on the steady state, not a cumulative budget.
 
 ## 10. Compaction
@@ -271,6 +272,8 @@ omp-skill-state/
   package.json          "omp": { "extensions": ["./index.ts"] }
   index.ts              the runtime
   index.test.ts         unit tests (bun test)
+  projection.ts         the projection (pure message assembly)
+  projection.test.ts    projection unit tests (bun test)
   tsconfig.json         typecheck config (tsc --noEmit)
   skills/               optional bundled procedure skills, discovered from the plugin root
   CONTEXT.md            glossary

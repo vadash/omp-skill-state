@@ -1,6 +1,8 @@
 import type { ExecutionState } from "./state";
 
 export const STATE_MESSAGE_TYPE = "sh.omp.skill-state.state";
+export const RULES_MESSAGE_TYPE = "sh.omp.skill-state.rules";
+export const PROCEDURE_SPEC_MESSAGE_TYPE = "sh.omp.skill-state.procedure-spec";
 const PATCH_MARKER = "state";
 
 // Runtime operating rules, model-facing: history is hidden, so the state is the

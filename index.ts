@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, SessionBeforeSwitchEvent, Skill } from "@oh-my-pi/pi-coding-agent";
 import { Text } from "@oh-my-pi/pi-coding-agent";
-import { STATE_MESSAGE_TYPE, parsePatch, renderStateContent } from "./patch";
+import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, parsePatch, renderStateContent } from "./patch";
+import { project } from "./projection";
 import { applyPatch, isPlainObject, loadStateSchema } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
 
@@ -125,8 +126,35 @@ export default function (pi: ExtensionAPI): void {
 		// above before this read resolves.
 		if (!loaded.ok || engaged.has(sessionId)) return;
 		engaged.set(sessionId, { name, schema: loaded.schema, params: loaded.params, state: {}, invalidPatches: 0 });
+		// The projected prompt's head is pinned here at engage: the operating rules,
+		// the procedure spec P, and the initial state so the head exists from the
+		// first step. P is the rendered skill prompt the harness already produced
+		// for this invocation; it keeps the user's invocation args in every step
+		// and needs no second file read.
+		const procedureSpec = typeof message.content === "string"
+			? message.content
+			: Array.isArray(message.content)
+				? message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n")
+				: String(message.content);
+		pi.sendMessage({ customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false }, { deliverAs: "aside" });
+		pi.sendMessage({ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: procedureSpec, display: false, details: { name } }, { deliverAs: "aside" });
+		pi.sendMessage(
+			{ customType: STATE_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {} } },
+			{ deliverAs: "aside" },
+		);
 		ctx.ui.notify(`skill-state: procedure "${name}" engaged`, "info");
 		ctx.ui.notify("skill-state: history is hidden from the model while engaged; finish with /new", "info");
+	});
+
+	// The projection rewrites only the prompt; the stored transcript stays
+	// complete. undefined keeps the ordinary context: safe fallback when not
+	// engaged, in a subagent, or when the head is not in place yet.
+	pi.on("context", (event, ctx) => {
+		if (ctx.agent.kind !== "main") return undefined;
+		const engagement = engaged.get(ctx.sessionManager.getSessionId());
+		if (engagement === undefined) return undefined;
+		const messages = project(event.messages, engagement.params.observationBytes);
+		return messages === undefined ? undefined : { messages };
 	});
 
 	pi.on("session_before_switch", (event, ctx) => {

@@ -4,11 +4,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext, Skill } from "@oh-my-pi/pi-coding-agent";
 import extension from "./index";
-import { STATE_MESSAGE_TYPE, renderStateContent } from "./patch";
+import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent } from "./patch";
 import type { ExecutionState } from "./state";
 import { makeSkill } from "./skill-fixtures";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
+
+// Engage sends exactly these three asides; the patch loop must add nothing else.
+const engageAsideTypes = [RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE];
 
 function skillPrompt(name: string, attribution: "user" | "agent" = "user") {
 	return {
@@ -101,10 +104,16 @@ let retryProcedure: Skill;
 let plain: Skill;
 let brokenArray: Skill;
 let brokenJson: Skill;
+let smallProcedure: Skill;
 
 beforeAll(async () => {
 	root = await mkdtemp(path.join(tmpdir(), "omp-skill-state-"));
 	procedure = await makeSkill(root, "procedure", JSON.stringify({ type: "object", properties: { goal: { type: "string" } } }));
+	smallProcedure = await makeSkill(
+		root,
+		"smallcap",
+		JSON.stringify({ type: "object", properties: { goal: { type: "string" } }, "x-state": { observationBytes: 300 } }),
+	);
 	retryProcedure = await makeSkill(
 		root,
 		"retryproc",
@@ -131,6 +140,28 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		const { notified } = await engage(handlers, "procedure");
 
 		expect(notified).toEqual(engageNotices("procedure"));
+	});
+
+	test("engage sends the rules, the procedure spec and the initial state as three asides", async () => {
+		const { handlers, sent } = harness([procedure]);
+		await engage(handlers, "procedure");
+
+		expect(sent).toHaveLength(3);
+		const [rules, procedureSpec, state] = sent.map((s) => s.payload);
+		expect(rules).toEqual({ customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false });
+		expect(procedureSpec).toEqual({
+			customType: PROCEDURE_SPEC_MESSAGE_TYPE,
+			content: "Running skill procedure",
+			display: false,
+			details: { name: "procedure" },
+		});
+		expect(state).toEqual({
+			customType: STATE_MESSAGE_TYPE,
+			content: renderStateContent({}),
+			display: true,
+			details: { state: {} },
+		});
+		expect(sent.map((s) => s.options)).toEqual([{ deliverAs: "aside" }, { deliverAs: "aside" }, { deliverAs: "aside" }]);
 	});
 
 	test("stays inert for a skill without a state schema", async () => {
@@ -347,6 +378,8 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 async function patchHarness(skill: Skill) {
 	const { handlers, sent } = harness([skill]);
 	const { ctx, notified } = await engage(handlers, skill.name);
+	// sent starts with the three engage asides (rules, P, initial t); patch tests
+	// index past them.
 	return { handlers, sent, ctx, notified };
 }
 
@@ -388,7 +421,7 @@ describe("omp-skill-state patch loop", () => {
 		const blocked = await handler(handlers, "tool_call")(toolCall("read"), ctx);
 
 		expect(rewritten).toBeUndefined();
-		expect(sent).toEqual([]);
+		expect(sent.map((s) => s.payload.customType)).toEqual(engageAsideTypes);
 		expect(blocked).toBeUndefined();
 	});
 
@@ -399,11 +432,11 @@ describe("omp-skill-state patch loop", () => {
 		const blocked = await handler(handlers, "tool_call")(toolCall("read"), ctx);
 
 		expect(rewritten).toBeUndefined();
-		expect(sent).toHaveLength(1);
-		expect(sent[0].payload.customType).toBe(STATE_MESSAGE_TYPE);
-		expect(sent[0].options.deliverAs).toBe("aside");
-		expect(sent[0].payload.details).toEqual({ state: { goal: "x" } });
-		expect(sent[0].payload.content).toBe(renderStateContent({ goal: "x" }));
+		expect(sent).toHaveLength(4);
+		expect(sent[3].payload.customType).toBe(STATE_MESSAGE_TYPE);
+		expect(sent[3].options.deliverAs).toBe("aside");
+		expect(sent[3].payload.details).toEqual({ state: { goal: "x" } });
+		expect(sent[3].payload.content).toBe(renderStateContent({ goal: "x" }));
 		expect(blocked).toBeUndefined();
 	});
 
@@ -413,8 +446,8 @@ describe("omp-skill-state patch loop", () => {
 		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), ctx);
 		await handler(handlers, "assistant_message")(assistantMessage("```json state\n{\"extra\": 1}\n```"), ctx);
 
-		expect(sent).toHaveLength(2);
-		expect(sent[1].payload.details).toEqual({ state: { goal: "x", extra: 1 } });
+		expect(sent).toHaveLength(5);
+		expect(sent[4].payload.details).toEqual({ state: { goal: "x", extra: 1 } });
 	});
 
 	test("an invalid patch blocks every tool call with the validation error and sends nothing", async () => {
@@ -425,7 +458,7 @@ describe("omp-skill-state patch loop", () => {
 		const bash = await handler(handlers, "tool_call")(toolCall("bash", "t2"), ctx);
 
 		expect(rewritten).toBeUndefined();
-		expect(sent).toEqual([]);
+		expect(sent.map((s) => s.payload.customType)).toEqual(engageAsideTypes);
 		expect(read).toEqual({ block: true, reason: expect.stringContaining("goal") });
 		expect(bash).toEqual({ block: true, reason: expect.stringContaining("goal") });
 	});
@@ -436,7 +469,7 @@ describe("omp-skill-state patch loop", () => {
 		await handler(handlers, "assistant_message")(assistantMessage("```json state\n{ nope\n```"), ctx);
 		const blocked = await handler(handlers, "tool_call")(toolCall("read"), ctx);
 
-		expect(sent).toEqual([]);
+		expect(sent.map((s) => s.payload.customType)).toEqual(engageAsideTypes);
 		expect(blocked).toEqual({ block: true, reason: expect.stringContaining("valid JSON") });
 	});
 
@@ -448,7 +481,7 @@ describe("omp-skill-state patch loop", () => {
 
 		const blocked = await handler(handlers, "tool_call")(toolCall("read"), ctx);
 		expect(blocked).toBeUndefined();
-		expect(sent).toHaveLength(1);
+		expect(sent).toHaveLength(4); // engage asides plus the recovered state message
 
 		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "new" }, ctx);
 		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/new")]);
@@ -479,7 +512,7 @@ describe("omp-skill-state patch loop", () => {
 			...engageNotices("procedure"),
 			{ message: 'skill-state: procedure "procedure" degraded after 3 invalid patches; running ordinarily', type: "warning" },
 		]);
-		expect(sent).toEqual([]);
+		expect(sent.map((s) => s.payload.customType)).toEqual(engageAsideTypes);
 	});
 
 	test("the degrade threshold honours x-state retries", async () => {
@@ -526,5 +559,106 @@ describe("omp-skill-state patch loop", () => {
 		expect(sent).toEqual([]);
 		expect(subBlocked).toBeUndefined();
 		expect(sub.notified).toEqual([]);
+	});
+});
+
+describe("omp-skill-state projection (context seam)", () => {
+	function contextEvent(messages: unknown[]) {
+		return { type: "context", messages };
+	}
+
+	function projected(out: unknown) {
+		return (out as { messages: Array<Record<string, unknown>> } | undefined)?.messages;
+	}
+
+	test("returns undefined for a subagent session and when not engaged", async () => {
+		const { handlers } = harness([procedure]);
+		const sub = mockCtx("s1", "sub");
+		const main = mockCtx("s2");
+
+		expect(await handler(handlers, "context")(contextEvent([skillPrompt("procedure")]), sub.ctx)).toBeUndefined();
+		expect(await handler(handlers, "context")(contextEvent([skillPrompt("procedure")]), main.ctx)).toBeUndefined();
+	});
+
+	test("engaged: projects head plus the current step and honours x-state observationBytes", async () => {
+		const { handlers, sent } = harness([smallProcedure]);
+		const { ctx } = await engage(handlers, "smallcap");
+		// As payloads lack role: the harness normalization adds it before the
+		// message reaches context, so the fixture does too.
+		const headCustoms = sent.slice(0, 3).map((s) => ({ role: "custom", ...s.payload }));
+		const call = {
+			...assistantMessage("working").message,
+			content: [{ type: "toolCall", id: "call-7", name: "read", arguments: {} }],
+		};
+		const result = {
+			role: "toolResult",
+			toolCallId: "call-7",
+			toolName: "read",
+			content: [{ type: "text", text: "y".repeat(1000) }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const messages = [
+			{ role: "user", content: "old turn", timestamp: Date.now() },
+			assistantMessage("old reply").message,
+			...headCustoms,
+			call,
+			result,
+		];
+		const out = await handler(handlers, "context")(contextEvent(messages), ctx);
+		const outMessages = projected(out)!;
+
+		expect(outMessages).toHaveLength(5);
+		expect(outMessages[0]).toBe(headCustoms[0]);
+		expect(outMessages[1]).toBe(headCustoms[1]);
+		expect(outMessages[2]).toBe(headCustoms[2]);
+		expect(outMessages[3]).toBe(call);
+		const capped = outMessages[4] as { content: Array<{ type: string; text?: string }>; toolCallId: string };
+		expect(capped.toolCallId).toBe("call-7");
+		const total = capped.content.reduce(
+			(sum, block) => sum + (block.type === "text" ? Buffer.byteLength(block.text ?? "") : 0),
+			0,
+		);
+		expect(total).toBeLessThanOrEqual(300);
+		expect(capped.content.at(-1)?.text).toContain("observation cap 300 bytes exceeded");
+	});
+
+	test("engaged: a user turn projects head plus the user message", async () => {
+		const { handlers, sent } = harness([procedure]);
+		const { ctx } = await engage(handlers, "procedure");
+		const headCustoms = sent.slice(0, 3).map((s) => ({ role: "custom", ...s.payload }));
+		const turn = { role: "user", content: "go on", timestamp: Date.now() };
+		const messages = [...headCustoms, turn];
+
+		const out = await handler(handlers, "context")(contextEvent(messages), ctx);
+		const outMessages = projected(out)!;
+
+		expect(outMessages).toHaveLength(4);
+		expect(outMessages[3]).toBe(turn);
+	});
+
+	test("the context handler never mutates event.messages, even when it truncates", async () => {
+		const { handlers, sent } = harness([smallProcedure]);
+		const { ctx } = await engage(handlers, "smallcap");
+		const headCustoms = sent.slice(0, 3).map((s) => ({ role: "custom", ...s.payload }));
+		const call = {
+			...assistantMessage("working").message,
+			content: [{ type: "toolCall", id: "call-7", name: "read", arguments: {} }],
+		};
+		const result = {
+			role: "toolResult",
+			toolCallId: "call-7",
+			toolName: "read",
+			content: [{ type: "text", text: "y".repeat(1000) }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const messages = [...headCustoms, call, result];
+		const snapshot = structuredClone(messages);
+
+		const out = await handler(handlers, "context")(contextEvent(messages), ctx);
+
+		expect(projected(out)![4]).not.toBe(result);
+		expect(messages).toEqual(snapshot);
 	});
 });

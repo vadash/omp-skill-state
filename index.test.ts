@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext, Skill } from "@oh-my-pi/pi-coding-agent";
 import extension from "./index";
+import { STATE_MESSAGE_TYPE, renderStateContent } from "./patch";
+import type { ExecutionState } from "./state";
 import { makeSkill } from "./skill-fixtures";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
@@ -22,19 +24,27 @@ function skillPrompt(name: string, attribution: "user" | "agent" = "user") {
 
 function recordingPi(skills: Skill[]) {
 	const handlers = new Map<string, Handler>();
+	const sent: Array<{ payload: Record<string, unknown>; options: Record<string, unknown> }> = [];
+	const renderers = new Map<string, unknown>();
 	const pi = {
 		on(event: string, handler: Handler) {
 			handlers.set(event, handler);
 		},
+		sendMessage(payload: Record<string, unknown>, options: Record<string, unknown> = {}) {
+			sent.push({ payload, options });
+		},
+		registerMessageRenderer(type: string, renderer: unknown) {
+			renderers.set(type, renderer);
+		},
 		pi: { getActiveSkills: () => skills },
 	} as unknown as ExtensionAPI;
-	return { pi, handlers };
+	return { pi, handlers, sent, renderers };
 }
 
 function harness(skills: Skill[]) {
-	const { pi, handlers } = recordingPi(skills);
+	const { pi, handlers, sent, renderers } = recordingPi(skills);
 	extension(pi);
-	return { handlers };
+	return { handlers, sent, renderers };
 }
 
 function handler(handlers: Map<string, Handler>, event: string): Handler {
@@ -65,8 +75,29 @@ const disengageNotices = (name: string, trigger: string) => [
 	{ message: `skill-state: procedure "${name}" disengaged (${trigger})`, type: "info" },
 ];
 
+function assistantMessage(text: string) {
+	return {
+		type: "assistant_message",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "m",
+			usage: {},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		},
+	};
+}
+
+function toolCall(name: string, id = "t1") {
+	return { type: "tool_call", toolName: name, toolCallId: id, input: { path: "x" } };
+}
+
 let root: string;
 let procedure: Skill;
+let retryProcedure: Skill;
 let plain: Skill;
 let brokenArray: Skill;
 let brokenJson: Skill;
@@ -74,6 +105,11 @@ let brokenJson: Skill;
 beforeAll(async () => {
 	root = await mkdtemp(path.join(tmpdir(), "omp-skill-state-"));
 	procedure = await makeSkill(root, "procedure", JSON.stringify({ type: "object", properties: { goal: { type: "string" } } }));
+	retryProcedure = await makeSkill(
+		root,
+		"retryproc",
+		JSON.stringify({ type: "object", properties: { goal: { type: "string" } }, "x-state": { retries: 2 } }),
+	);
 	plain = await makeSkill(root, "plain");
 	brokenArray = await makeSkill(root, "brokenarray", "[]");
 	brokenJson = await makeSkill(root, "brokenjson", "{ not json");
@@ -305,5 +341,190 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		const { notified } = await engage(handlers, "recon");
 
 		expect(notified).toEqual(engageNotices("recon"));
+	});
+});
+
+async function patchHarness(skill: Skill) {
+	const { handlers, sent } = harness([skill]);
+	const { ctx, notified } = await engage(handlers, skill.name);
+	return { handlers, sent, ctx, notified };
+}
+
+function stateMessage(state: ExecutionState) {
+	return {
+		role: "custom",
+		customType: STATE_MESSAGE_TYPE,
+		content: renderStateContent(state),
+		display: true,
+		details: { state },
+		timestamp: Date.now(),
+	};
+}
+
+function renderWith(theme: { fg: (color: string, text: string) => string }, expanded: boolean, state: ExecutionState) {
+	const renderer = harness([procedure]).renderers.get(STATE_MESSAGE_TYPE) as
+		| ((message: unknown, options: { expanded: boolean }, theme: unknown) => { getText(): string })
+		| undefined;
+	expect(renderer).toBeDefined();
+	return renderer!(stateMessage(state), { expanded }, theme).getText();
+}
+
+describe("omp-skill-state patch loop", () => {
+	test("the renderer shows keys collapsed and pretty JSON expanded, never the raw one-liner", () => {
+		const theme = { fg: (_color: string, text: string) => text };
+
+		const collapsed = renderWith(theme, false, { goal: "g" });
+		expect(collapsed).toContain("goal");
+		expect(collapsed).not.toContain('{"goal":"g"}');
+
+		const expanded = renderWith(theme, true, { goal: "g" });
+		expect(expanded).toContain('"goal": "g"');
+	});
+
+	test("no patch block is an empty patch: nothing sent, tool calls run", async () => {
+		const { handlers, sent, ctx } = await patchHarness(procedure);
+
+		const rewritten = await handler(handlers, "assistant_message")(assistantMessage("Prose only, calling a tool."), ctx);
+		const blocked = await handler(handlers, "tool_call")(toolCall("read"), ctx);
+
+		expect(rewritten).toBeUndefined();
+		expect(sent).toEqual([]);
+		expect(blocked).toBeUndefined();
+	});
+
+	test("a valid patch is merged and sent as a state message, aside", async () => {
+		const { handlers, sent, ctx } = await patchHarness(procedure);
+
+		const rewritten = await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), ctx);
+		const blocked = await handler(handlers, "tool_call")(toolCall("read"), ctx);
+
+		expect(rewritten).toBeUndefined();
+		expect(sent).toHaveLength(1);
+		expect(sent[0].payload.customType).toBe(STATE_MESSAGE_TYPE);
+		expect(sent[0].options.deliverAs).toBe("aside");
+		expect(sent[0].payload.details).toEqual({ state: { goal: "x" } });
+		expect(sent[0].payload.content).toBe(renderStateContent({ goal: "x" }));
+		expect(blocked).toBeUndefined();
+	});
+
+	test("a second valid patch merges into the first instead of replacing it", async () => {
+		const { handlers, sent, ctx } = await patchHarness(procedure);
+
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage("```json state\n{\"extra\": 1}\n```"), ctx);
+
+		expect(sent).toHaveLength(2);
+		expect(sent[1].payload.details).toEqual({ state: { goal: "x", extra: 1 } });
+	});
+
+	test("an invalid patch blocks every tool call with the validation error and sends nothing", async () => {
+		const { handlers, sent, ctx } = await patchHarness(procedure);
+
+		const rewritten = await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
+		const read = await handler(handlers, "tool_call")(toolCall("read", "t1"), ctx);
+		const bash = await handler(handlers, "tool_call")(toolCall("bash", "t2"), ctx);
+
+		expect(rewritten).toBeUndefined();
+		expect(sent).toEqual([]);
+		expect(read).toEqual({ block: true, reason: expect.stringContaining("goal") });
+		expect(bash).toEqual({ block: true, reason: expect.stringContaining("goal") });
+	});
+
+	test("malformed JSON blocks with the parse error", async () => {
+		const { handlers, sent, ctx } = await patchHarness(procedure);
+
+		await handler(handlers, "assistant_message")(assistantMessage("```json state\n{ nope\n```"), ctx);
+		const blocked = await handler(handlers, "tool_call")(toolCall("read"), ctx);
+
+		expect(sent).toEqual([]);
+		expect(blocked).toEqual({ block: true, reason: expect.stringContaining("valid JSON") });
+	});
+
+	test("a valid retry recovers and the session stays engaged", async () => {
+		const { handlers, sent, ctx, notified } = await patchHarness(procedure);
+
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), ctx);
+
+		const blocked = await handler(handlers, "tool_call")(toolCall("read"), ctx);
+		expect(blocked).toBeUndefined();
+		expect(sent).toHaveLength(1);
+
+		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "new" }, ctx);
+		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/new")]);
+	});
+
+	test("the third consecutive invalid patch degrades and the session runs ordinarily", async () => {
+		const { handlers, sent, ctx, notified } = await patchHarness(procedure);
+
+		for (let i = 0; i < 3; i++) {
+			await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
+		}
+
+		expect(notified).toEqual([
+			...engageNotices("procedure"),
+			{ message: 'skill-state: procedure "procedure" degraded after 3 invalid patches; running ordinarily', type: "warning" },
+		]);
+
+		const blocked = await handler(handlers, "tool_call")(toolCall("read"), ctx);
+		expect(blocked).toBeUndefined();
+
+		const rewritten = await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
+		const later = await handler(handlers, "tool_call")(toolCall("read", "t9"), ctx);
+		expect(rewritten).toBeUndefined();
+		expect(later).toBeUndefined();
+
+		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "new" }, ctx);
+		expect(notified).toEqual([
+			...engageNotices("procedure"),
+			{ message: 'skill-state: procedure "procedure" degraded after 3 invalid patches; running ordinarily', type: "warning" },
+		]);
+		expect(sent).toEqual([]);
+	});
+
+	test("the degrade threshold honours x-state retries", async () => {
+		const { handlers, ctx, notified } = await patchHarness(retryProcedure);
+
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
+		expect(notified).toEqual(engageNotices("retryproc"));
+
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
+		expect(notified).toEqual([
+			...engageNotices("retryproc"),
+			{ message: 'skill-state: procedure "retryproc" degraded after 2 invalid patches; running ordinarily', type: "warning" },
+		]);
+	});
+
+	test("a valid patch between failures resets the consecutive counter", async () => {
+		const { handlers, ctx, notified } = await patchHarness(procedure);
+
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
+
+		expect(notified).toEqual(engageNotices("procedure"));
+
+		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "new" }, ctx);
+		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/new")]);
+	});
+
+	test("assistant_message and tool_call are inert when not engaged and in a subagent", async () => {
+		const { handlers, sent } = harness([procedure]);
+
+		const main = mockCtx("s1");
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), main.ctx);
+		const mainBlocked = await handler(handlers, "tool_call")(toolCall("read"), main.ctx);
+		expect(sent).toEqual([]);
+		expect(mainBlocked).toBeUndefined();
+		expect(main.notified).toEqual([]);
+
+		const sub = mockCtx("s2", "sub");
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), sub.ctx);
+		const subBlocked = await handler(handlers, "tool_call")(toolCall("read"), sub.ctx);
+		expect(sent).toEqual([]);
+		expect(subBlocked).toBeUndefined();
+		expect(sub.notified).toEqual([]);
 	});
 });

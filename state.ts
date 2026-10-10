@@ -134,6 +134,6 @@ export function applyPatch(t: ExecutionState, patch: unknown, schema: StateSchem
 	return { ok: true, state: mergeState(t, patch as ExecutionState) };
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }

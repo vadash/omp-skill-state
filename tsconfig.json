@@ -15,5 +15,5 @@
 		"forceConsistentCasingInFileNames": true,
 		"types": ["bun"]
 	},
-	"include": ["index.ts", "index.test.ts", "state.ts", "state.test.ts", "skill-fixtures.ts"]
+	"include": ["index.ts", "index.test.ts", "patch.ts", "patch.test.ts", "state.ts", "state.test.ts", "skill-fixtures.ts"]
 }

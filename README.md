@@ -2,7 +2,7 @@
 
 An [omp](https://omp.sh) plugin that runs a procedural skill against an explicit execution state instead of a growing transcript. The design is in `docs/spec.md`; the vocabulary is in `CONTEXT.md`.
 
-Status: engage/disengage lifecycle implemented. A procedure skill can engage and disengage; the projection, state core and patch loop are not built yet.
+Status: engage/disengage lifecycle and the patch loop implemented. A procedure skill can engage and disengage; the model's fenced `state` patches are validated, merged and persisted as state messages, and invalid patches block the step and degrade after `retries` failures. The projection is not built yet.
 
 ## Layout
 

@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext, Skill } from "@oh-my-pi/pi-coding-agent";
 import extension from "./index";
+import { makeSkill } from "./skill-fixtures";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
@@ -70,20 +71,12 @@ let plain: Skill;
 let brokenArray: Skill;
 let brokenJson: Skill;
 
-async function makeSkill(name: string, schema?: string): Promise<Skill> {
-	const baseDir = path.join(root, name);
-	await mkdir(baseDir);
-	await writeFile(path.join(baseDir, "SKILL.md"), `---\nname: ${name}\ndescription: test skill ${name}\n---\n\nBody of ${name}.\n`);
-	if (schema !== undefined) await writeFile(path.join(baseDir, "state.schema.json"), schema);
-	return { name, description: `test skill ${name}`, filePath: path.join(baseDir, "SKILL.md"), baseDir, source: "test" };
-}
-
 beforeAll(async () => {
 	root = await mkdtemp(path.join(tmpdir(), "omp-skill-state-"));
-	procedure = await makeSkill("procedure", JSON.stringify({ type: "object", properties: { goal: { type: "string" } } }));
-	plain = await makeSkill("plain");
-	brokenArray = await makeSkill("brokenarray", "[]");
-	brokenJson = await makeSkill("brokenjson", "{ not json");
+	procedure = await makeSkill(root, "procedure", JSON.stringify({ type: "object", properties: { goal: { type: "string" } } }));
+	plain = await makeSkill(root, "plain");
+	brokenArray = await makeSkill(root, "brokenarray", "[]");
+	brokenJson = await makeSkill(root, "brokenjson", "{ not json");
 });
 
 afterAll(async () => {

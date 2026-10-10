@@ -1,0 +1,269 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import type { Skill } from "@oh-my-pi/pi-coding-agent";
+import { applyPatch, loadStateSchema, mergeState, validatePatch } from "./state";
+import type { ExecutionState, JsonSchema, StateSchema } from "./state";
+import { makeSkill } from "./skill-fixtures";
+
+let root: string;
+let valid: Skill;
+let partial: Skill;
+let defaulted: Skill;
+let malformed: Skill;
+let arrayTop: Skill;
+let nullTop: Skill;
+let stringTop: Skill;
+let numberTop: Skill;
+let plain: Skill;
+let garbage: Skill;
+
+beforeAll(async () => {
+	root = await mkdtemp(path.join(tmpdir(), "omp-skill-state-core-"));
+	valid = await makeSkill(root, "valid", JSON.stringify({
+		type: "object",
+		properties: { goal: { type: "string" } },
+		"x-state": { observationBytes: 4096, idleSteps: 5, retries: 2 },
+	}));
+	partial = await makeSkill(root, "partial", JSON.stringify({ "x-state": { idleSteps: 7 } }));
+	defaulted = await makeSkill(root, "defaulted", JSON.stringify({ type: "object", properties: {} }));
+	malformed = await makeSkill(root, "malformed", "{ not json");
+	arrayTop = await makeSkill(root, "arraytop", "[]");
+	nullTop = await makeSkill(root, "nulltop", "null");
+	stringTop = await makeSkill(root, "stringtop", '"text"');
+	numberTop = await makeSkill(root, "numbertop", "42");
+	plain = await makeSkill(root, "plain");
+	garbage = await makeSkill(root, "garbage", JSON.stringify({
+		"x-state": { observationBytes: "65536", idleSteps: 2, retries: null },
+	}));
+});
+
+afterAll(async () => {
+	await rm(root, { recursive: true, force: true });
+});
+
+describe("loadStateSchema", () => {
+	test("loads a valid schema with x-state params", async () => {
+		const loaded = await loadStateSchema("valid", [valid]);
+
+		expect(loaded.ok).toBe(true);
+		if (!loaded.ok) return;
+		expect(loaded.params).toEqual({ observationBytes: 4096, idleSteps: 5, retries: 2 });
+		expect(loaded.schema.properties?.goal).toEqual({ type: "string" });
+	});
+
+	test("fills unset x-state fields from defaults", async () => {
+		const loaded = await loadStateSchema("partial", [partial]);
+
+		expect(loaded.ok).toBe(true);
+		if (!loaded.ok) return;
+		expect(loaded.params).toEqual({ observationBytes: 32768, idleSteps: 7, retries: 3 });
+	});
+
+	test("uses defaults when x-state is absent", async () => {
+		const loaded = await loadStateSchema("defaulted", [defaulted]);
+
+		expect(loaded.ok).toBe(true);
+		if (!loaded.ok) return;
+		expect(loaded.params).toEqual({ observationBytes: 32768, idleSteps: 3, retries: 3 });
+	});
+
+	test("ignores non-numeric x-state fields", async () => {
+		const loaded = await loadStateSchema("garbage", [garbage]);
+
+		expect(loaded.ok).toBe(true);
+		if (!loaded.ok) return;
+		expect(loaded.params).toEqual({ observationBytes: 32768, idleSteps: 2, retries: 3 });
+	});
+});
+
+describe("loadStateSchema failures", () => {
+	test("missing schema file fails without throwing", async () => {
+		const loaded = await loadStateSchema("plain", [plain]);
+		expect(loaded).toEqual({ ok: false, error: expect.any(String) });
+	});
+
+	test("unknown skill name fails without throwing", async () => {
+		const loaded = await loadStateSchema("nosuch", [plain]);
+		expect(loaded).toEqual({ ok: false, error: expect.any(String) });
+	});
+
+	test("malformed JSON fails", async () => {
+		const loaded = await loadStateSchema("malformed", [malformed]);
+		expect(loaded.ok).toBe(false);
+	});
+
+	test("array top level fails", async () => {
+		const loaded = await loadStateSchema("arraytop", [arrayTop]);
+		expect(loaded.ok).toBe(false);
+	});
+
+	test("null top level fails", async () => {
+		const loaded = await loadStateSchema("nulltop", [nullTop]);
+		expect(loaded.ok).toBe(false);
+	});
+
+	test("string top level fails", async () => {
+		const loaded = await loadStateSchema("stringtop", [stringTop]);
+		expect(loaded.ok).toBe(false);
+	});
+
+	test("number top level fails", async () => {
+		const loaded = await loadStateSchema("numbertop", [numberTop]);
+		expect(loaded.ok).toBe(false);
+	});
+});
+
+describe("validatePatch types", () => {
+	const schemaWith = (name: string, sub: JsonSchema): StateSchema => ({
+		type: "object",
+		properties: { [name]: sub },
+	});
+
+	test("string value passes, wrong type fails", () => {
+		const schema = schemaWith("goal", { type: "string" });
+		expect(validatePatch({ goal: "ship" }, schema)).toBeNull();
+		expect(validatePatch({ goal: 1 }, schema)).toContain("goal");
+	});
+
+	test("number value passes, wrong type fails", () => {
+		const schema = schemaWith("count", { type: "number" });
+		expect(validatePatch({ count: 2 }, schema)).toBeNull();
+		expect(validatePatch({ count: "two" }, schema)).toContain("count");
+	});
+
+	test("boolean value passes, wrong type fails", () => {
+		const schema = schemaWith("done", { type: "boolean" });
+		expect(validatePatch({ done: true }, schema)).toBeNull();
+		expect(validatePatch({ done: "yes" }, schema)).toContain("done");
+	});
+
+	test("null value passes, wrong type fails", () => {
+		const schema = schemaWith("error", { type: "null" });
+		expect(validatePatch({ error: null }, schema)).toBeNull();
+		expect(validatePatch({ error: "boom" }, schema)).toContain("error");
+	});
+
+	test("array value passes, wrong type and element type fail", () => {
+		const schema = schemaWith("tags", { type: "array", items: { type: "string" } });
+		expect(validatePatch({ tags: ["a", "b"] }, schema)).toBeNull();
+		expect(validatePatch({ tags: "a" }, schema)).toContain("tags");
+		const error = validatePatch({ tags: ["a", 2] }, schema);
+		expect(error).toContain("tags");
+		expect(error).toContain("[1]");
+	});
+
+	test("object value passes, nested property type fails", () => {
+		const schema = schemaWith("meta", { type: "object", properties: { depth: { type: "number" } } });
+		expect(validatePatch({ meta: { depth: 3 } }, schema)).toBeNull();
+		const error = validatePatch({ meta: { depth: "deep" } }, schema);
+		expect(error).toContain("meta");
+		expect(error).toContain("depth");
+	});
+
+	test("nested additionalProperties false rejects unknown nested key", () => {
+		const schema = schemaWith("meta", { type: "object", additionalProperties: false, properties: { depth: { type: "number" } } });
+		expect(validatePatch({ meta: { depth: 1 } }, schema)).toBeNull();
+		expect(validatePatch({ meta: { extra: true } }, schema)).toContain("extra");
+	});
+
+	test("subschema with no type imposes no constraint", () => {
+		const schema = schemaWith("free", {});
+		expect(validatePatch({ free: [1, { a: null }] }, schema)).toBeNull();
+	});
+});
+
+describe("validatePatch unknown keys", () => {
+	const schema: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
+
+	test("additionalProperties true accepts an unknown key", () => {
+		expect(validatePatch({ extra: 1 }, { ...schema, additionalProperties: true })).toBeNull();
+	});
+
+	test("additionalProperties false rejects an unknown key", () => {
+		const error = validatePatch({ extra: 1 }, { ...schema, additionalProperties: false });
+		expect(error).toContain("extra");
+	});
+
+	test("absent additionalProperties accepts an unknown key", () => {
+		expect(validatePatch({ extra: 1 }, schema)).toBeNull();
+	});
+});
+
+describe("validatePatch top level", () => {
+	const schema: StateSchema = { type: "object", properties: {} };
+
+	test("rejects an array patch", () => {
+		expect(validatePatch([], schema)).toContain("JSON object");
+	});
+
+	test("rejects a null patch", () => {
+		expect(validatePatch(null, schema)).toContain("JSON object");
+	});
+
+	test("rejects a string patch", () => {
+		expect(validatePatch("nope", schema)).toContain("JSON object");
+	});
+});
+
+describe("mergeState", () => {
+	test("sets a new key", () => {
+		expect(mergeState({}, { a: 1 })).toEqual({ a: 1 });
+	});
+
+	test("null deletes a key", () => {
+		expect(mergeState({ a: 1, b: 2 }, { a: null })).toEqual({ b: 2 });
+	});
+
+	test("keys absent from the patch are untouched", () => {
+		expect(mergeState({ a: 1, b: 2 }, { b: 3 })).toEqual({ a: 1, b: 3 });
+	});
+
+	test("nested objects merge key-wise", () => {
+		expect(mergeState({ meta: { a: 1, b: 2 } }, { meta: { b: 3, c: 4 } })).toEqual({ meta: { a: 1, b: 3, c: 4 } });
+	});
+
+	test("arrays replace", () => {
+		expect(mergeState({ tags: ["a", "b"] }, { tags: ["c"] })).toEqual({ tags: ["c"] });
+	});
+
+	test("scalars replace, including over objects", () => {
+		expect(mergeState({ a: 1, meta: { b: 2 } }, { a: 9, meta: 5 })).toEqual({ a: 9, meta: 5 });
+	});
+
+	test("nested null deletes a nested key", () => {
+		expect(mergeState({ meta: { a: 1, b: 2 } }, { meta: { b: null } })).toEqual({ meta: { a: 1 } });
+	});
+
+	test("does not mutate t or patch", () => {
+		const t: ExecutionState = { keep: "yes", nested: { a: 1, b: 2 }, tags: ["x"] };
+		const patch: ExecutionState = { keep: null, nested: { b: null, c: 3 }, tags: ["y"], fresh: true };
+		const tSnapshot = structuredClone(t);
+		const patchSnapshot = structuredClone(patch);
+
+		const merged = mergeState(t, patch);
+
+		expect(merged).toEqual({ nested: { a: 1, c: 3 }, tags: ["y"], fresh: true });
+		expect(t).toEqual(tSnapshot);
+		expect(patch).toEqual(patchSnapshot);
+	});
+});
+
+describe("applyPatch", () => {
+	const schema: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
+
+	test("merges a valid patch", () => {
+		expect(applyPatch({ goal: "old" }, { goal: "new" }, schema)).toEqual({ ok: true, state: { goal: "new" } });
+	});
+
+	test("rejects an invalid patch and leaves the state untouched", () => {
+		const t: ExecutionState = { goal: "keep" };
+		const result = applyPatch(t, { goal: 42 }, schema);
+
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error).toContain("goal");
+		expect(t).toEqual({ goal: "keep" });
+	});
+});

@@ -1,6 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { ExtensionAPI, ExtensionContext, SessionBeforeSwitchEvent, Skill } from "@oh-my-pi/pi-coding-agent";
+import { loadStateSchema } from "./state";
 
 const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 
@@ -33,11 +32,11 @@ export default function (pi: ExtensionAPI): void {
 		if (typeof name !== "string" || name.length === 0) return;
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (engaged.has(sessionId)) return;
-		const isProcedure = await declaresStateSchema(name, pi.pi.getActiveSkills());
+		const loaded = await loadStateSchema(name, pi.pi.getActiveSkills());
 		// Re-check after the await: the agent dispatches events without awaiting
 		// handlers, so a second invocation in the same batch can pass the check
 		// above before this read resolves.
-		if (!isProcedure || engaged.has(sessionId)) return;
+		if (!loaded.ok || engaged.has(sessionId)) return;
 		engaged.set(sessionId, name);
 		ctx.ui.notify(`skill-state: procedure "${name}" engaged`, "info");
 		ctx.ui.notify("skill-state: history is hidden from the model while engaged; finish with /new", "info");
@@ -64,17 +63,3 @@ export default function (pi: ExtensionAPI): void {
 	});
 }
 
-// Isolated so issue #4 (state core) can replace it with the real schema loader.
-// A procedure skill is one whose state.schema.json exists and parses to a plain
-// object; anything else (missing file, unknown skill name, malformed JSON,
-// array or null top level) is an ordinary skill and must stay silent.
-async function declaresStateSchema(skillName: string, skills: readonly Skill[]): Promise<boolean> {
-	try {
-		const schemaPath = await InternalUrlRouter.instance().locate(`skill://${skillName}/state.schema.json`, { skills });
-		if (schemaPath === null) return false;
-		const parsed: unknown = JSON.parse(await readFile(schemaPath, "utf8"));
-		return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
-	} catch {
-		return false;
-	}
-}

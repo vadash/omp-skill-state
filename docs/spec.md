@@ -269,14 +269,16 @@ Every mechanism above is public extension API. Nothing else is touched.
 omp-skill-state/
   package.json          "omp": { "extensions": ["./index.ts"] }
   index.ts              the runtime
+  index.test.ts         unit tests (bun test)
+  tsconfig.json         typecheck config (tsc --noEmit)
   skills/               optional bundled procedure skills, discovered from the plugin root
   CONTEXT.md            glossary
   docs/adr/             decisions
-  SPEC.md               this file
+  docs/spec.md          this file
 ```
 
 Development install: `omp plugin link C:\projects\_llm\omp-skill-state`.
-Dependency: `@oh-my-pi/pi-coding-agent` for types. If the published types lag the local checkout, switch to a `file:` dependency.
+Dependency: `@oh-my-pi/pi-coding-agent` for types, pinned to the installed omp version. The published package ships `dist/types`, which keeps typechecking independent of the harness source. The intended fallback for lagging published types, a `file:` dependency on the local checkout, does not work as written: the checkout is a workspace member whose dependencies use `catalog:` specifiers, which bun resolves only inside the monorepo, and whose `types` entry points at `src/index.ts`. README.md, "Extension types", records the verified detail and the order of workarounds.
 
 ## 18. Testing
 

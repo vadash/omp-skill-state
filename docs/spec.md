@@ -203,7 +203,7 @@ Because auto-compaction floors on the stored transcript, it still fires while en
 
 Four triggers, all leading to the same reset (clear `t`, clear engaged flag, stop projecting):
 
-1. **New session.** `/new` starts one and fires `session_start`. This is the intended ending, and the runtime tells the user so (section 12).
+1. **New session.** `/new` starts one and fires `session_start`. This is the intended ending, and the runtime tells the user so (section 12). On every `session_start` the runtime re-derives engagement from the branch rather than resetting blindly: an empty branch is inert; a branch holding a user skill invocation for a procedure skill and a state message re-engages with that state. That is what makes `/resume` restore `t` while `/new` starts clean.
 2. **Context reset.** `/clear` keeps the session and drops messages in place, and emits nothing to extensions. The `input` event runs before command interpretation and does see the raw text, so the runtime disengages on `/clear` directly.
 3. **Session change.** `session_before_switch`, `session_branch`, and `session_tree` all reset, so a rewind or fork cannot inherit a stale procedure.
 4. **Idleness.** Three consecutive steps with no patch and an unchanged state. The model has stopped editing its state; the runtime stands down.

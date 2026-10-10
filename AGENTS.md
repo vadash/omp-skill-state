@@ -5,7 +5,7 @@ An omp plugin that runs a procedural skill against an explicit execution state. 
 Two invariants hold in every change:
 
 - The projection reads and writes the prompt only. The transcript on disk and on the branch stays complete.
-- Nothing under the harness checkout at `C:\projects\_llm\oh-my-pi` is modified. Every mechanism goes through the public `ExtensionAPI`; its reference is that checkout's `docs/extensions.md`.
+- The harness checkout at `C:\projects\_llm\oh-my-pi` is a read-only reference. Nothing under it is modified. Every mechanism goes through the public `ExtensionAPI`; its reference is that checkout's `docs/extensions.md`, and its source is where to verify how an event or action behaves.
 
 Read before designing or implementing any behaviour: `docs/spec.md`. It fixes the lifecycle (inert, armed, engaged, degraded), the merge operator, the message order of the projection, the patch validation ordering, and every harness surface used. `docs/adr/0001` records why the runtime owns compaction while engaged.
 

@@ -1,0 +1,13 @@
+{
+	"type": "object",
+	"properties": {
+		"goal": { "type": "string" },
+		"working_dir": { "type": "string" },
+		"findings": { "type": "array", "items": { "type": "string" } },
+		"tested_hypotheses": { "type": "array", "items": { "type": "string" } },
+		"open_questions": { "type": "array", "items": { "type": "string" } },
+		"next_step": { "type": "string" }
+	},
+	"additionalProperties": true,
+	"x-state": { "observationBytes": 32768, "idleSteps": 3, "retries": 3 }
+}

@@ -2,7 +2,7 @@
 
 An [omp](https://omp.sh) plugin that runs a procedural skill against an explicit execution state instead of a growing transcript. The design is in `docs/spec.md`; the vocabulary is in `CONTEXT.md`.
 
-Status: skeleton. The extension loads, shows one notice when a session starts, and changes nothing else.
+Status: engage/disengage lifecycle implemented. A procedure skill can engage and disengage; the projection, state core and patch loop are not built yet.
 
 ## Layout
 
@@ -11,6 +11,7 @@ Status: skeleton. The extension loads, shows one notice when a session starts, a
 | `package.json` | Plugin manifest: `"omp": { "extensions": ["./index.ts"] }` |
 | `index.ts` | The extension. omp imports the TypeScript directly; there is no build step. |
 | `index.test.ts` | Unit tests for the factory contract |
+| `skills/recon/` | Bundled sample procedure skill (`SKILL.md` + `state.schema.json`) |
 | `docs/spec.md`, `docs/adr/`, `CONTEXT.md` | Design, decisions, glossary |
 
 ## Develop
@@ -37,17 +38,24 @@ omp plugin doctor   # 0 errors
 
 `link` creates a junction at `~/.omp/plugins/node_modules/omp-skill-state` and an enabled entry in `~/.omp/plugins/omp-plugins.lock.json`. Changes to `index.ts` take effect at the next session start. Remove the link with `omp plugin uninstall omp-skill-state`.
 
-Each new main session then shows one notice:
+Invoke a procedure skill (a skill with a `state.schema.json`) in the main agent and it engages:
 
 ```
-omp-skill-state loaded (inert)
+skill-state: procedure "recon" engaged
+skill-state: history is hidden from the model while engaged; finish with /new
 ```
 
-Subagent sessions stay silent. Nothing else changes.
+The runtime disengages on `/new`, `/clear`, a session switch or fork, a branch, or tree navigation, with one notice naming the trigger:
+
+```
+skill-state: procedure "recon" disengaged (/new)
+```
+
+Skills without a state schema, model-initiated skill reads, and subagent sessions stay silent. Engagement is keyed by session id, so two sessions in one process never see each other's procedures.
 
 ## Extension types
 
-`index.ts` imports `ExtensionAPI` as a type only. At run time omp supplies the real API, so the plugin has no runtime dependency.
+`index.ts` imports `ExtensionAPI` and friends as types only, plus one value import: `InternalUrlRouter` from `@oh-my-pi/pi-coding-agent/internal-urls`. At load time omp rewrites every `@oh-my-pi/pi-coding-agent/*` import from a plugin onto its own bundled copy (the plugin compat layer in the harness, `legacy-pi-compat`), so there is still no separate runtime dependency to install.
 
 The types come from the published `@oh-my-pi/pi-coding-agent` package, pinned to the version of the installed omp (`omp --version`). The published package ships `dist/types/*.d.ts`, which keeps `tsc` fast and independent of the harness source.
 

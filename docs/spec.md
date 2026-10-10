@@ -259,7 +259,8 @@ Every mechanism above is public extension API. Nothing else is touched.
 | keep the head cacheable | return stored custom messages unchanged, so the provider anchors a breakpoint on `t` |
 | own compaction | `session_before_compact`, lazily registered |
 | detect `/clear` | `input` |
-| reset on session change | `session_start`, `session_before_switch`, `session_branch`, `session_tree` |
+| detect a user skill invocation | `message_end`; the harness's own skill-prompt message, checked for `attribution === "user"` |
+| detect a session change | `session_before_switch`, `session_branch`, `session_tree`; `session_start` re-derives engagement instead of resetting it (section 12) |
 | read the schema | `skill://<name>/state.schema.json`, plus `pi.pi.getActiveSkills()` |
 | visibility | `ctx.ui.notify`, `registerMessageRenderer` |
 

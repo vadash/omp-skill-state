@@ -1,6 +1,7 @@
 import type { CustomMessagePayload, SessionBeforeCompactEvent, SessionBeforeCompactResult } from "@oh-my-pi/pi-coding-agent";
 import { currentStepCut } from "./branch";
-import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_MESSAGE_TYPE, parsePatch, renderStateContent } from "./patch";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, renderStateContent, stateMessage } from "./messages";
+import { OPERATING_RULES, parsePatch } from "./patch";
 import { applyPatch } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
 
@@ -101,12 +102,6 @@ export function takeFinalState(procedure: Procedure): ExecutionState | undefined
 
 export function noteProjected(procedure: Procedure, projected: boolean): void {
 	procedure.projected = projected;
-}
-
-// details.state lets later re-derives rebuild t from the branch without
-// re-parsing the content.
-export function stateMessage(state: ExecutionState): CustomMessagePayload {
-	return { customType: STATE_MESSAGE_TYPE, content: renderStateContent(state), display: true, details: { state } };
 }
 
 // The head: the operating rules, P and the current state, one message each so

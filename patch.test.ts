@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { OPERATING_RULES, parsePatch, renderStateContent } from "./patch";
+import { OPERATING_RULES, parsePatch } from "./patch";
 
 test("the operating rules and the parser agree", () => {
 	expect(parsePatch(OPERATING_RULES)).toEqual({ kind: "json", value: { key: "value", obsolete: null } });
@@ -37,14 +37,5 @@ describe("parsePatch", () => {
 
 	test("CRLF line endings are tolerated", () => {
 		expect(parsePatch('```json state\r\n{"goal":"x"}\r\n```')).toEqual({ kind: "json", value: { goal: "x" } });
-	});
-});
-
-describe("renderStateContent", () => {
-	test("renders the state as labelled plain JSON: no fence line, so the harness's elide pass never targets it, and never a patch", () => {
-		const content = renderStateContent({ a: 1 });
-		expect(content.split("\n").some((line) => line.trimStart().startsWith("```"))).toBe(false);
-		expect(content).toContain(JSON.stringify({ a: 1 }, null, 2));
-		expect(parsePatch(content)).toEqual({ kind: "none" });
 	});
 });

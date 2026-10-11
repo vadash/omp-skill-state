@@ -284,6 +284,8 @@ omp-skill-state/
   branch.test.ts        branch read unit tests (bun test)
   procedure.ts          the procedure record and the step policy (patch outcomes, head, compaction)
   procedure.test.ts     step policy unit tests (bun test)
+  messages.ts           the message vocabulary: the head message types, the state renderer and the state message builder
+  messages.test.ts      message vocabulary unit tests (bun test)
   tsconfig.json         typecheck config (tsc --noEmit)
   skills/               optional bundled procedure skills, discovered from the plugin root
   CONTEXT.md            glossary

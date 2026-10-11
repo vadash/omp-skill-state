@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext, Skill } from "@oh-my-pi/pi-coding-agent";
 import extension from "./index";
-import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent } from "./patch";
+import { RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent } from "./messages";
+import { OPERATING_RULES } from "./patch";
 import type { ExecutionState } from "./state";
 import { makeSkill } from "./skill-fixtures";
 

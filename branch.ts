@@ -1,5 +1,5 @@
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE } from "./patch";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE } from "./messages";
 import { isPlainObject } from "./state";
 import type { ExecutionState } from "./state";
 

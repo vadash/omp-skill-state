@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE } from "./patch";
+import { RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE } from "./messages";
+import { OPERATING_RULES } from "./patch";
 import { project } from "./projection";
 import type { AgentMessage } from "./projection";
 

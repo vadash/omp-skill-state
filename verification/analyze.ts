@@ -11,7 +11,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { CompactionEntry, ContextEvent, RawFileEntry } from "@oh-my-pi/pi-coding-agent";
-import { PROCEDURE_SPEC_MESSAGE_TYPE as SPEC, RULES_MESSAGE_TYPE as RULES, STATE_MESSAGE_TYPE as STATE } from "../patch";
+import { PROCEDURE_SPEC_MESSAGE_TYPE as SPEC, RULES_MESSAGE_TYPE as RULES, STATE_MESSAGE_TYPE as STATE } from "../messages";
 
 // The published root entry exports ContextEvent but not the message union itself.
 type AssistantMessage = Extract<ContextEvent["messages"][number], { role: "assistant" }>;

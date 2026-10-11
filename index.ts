@@ -1,8 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Text } from "@oh-my-pi/pi-coding-agent";
 import { SKILL_PROMPT_MESSAGE_TYPE, contentText, scanBranch } from "./branch";
-import { STATE_MESSAGE_TYPE } from "./patch";
-import { compactionFor, headMessages, newProcedure, noteProjected, recordReply, stateMessage, takeFinalState } from "./procedure";
+import { STATE_MESSAGE_TYPE, stateMessage } from "./messages";
+import { compactionFor, headMessages, newProcedure, noteProjected, recordReply, takeFinalState } from "./procedure";
 import type { Procedure } from "./procedure";
 import { project } from "./projection";
 import { isPlainObject, loadStateSchema } from "./state";

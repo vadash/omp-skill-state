@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
-import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent } from "./patch";
-import { compactionFor, headMessages, newProcedure, noteProjected, recordReply, stateMessage, takeFinalState } from "./procedure";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, stateMessage } from "./messages";
+import { OPERATING_RULES } from "./patch";
+import { compactionFor, headMessages, newProcedure, noteProjected, recordReply, takeFinalState } from "./procedure";
 import type { Procedure } from "./procedure";
 import { DEFAULT_PARAMS } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
@@ -215,16 +216,7 @@ describe("recordReply and idle steps", () => {
 	});
 });
 
-describe("head and state messages", () => {
-	test("stateMessage carries the rendered state and details.state for re-derive", () => {
-		expect(stateMessage({ goal: "x" })).toEqual({
-			customType: STATE_MESSAGE_TYPE,
-			content: renderStateContent({ goal: "x" }),
-			display: true,
-			details: { state: { goal: "x" } },
-		});
-	});
-
+describe("headMessages", () => {
 	test("headMessages is the rules, P and the state, in order and byte-equal across calls", () => {
 		const p = procedure({}, { goal: "x" });
 

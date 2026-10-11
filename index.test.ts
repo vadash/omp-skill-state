@@ -112,10 +112,6 @@ function assistantMessage(text: string, toolCallId = "call-1") {
 	};
 }
 
-function toolCall(name: string, id = "t1") {
-	return { type: "tool_call", toolName: name, toolCallId: id, input: { path: "x" } };
-}
-
 let root: string;
 let procedure: Skill;
 let retryProcedure: Skill;
@@ -518,14 +514,6 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 	});
 });
 
-async function patchHarness(skill: Skill) {
-	const { handlers, sent } = harness([skill]);
-	const { ctx, notified, setIdle } = await engage(handlers, skill.name);
-	// sent starts with the three engage asides (rules, P, initial t); patch tests
-	// index past them.
-	return { handlers, sent, ctx, notified, setIdle };
-}
-
 describe("omp-skill-state patch loop", () => {
 	const patch = (json: string) => `\`\`\`json state\n${json}\n\`\`\``;
 
@@ -760,107 +748,105 @@ describe("omp-skill-state patch loop", () => {
 });
 
 describe("omp-skill-state idle disengage", () => {
-	// A projected step: the provider call sees the head, built from the asides
-	// sent so far, then the model answers.
-	async function step(handlers: Map<string, Handler>, sent: Sent[], ctx: ExtensionContext, text: string) {
-		const head = sent.map((s) => ({ role: "custom", ...s.payload }));
-		await handler(handlers, "context")({ type: "context", messages: head }, ctx);
-		await handler(handlers, "assistant_message")(assistantMessage(text), ctx);
+	const patch = (json: string) => `\`\`\`json state\n${json}\n\`\`\``;
+
+	// The first step after engage runs before the head asides land, so its
+	// prompt is not projected and it never counts as idle (spec section 11.4).
+	// Every step after it carries the head.
+	async function projecting(skill: Skill = procedure) {
+		const omp = fakeOmp([skill]);
+		const s = omp.session("s1");
+		await s.invoke(skill.name);
+		expect(await s.step("the first step lands the head")).toBeUndefined();
+		return { omp, s };
 	}
 
 	test("three consecutive no-patch steps disengage; two stay engaged", async () => {
-		const { handlers, sent, ctx, notified } = await patchHarness(procedure);
+		const { s } = await projecting();
 
-		await step(handlers, sent, ctx, "step 1");
-		await step(handlers, sent, ctx, "step 2");
-		expect(notified).toEqual(engageNotices("procedure"));
+		expect(await s.step("step 1")).toBeDefined();
+		await s.step("step 2");
+		expect(s.notices).toEqual(engageNotices("procedure"));
 
-		await step(handlers, sent, ctx, "step 3");
-		expect(notified).toEqual([
-			...engageNotices("procedure"),
-			{ message: 'skill-state: procedure "procedure" disengaged (idle for 3 steps)', type: "info" },
-		]);
+		await s.step("step 3");
+		expect(s.notices).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "idle for 3 steps")]);
 	});
 
 	test("the idle threshold honours x-state idleSteps", async () => {
-		const { handlers, sent, ctx, notified } = await patchHarness(idleProcedure);
+		const { s } = await projecting(idleProcedure);
 
-		await step(handlers, sent, ctx, "step 1");
-		expect(notified).toEqual(engageNotices("idleproc"));
+		await s.step("step 1");
+		expect(s.notices).toEqual(engageNotices("idleproc"));
 
-		await step(handlers, sent, ctx, "step 2");
-		expect(notified).toEqual([
-			...engageNotices("idleproc"),
-			{ message: 'skill-state: procedure "idleproc" disengaged (idle for 2 steps)', type: "info" },
-		]);
+		await s.step("step 2");
+		expect(s.notices).toEqual([...engageNotices("idleproc"), ...disengageNotices("idleproc", "idle for 2 steps")]);
 	});
 
 	test("a step whose prompt carried no head is not an idle step", async () => {
-		const { handlers, sent, ctx, notified } = await patchHarness(idleProcedure);
+		const s = fakeOmp([idleProcedure]).session("s1");
+		await s.invoke("idleproc");
 
-		// The engage asides land after the first provider call; that step never
-		// saw the rules, so the model cannot be idle in it.
-		await handler(handlers, "assistant_message")(assistantMessage("step 1"), ctx);
-		await step(handlers, sent, ctx, "step 2");
-		expect(notified).toEqual(engageNotices("idleproc"));
+		// The engage asides land at the first step boundary; that step never saw
+		// the rules, so the model cannot be idle in it.
+		expect(await s.step("step 1")).toBeUndefined();
+		expect(await s.step("step 2")).toBeDefined();
+		expect(s.notices).toEqual(engageNotices("idleproc"));
 
-		await step(handlers, sent, ctx, "step 3");
-		expect(notified).toEqual([...engageNotices("idleproc"), ...disengageNotices("idleproc", "idle for 2 steps")]);
+		await s.step("step 3");
+		expect(s.notices).toEqual([...engageNotices("idleproc"), ...disengageNotices("idleproc", "idle for 2 steps")]);
 	});
 
 	test("a patch that leaves the state unchanged is an empty patch: nothing stored, and the step is idle", async () => {
-		const { handlers, sent, ctx, notified } = await patchHarness(idleProcedure);
+		const { s } = await projecting(idleProcedure);
 
-		await step(handlers, sent, ctx, '```json state\n{"goal":"x"}\n```');
-		expect(sent).toHaveLength(4);
+		await s.step(patch('{"goal":"x"}'));
+		expect(s.sends).toHaveLength(4);
 
-		await step(handlers, sent, ctx, '```json state\n{"goal":"x"}\n```');
-		expect(sent).toHaveLength(4);
-		expect(notified).toEqual(engageNotices("idleproc"));
+		await s.step(patch('{"goal":"x"}'));
+		expect(s.sends).toHaveLength(4);
+		expect(s.notices).toEqual(engageNotices("idleproc"));
 
-		await step(handlers, sent, ctx, '```json state\n{"goal":"x"}\n```');
-		expect(sent).toHaveLength(4);
-		expect(notified).toEqual([...engageNotices("idleproc"), ...disengageNotices("idleproc", "idle for 2 steps")]);
+		await s.step(patch('{"goal":"x"}'));
+		expect(s.sends).toHaveLength(4);
+		expect(s.storedStates).toEqual([{}, { goal: "x" }]);
+		expect(s.notices).toEqual([...engageNotices("idleproc"), ...disengageNotices("idleproc", "idle for 2 steps")]);
 	});
 
 	test("a valid patch between idle steps resets the idle run", async () => {
-		const { handlers, sent, ctx, notified } = await patchHarness(procedure);
+		const { s } = await projecting();
 
-		await step(handlers, sent, ctx, "no patch");
-		await step(handlers, sent, ctx, "no patch");
-		await step(handlers, sent, ctx, '```json state\n{"goal":"x"}\n```');
-		await step(handlers, sent, ctx, "no patch");
-		await step(handlers, sent, ctx, "no patch");
+		await s.step("no patch");
+		await s.step("no patch");
+		await s.step(patch('{"goal":"x"}'));
+		await s.step("no patch");
+		await s.step("no patch");
 
-		expect(notified).toEqual(engageNotices("procedure"));
+		expect(s.notices).toEqual(engageNotices("procedure"));
 	});
 
 	test("an invalid patch also resets the idle run", async () => {
-		const { handlers, sent, ctx, notified } = await patchHarness(procedure);
+		const { s } = await projecting();
 
-		await step(handlers, sent, ctx, "no patch");
-		await step(handlers, sent, ctx, "no patch");
-		await step(handlers, sent, ctx, '```json state\n{"goal": 42}\n```');
-		await step(handlers, sent, ctx, "no patch");
-		await step(handlers, sent, ctx, "no patch");
+		await s.step("no patch");
+		await s.step("no patch");
+		await s.step(patch('{"goal": 42}'));
+		await s.step("no patch");
+		await s.step("no patch");
 
-		expect(notified).toEqual(engageNotices("procedure"));
+		expect(s.blocked).toHaveLength(1);
+		expect(s.notices).toEqual(engageNotices("procedure"));
 	});
 
 	test("after an idle disengage the step is ordinary", async () => {
-		const { handlers, sent, ctx, notified } = await patchHarness(idleProcedure);
+		const { s } = await projecting(idleProcedure);
 
-		await step(handlers, sent, ctx, "step 1");
-		await step(handlers, sent, ctx, "step 2");
-		expect(notified).toEqual([
-			...engageNotices("idleproc"),
-			...disengageNotices("idleproc", "idle for 2 steps"),
-		]);
+		await s.step("step 1");
+		await s.step("step 2");
+		expect(s.notices).toEqual([...engageNotices("idleproc"), ...disengageNotices("idleproc", "idle for 2 steps")]);
 
-		const blocked = await handler(handlers, "tool_call")(toolCall("read"), ctx);
-		expect(blocked).toBeUndefined();
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), ctx);
-		expect(sent.map((s) => s.payload.customType)).toEqual(engageAsideTypes);
+		await s.step(patch('{"goal":"x"}'));
+		expect(s.blocked).toEqual([]);
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
 	});
 });
 

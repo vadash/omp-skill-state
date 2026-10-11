@@ -58,6 +58,7 @@ interface Internals {
 export interface FakeOmp {
 	session(id: string, opts?: { kind?: "main" | "sub"; branch?: SessionEntry[] }): FakeSession;
 	renderers: Map<string, unknown>;
+	registered(event: string): boolean;
 }
 
 export function fakeOmp(skills: Skill[]): FakeOmp {
@@ -78,6 +79,7 @@ export function fakeOmp(skills: Skill[]): FakeOmp {
 	const sessions = new Map<string, FakeSession>();
 	return {
 		renderers: internals.renderers,
+		registered: (event: string) => internals.handlers.has(event),
 		session(id, opts = {}) {
 			let session = sessions.get(id);
 			if (session === undefined) {
@@ -228,8 +230,8 @@ export class FakeSession {
 
 	// One compaction: the harness fires session_before_compact, applies the
 	// returned cut to the branch, then fires session_compact. No summarizer.
-	async compact(preparation: { firstKeptEntryId?: string; tokensBefore?: number } = {}): Promise<CompactionOutput | undefined> {
-		const prep = { firstKeptEntryId: preparation.firstKeptEntryId ?? this.branch.at(-1)?.id ?? "e0", tokensBefore: preparation.tokensBefore ?? 0 };
+	async compact(preparation: { firstKeptEntryId?: string; tokensBefore?: number; previousPreserveData?: unknown } = {}): Promise<CompactionOutput | undefined> {
+		const prep = { firstKeptEntryId: preparation.firstKeptEntryId ?? this.branch.at(-1)?.id ?? "e0", tokensBefore: preparation.tokensBefore ?? 0, ...(preparation.previousPreserveData === undefined ? {} : { previousPreserveData: preparation.previousPreserveData }) };
 		const out = (await this.dispatch("session_before_compact", {
 			type: "session_before_compact",
 			preparation: prep,

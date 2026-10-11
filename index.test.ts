@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, jest, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { ExtensionAPI, ExtensionContext, Skill } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, SessionEntry, Skill } from "@oh-my-pi/pi-coding-agent";
 import { fakeOmp, invocationEntry, procedureBranch, specEntry, stateEntry } from "./fake-session";
 import extension from "./index";
 import { RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent, stateMessage } from "./messages";
@@ -851,134 +851,123 @@ describe("omp-skill-state idle disengage", () => {
 });
 
 describe("omp-skill-state compaction ownership", () => {
-	// The shape SessionBeforeCompactResult takes through this suite's seams; the
-	// harness stores handlers as unknown-taking functions, so the event shape and
-	// result type live here once instead of at every call.
-	interface CompactionOutput {
-		compaction?: {
-			summary: string;
-			shortSummary?: string;
-			firstKeptEntryId: string;
-			tokensBefore: number;
-			preserveData?: unknown;
-		};
-	}
-
-	async function compact(
-		handlers: Map<string, Handler>,
-		ctx: ExtensionContext,
-		preparation: Record<string, unknown>,
-		branchEntries: unknown[] = [],
-	): Promise<CompactionOutput | undefined> {
-		const result = await handler(handlers, "session_before_compact")(
-			{ type: "session_before_compact", preparation, signal: new AbortController().signal, branchEntries },
-			ctx,
-		);
-		return result as CompactionOutput | undefined;
-	}
-
-	// A branch mid-step: the latest assistant message is the step's pinned
-	// message, and its tool result sits after it, so a cut there keeps the pair.
-	const midStepBranch = [
-		{ type: "custom_message", id: "h1", customType: RULES_MESSAGE_TYPE },
-		{ type: "message", id: "a1", message: { role: "assistant" } },
-		{ type: "message", id: "r1", message: { role: "toolResult" } },
-		{ type: "custom_message", id: "s1", customType: STATE_MESSAGE_TYPE },
-		{ type: "message", id: "a2", message: { role: "assistant" } },
-		{ type: "custom", id: "x1", customType: "tool_execution_start" },
-		{ type: "message", id: "r2", message: { role: "toolResult" } },
-	];
+	const patch = (json: string) => `\`\`\`json state\n${json}\n\`\`\``;
 
 	test("registers session_before_compact lazily on the first engage, never at load", async () => {
-		const { handlers } = harness([procedure]);
-		expect(handlers.has("session_before_compact")).toBe(false);
+		const omp = fakeOmp([procedure]);
+		expect(omp.registered("session_before_compact")).toBe(false);
 
-		await engage(handlers, "procedure");
+		await omp.session("s1").invoke("procedure");
 
-		expect(handlers.has("session_before_compact")).toBe(true);
+		expect(omp.registered("session_before_compact")).toBe(true);
 	});
 
 	test("engaged compaction summarises to the state and cuts at the current step, not at the harness's turn-sized tail", async () => {
-		const { handlers, sent } = harness([procedure]);
-		const { ctx } = await engage(handlers, "procedure");
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"g"}\n```'), ctx);
+		const omp = fakeOmp([procedure]);
+		// The branch already holds an earlier step, so the harness's proposed cut
+		// and that earlier assistant message must both lose to the current step.
+		const earlier = [
+			{ type: "custom_message", id: "h1", customType: RULES_MESSAGE_TYPE },
+			{ type: "message", id: "a1", message: { role: "assistant" } },
+			{ type: "message", id: "r1", message: { role: "toolResult" } },
+		] as unknown as SessionEntry[];
+		const s = omp.session("s1", { branch: earlier });
+		await s.invoke("procedure");
+		await s.step(patch('{"goal":"g"}'));
 
-		const result = await compact(handlers, ctx, { firstKeptEntryId: "h1", tokensBefore: 4321 }, midStepBranch);
+		const pinned = s.branch.filter((entry) => entry.type === "message" && entry.message?.role === "assistant").at(-1)!;
+		const result = await s.compact({ firstKeptEntryId: "h1", tokensBefore: 4321 });
 
 		const compaction = result?.compaction;
-		expect(compaction?.firstKeptEntryId).toBe("a2");
+		expect(compaction?.firstKeptEntryId).toBe(pinned.id);
+		expect(compaction?.firstKeptEntryId).not.toBe("a1");
 		expect(compaction?.tokensBefore).toBe(4321);
 		expect(compaction?.summary).toContain('Execution state of procedure "procedure"');
 		expect(compaction?.summary).toContain(JSON.stringify({ goal: "g" }, null, 2));
 		expect(compaction?.shortSummary).toContain('"procedure"');
 		expect(compaction?.preserveData).toEqual({ state: { goal: "g" } });
-		// No summarizer step: compaction adds no sends beyond the patch loop's own.
-		expect(sent.map((s) => s.payload.customType)).toEqual([...engageAsideTypes, STATE_MESSAGE_TYPE]);
+		// No summarizer step: session_before_compact itself sends nothing; the
+		// three sends after the patch loop's are session_compact's head re-send.
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual([...engageAsideTypes, STATE_MESSAGE_TYPE, ...engageAsideTypes]);
 	});
 
 	test("a branch with no assistant message yet falls back to the harness's cut", async () => {
-		const { handlers } = harness([procedure]);
-		const { ctx } = await engage(handlers, "procedure");
+		const omp = fakeOmp([procedure]);
+		const seed = [{ type: "custom_message", id: "h1", customType: RULES_MESSAGE_TYPE }] as unknown as SessionEntry[];
+		const s = omp.session("s1", { branch: seed });
+		await s.invoke("procedure");
 
-		const result = await compact(handlers, ctx, { firstKeptEntryId: "e7", tokensBefore: 10 }, [midStepBranch[0]]);
+		const result = await s.compact({ firstKeptEntryId: "e7", tokensBefore: 10 });
 
 		expect(result?.compaction?.firstKeptEntryId).toBe("e7");
 	});
 
 	test("a second compaction carries the live state, not an echo of previousPreserveData", async () => {
-		const { handlers } = harness([procedure]);
-		const { ctx } = await engage(handlers, "procedure");
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"g"}\n```'), ctx);
+		const omp = fakeOmp([procedure]);
+		const s = omp.session("s1");
+		await s.invoke("procedure");
+		await s.step(patch('{"goal":"g"}'));
 
-		const first = await compact(handlers, ctx, { firstKeptEntryId: "e7", tokensBefore: 4321 });
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"step":2}\n```'), ctx);
-		const second = await compact(handlers, ctx, {
-			firstKeptEntryId: "e9",
-			tokensBefore: 5000,
-			previousPreserveData: first?.compaction?.preserveData,
-		});
+		const first = await s.compact({ firstKeptEntryId: "e7", tokensBefore: 4321 });
+		await s.step(patch('{"step":2}'));
+		const second = await s.compact({ firstKeptEntryId: "e9", tokensBefore: 5000, previousPreserveData: first?.compaction?.preserveData });
 
 		expect(first?.compaction?.preserveData).toEqual({ state: { goal: "g" } });
-		expect(second?.compaction?.firstKeptEntryId).toBe("e9");
+		expect(second?.compaction?.tokensBefore).toBe(5000);
 		expect(second?.compaction?.preserveData).toEqual({ state: { goal: "g", step: 2 } });
 	});
 
 	test("after a compaction the head is sent again, byte-equal, so the projection survives the cut", async () => {
-		const { handlers, sent } = harness([procedure]);
-		const { ctx } = await engage(handlers, "procedure");
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"g"}\n```'), ctx);
+		const omp = fakeOmp([procedure]);
+		const s = omp.session("s1");
+		await s.invoke("procedure");
+		await s.step(patch('{"goal":"g"}'));
 
-		await handler(handlers, "session_compact")({ type: "session_compact", compactionEntry: {}, fromExtension: true }, ctx);
+		await s.compact();
 
-		expect(sent.map((s) => s.payload.customType)).toEqual([...engageAsideTypes, STATE_MESSAGE_TYPE, ...engageAsideTypes]);
-		expect(sent.slice(4).map((s) => s.payload)).toEqual([sent[0].payload, sent[1].payload, sent[3].payload]);
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual([...engageAsideTypes, STATE_MESSAGE_TYPE, ...engageAsideTypes]);
+		expect(s.sends.slice(4).map((sent) => sent.payload)).toEqual([s.sends[0]!.payload, s.sends[1]!.payload, s.sends[3]!.payload]);
 		// Mid-run: asides, so the copies land before the next provider call.
-		expect(sent.slice(4).map((s) => s.options)).toEqual([{ deliverAs: "aside" }, { deliverAs: "aside" }, { deliverAs: "aside" }]);
+		expect(s.sends.slice(4).map((sent) => sent.options)).toEqual([{ deliverAs: "aside" }, { deliverAs: "aside" }, { deliverAs: "aside" }]);
 
-		// The copies alone are a complete head.
-		const kept = sent.slice(4).map((s) => ({ role: "custom", ...s.payload }));
-		expect(await handler(handlers, "context")({ type: "context", messages: kept }, ctx)).toEqual({ messages: kept });
+		// The cut kept the pre-compaction head, so the step right after the
+		// compaction still projects, pinning the step before as its observation.
+		const projected = await s.step("continue");
+		expect(projected?.slice(0, 3).map((message) => (message as { customType?: string }).customType)).toEqual(engageAsideTypes);
+		expect(projected?.[0] as Record<string, unknown>).toMatchObject(s.sends[0]!.payload);
+		expect(projected?.[1] as Record<string, unknown>).toMatchObject(s.sends[1]!.payload);
+		expect(projected?.[2] as Record<string, unknown>).toMatchObject(s.sends[3]!.payload);
+		expect(projected?.slice(3)).toHaveLength(2);
+
+		// The copies flushed at that step boundary, so the next provider call
+		// carries them: the head is complete again after the cut.
+		const after = await s.step("done", { tools: [] });
+		expect(after?.[0] as Record<string, unknown>).toMatchObject(s.sends[4]!.payload);
+		expect(after?.[1] as Record<string, unknown>).toMatchObject(s.sends[5]!.payload);
+		expect(after?.[2] as Record<string, unknown>).toMatchObject(s.sends[6]!.payload);
+		expect(after?.slice(3)).toHaveLength(2);
 	});
 
 	test("a compaction while idle re-sends the head as next-turn messages, which wake no turn", async () => {
-		const { handlers, sent } = harness([procedure]);
-		const { ctx } = mockCtx("s1", "main", [], true);
-		await handler(handlers, "message_end")({ type: "message_end", message: skillPrompt("procedure") }, ctx);
+		const omp = fakeOmp([procedure]);
+		const s = omp.session("s1");
+		s.setIdle(true);
+		await s.invoke("procedure");
 
-		await handler(handlers, "session_compact")({ type: "session_compact", compactionEntry: {}, fromExtension: true }, ctx);
+		await s.compact();
 
-		expect(sent).toHaveLength(6);
-		expect(sent.slice(3).map((s) => s.options)).toEqual([{ deliverAs: "nextTurn" }, { deliverAs: "nextTurn" }, { deliverAs: "nextTurn" }]);
+		expect(s.sends).toHaveLength(6);
+		expect(s.sends.slice(3).map((sent) => sent.options)).toEqual([{ deliverAs: "nextTurn" }, { deliverAs: "nextTurn" }, { deliverAs: "nextTurn" }]);
 	});
 
 	test("a re-derived engagement re-heads with the P and state stored on the branch", async () => {
-		const { handlers, sent } = harness([procedure]);
-		const { ctx } = mockCtx("s1", "main", procedureBranch("procedure", {}, { goal: "x" }));
-		await handler(handlers, "session_start")({ type: "session_start" }, ctx);
+		const omp = fakeOmp([procedure]);
+		const s = omp.session("s1", { branch: procedureBranch("procedure", {}, { goal: "x" }) });
+		await s.start();
 
-		await handler(handlers, "session_compact")({ type: "session_compact", compactionEntry: {}, fromExtension: true }, ctx);
+		await s.compact();
 
-		expect(sent.map((s) => s.payload)).toEqual([
+		expect(s.sends.map((sent) => sent.payload)).toEqual([
 			{ customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false },
 			{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: "Running skill procedure", display: false, details: { name: "procedure" } },
 			{ customType: STATE_MESSAGE_TYPE, content: renderStateContent({ goal: "x" }), display: true, details: { state: { goal: "x" } } },
@@ -986,19 +975,21 @@ describe("omp-skill-state compaction ownership", () => {
 	});
 
 	test("yields to the harness default when never engaged, in a subagent, or after disengage", async () => {
-		const { handlers } = harness([procedure]);
+		const omp = fakeOmp([procedure]);
 		// Engaging s2 registers the process-wide handler; s1 has never engaged.
-		await engage(handlers, "procedure", "s2");
-		const never = mockCtx("s1");
-		expect(await compact(handlers, never.ctx, { firstKeptEntryId: "e1", tokensBefore: 1 })).toBeUndefined();
+		await omp.session("s2").invoke("procedure");
+		const never = omp.session("s1");
+		expect(await never.compact({ firstKeptEntryId: "e1", tokensBefore: 1 })).toBeUndefined();
 
-		const { ctx, notified } = await engage(handlers, "procedure");
-		const sub = mockCtx("s1", "sub");
-		expect(await compact(handlers, sub.ctx, { firstKeptEntryId: "e2", tokensBefore: 2 })).toBeUndefined();
+		const sub = omp.session("s3", { kind: "sub" });
+		await sub.invoke("procedure");
+		expect(await sub.compact({ firstKeptEntryId: "e2", tokensBefore: 2 })).toBeUndefined();
 
-		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "new" }, ctx);
-		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/new")]);
-		expect(await compact(handlers, ctx, { firstKeptEntryId: "e3", tokensBefore: 3 })).toBeUndefined();
+		const s = omp.session("s4");
+		await s.invoke("procedure");
+		await s.switchTo(omp.session("s5"), "new");
+		expect(s.notices).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/new")]);
+		expect(await s.compact({ firstKeptEntryId: "e3", tokensBefore: 3 })).toBeUndefined();
 	});
 });
 

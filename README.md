@@ -15,7 +15,7 @@ Status: implemented and verified against a long real session (`docs/verification
 | `messages.ts` | The custom message vocabulary: the head message types, the state renderer and the state message builder. |
 | `fake-session.ts` | The fake omp session the adapter tests drive: branch, delivery timing, sends and notices. |
 | `index.test.ts`, `*.test.ts` | Unit tests for the factory contract, the step policy, the branch reads, the state merge, the patch parser and the projection |
-| `skills/recon/` | Bundled mode-entry procedure skill (`SKILL.md` + `state.schema.json`): it carries no task of its own; the task is the text given with the invocation |
+| `skills/zstate/` | Bundled mode-entry procedure skill (`SKILL.md` + `state.schema.json`): it carries no task of its own; the task is the text given with the invocation, and `disable-model-invocation` keeps it user-invoked only |
 | `docs/spec.md`, `docs/adr/`, `CONTEXT.md` | Design, decisions, glossary |
 | `docs/verification.md`, `verification/` | The long-session integration run: findings, and the session analyzer plus the config that drives it |
 
@@ -43,17 +43,17 @@ omp plugin doctor   # 0 errors
 
 `link` creates a junction at `~/.omp/plugins/node_modules/omp-skill-state` and an enabled entry in `~/.omp/plugins/omp-plugins.lock.json`. Changes to `index.ts` take effect at the next session start. Remove the link with `omp plugin uninstall omp-skill-state`.
 
-Invoke a procedure skill (a skill with a `state.schema.json`) in the main agent and it engages. The bundled `recon` skill takes its task from the invocation text, e.g. `/skill:recon read skill://implement and work on issue 67`:
+Invoke a procedure skill (a skill with a `state.schema.json`) in the main agent and it engages. The bundled `zstate` skill takes its task from the invocation text, e.g. `/skill:zstate read skill://implement and work on issue 67`:
 
 ```
-skill-state: procedure "recon" engaged
+skill-state: procedure "zstate" engaged
 skill-state: history is hidden from the model while engaged; finish with /new
 ```
 
 The runtime disengages on `/new`, `/clear`, a session switch or fork, a branch, or tree navigation, with one notice naming the trigger:
 
 ```
-skill-state: procedure "recon" disengaged (/new)
+skill-state: procedure "zstate" disengaged (/new)
 ```
 
 Skills without a state schema, model-initiated skill reads, and subagent sessions stay silent. Engagement is keyed by session id, so two sessions in one process never see each other's procedures.

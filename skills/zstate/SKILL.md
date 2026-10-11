@@ -1,9 +1,10 @@
 ---
-name: recon
-description: "Engage the skill-state runtime for the task given in the same invocation. While it runs, every model call sees only the skill text, the execution state and the current step's observation, never the growing transcript; the model rewrites the state each step, so a long task keeps a fixed prompt size and carries no stale facts. Invoke it first and give the task in the same prompt, for example /skill:recon <task>."
+name: zstate
+disable-model-invocation: true
+description: "Engage the skill-state runtime for the task given in the same invocation. While it runs, every model call sees only the skill text, the execution state and the current step's observation, never the growing transcript; the model rewrites the state each step, so a long task keeps a fixed prompt size and carries no stale facts. Invoke it first and give the task in the same prompt, for example /skill:zstate <task>."
 ---
 
-# Recon: skill-state mode
+# Zstate: skill-state mode
 
 This skill defines no task. It engages the skill-state runtime and tells you how to work inside it.
 

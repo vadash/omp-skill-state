@@ -13,7 +13,7 @@ A skill that declares a state schema. Only these can start a procedure.
 _Avoid_: stateful skill, state skill
 
 **Mode-entry skill**:
-A procedure skill whose spec carries no task of its own. The task is the text the user gives with the invocation, and the spec says only how to work under the runtime. The bundled `recon` skill is one.
+A procedure skill whose spec carries no task of its own. The task is the text the user gives with the invocation, and the spec says only how to work under the runtime. The bundled `zstate` skill is one.
 _Avoid_: wrapper skill, meta skill, generic skill
 
 **Procedure spec**:

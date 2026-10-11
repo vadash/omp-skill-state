@@ -399,20 +399,20 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		expect(a.notices).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "tree navigation")]);
 	});
 
-	test("the bundled recon skill engages end to end", async () => {
-		const baseDir = path.join(import.meta.dir, "skills", "recon");
-		const recon: Skill = {
-			name: "recon",
+	test("the bundled zstate skill engages end to end", async () => {
+		const baseDir = path.join(import.meta.dir, "skills", "zstate");
+		const zstate: Skill = {
+			name: "zstate",
 			description: "bundled sample procedure skill",
 			filePath: path.join(baseDir, "SKILL.md"),
 			baseDir,
 			source: "test",
 		};
-		const s = fakeOmp([recon]).session("s1");
+		const s = fakeOmp([zstate]).session("s1");
 
-		await s.invoke("recon");
+		await s.invoke("zstate");
 
-		expect(s.notices).toEqual(engageNotices("recon"));
+		expect(s.notices).toEqual(engageNotices("zstate"));
 	});
 });
 

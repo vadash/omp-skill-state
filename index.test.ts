@@ -2,86 +2,15 @@ import { afterAll, beforeAll, describe, expect, jest, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { ExtensionAPI, ExtensionContext, SessionEntry, Skill } from "@oh-my-pi/pi-coding-agent";
+import type { SessionEntry, Skill } from "@oh-my-pi/pi-coding-agent";
 import { fakeOmp, invocationEntry, procedureBranch, specEntry, stateEntry } from "./fake-session";
-import extension from "./index";
 import { RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent, stateMessage } from "./messages";
 import { OPERATING_RULES } from "./patch";
 import type { ExecutionState } from "./state";
 import { makeSkill } from "./skill-fixtures";
 
-type Handler = (event: unknown, ctx: unknown) => unknown;
-
 // Engage sends exactly these three asides; the patch loop must add nothing else.
 const engageAsideTypes = [RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE];
-
-function skillPrompt(name: string, attribution: "user" | "agent" = "user") {
-	return {
-		role: "custom",
-		customType: "skill-prompt",
-		content: `Running skill ${name}`,
-		display: true,
-		timestamp: Date.now(),
-		details: { name },
-		attribution,
-	};
-}
-
-// One pi.sendMessage call as the factory made it.
-interface Sent {
-	payload: Record<string, unknown>;
-	options: Record<string, unknown>;
-}
-
-function recordingPi(skills: Skill[]) {
-	const handlers = new Map<string, Handler>();
-	const sent: Sent[] = [];
-	const renderers = new Map<string, unknown>();
-	const pi = {
-		on(event: string, handler: Handler) {
-			handlers.set(event, handler);
-		},
-		sendMessage(payload: Record<string, unknown>, options: Record<string, unknown> = {}) {
-			sent.push({ payload, options });
-		},
-		registerMessageRenderer(type: string, renderer: unknown) {
-			renderers.set(type, renderer);
-		},
-		pi: { getActiveSkills: () => skills },
-	} as unknown as ExtensionAPI;
-	return { pi, handlers, sent, renderers };
-}
-
-function harness(skills: Skill[]) {
-	const { pi, handlers, sent, renderers } = recordingPi(skills);
-	extension(pi);
-	return { handlers, sent, renderers };
-}
-
-function handler(handlers: Map<string, Handler>, event: string): Handler {
-	const h = handlers.get(event);
-	if (!h) throw new Error(`factory did not register a ${event} handler`);
-	return h;
-}
-
-function mockCtx(sessionId: string, kind: "main" | "sub" = "main", branch: unknown[] = [], idle = false) {
-	const notified: Array<{ message: string; type?: string }> = [];
-	const live = { idle };
-	const ctx = {
-		agent: { kind },
-		ui: {
-			notify(message: string, type?: string) {
-				notified.push({ message, type });
-			},
-		},
-		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch },
-		isIdle: () => live.idle,
-	} as unknown as ExtensionContext;
-	const setIdle = (value: boolean) => {
-		live.idle = value;
-	};
-	return { ctx, notified, setIdle };
-}
 
 const engageNotices = (name: string) => [
 	{ message: `skill-state: procedure "${name}" engaged`, type: "info" },
@@ -90,27 +19,6 @@ const engageNotices = (name: string) => [
 const disengageNotices = (name: string, trigger: string) => [
 	{ message: `skill-state: procedure "${name}" disengaged (${trigger})`, type: "info" },
 ];
-
-// A live step: the model's text plus one tool call, which is what keeps the
-// run going. A step without a tool call is the run's last.
-function assistantMessage(text: string, toolCallId = "call-1") {
-	return {
-		type: "assistant_message",
-		message: {
-			role: "assistant",
-			content: [
-				{ type: "text", text },
-				{ type: "toolCall", id: toolCallId, name: "read", arguments: { path: "x" } },
-			],
-			api: "anthropic-messages",
-			provider: "anthropic",
-			model: "m",
-			usage: {},
-			stopReason: "toolUse",
-			timestamp: Date.now(),
-		},
-	};
-}
 
 let root: string;
 let procedure: Skill;
@@ -147,12 +55,6 @@ beforeAll(async () => {
 afterAll(async () => {
 	await rm(root, { recursive: true, force: true });
 });
-
-async function engage(handlers: Map<string, Handler>, name: string, sessionId = "s1", kind: "main" | "sub" = "main") {
-	const { ctx, notified, setIdle } = mockCtx(sessionId, kind);
-	await handler(handlers, "message_end")({ type: "message_end", message: skillPrompt(name) }, ctx);
-	return { ctx, notified, setIdle };
-}
 
 describe("omp-skill-state engage/disengage lifecycle", () => {
 	const patch = (json: string) => `\`\`\`json state\n${json}\n\`\`\``;
@@ -994,58 +896,36 @@ describe("omp-skill-state compaction ownership", () => {
 });
 
 describe("omp-skill-state projection (context seam)", () => {
-	function contextEvent(messages: unknown[]) {
-		return { type: "context", messages };
-	}
-
-	function projected(out: unknown) {
-		return (out as { messages: Array<Record<string, unknown>> } | undefined)?.messages;
-	}
-
 	test("returns undefined for a subagent session and when not engaged", async () => {
-		const { handlers } = harness([procedure]);
-		const sub = mockCtx("s1", "sub");
-		const main = mockCtx("s2");
+		const omp = fakeOmp([procedure]);
+		expect(await omp.session("s1").step("ordinary")).toBeUndefined();
 
-		expect(await handler(handlers, "context")(contextEvent([skillPrompt("procedure")]), sub.ctx)).toBeUndefined();
-		expect(await handler(handlers, "context")(contextEvent([skillPrompt("procedure")]), main.ctx)).toBeUndefined();
+		const sub = omp.session("s2", { kind: "sub" });
+		await sub.invoke("procedure");
+		expect(await sub.step("ordinary")).toBeUndefined();
 	});
 
 	test("engaged: projects head plus the current step and honours x-state observationBytes", async () => {
-		const { handlers, sent } = harness([smallProcedure]);
-		const { ctx } = await engage(handlers, "smallcap");
-		// As payloads lack role: the harness normalization adds it before the
-		// message reaches context, so the fixture does too.
-		const headCustoms = sent.slice(0, 3).map((s) => ({ role: "custom", ...s.payload }));
-		const call = {
-			...assistantMessage("working").message,
-			content: [{ type: "toolCall", id: "call-7", name: "read", arguments: {} }],
-		};
-		const result = {
-			role: "toolResult",
-			toolCallId: "call-7",
-			toolName: "read",
-			content: [{ type: "text", text: "y".repeat(1000) }],
-			isError: false,
-			timestamp: Date.now(),
-		};
-		const messages = [
-			{ role: "user", content: "old turn", timestamp: Date.now() },
-			assistantMessage("old reply").message,
-			...headCustoms,
-			call,
-			result,
-		];
-		const out = await handler(handlers, "context")(contextEvent(messages), ctx);
-		const outMessages = projected(out)!;
+		const omp = fakeOmp([smallProcedure]);
+		const s = omp.session("s1");
+		await s.invoke("smallcap");
+		// The first step runs before the engage asides land; from the second one
+		// the projection pins the step before as the observation.
+		await s.step("warm-up");
+		await s.step("working", { results: ["y".repeat(1000)] });
 
-		expect(outMessages).toHaveLength(5);
-		expect(outMessages[0]).toBe(headCustoms[0]);
-		expect(outMessages[1]).toBe(headCustoms[1]);
-		expect(outMessages[2]).toBe(headCustoms[2]);
-		expect(outMessages[3]).toBe(call);
-		const capped = outMessages[4] as { content: Array<{ type: string; text?: string }>; toolCallId: string };
-		expect(capped.toolCallId).toBe("call-7");
+		const prompt = await s.step("done", { tools: [] });
+		const input = s.lastContextMessages!;
+
+		expect(prompt).toHaveLength(5);
+		// The head and the pinned call are the stored objects themselves: byte
+		// equality with history is what anchors the provider cache prefix.
+		expect(prompt?.[0]).toBe(input[3]);
+		expect(prompt?.[1]).toBe(input[4]);
+		expect(prompt?.[2]).toBe(input[5]);
+		expect(prompt?.[3]).toBe(input[6]);
+		const capped = prompt?.[4] as { content: Array<{ type: string; text?: string }>; toolCallId: string };
+		expect(capped.toolCallId).toBe((input[7] as { toolCallId: string }).toolCallId);
 		const total = capped.content.reduce(
 			(sum, block) => sum + (block.type === "text" ? Buffer.byteLength(block.text ?? "") : 0),
 			0,
@@ -1055,41 +935,31 @@ describe("omp-skill-state projection (context seam)", () => {
 	});
 
 	test("engaged: a user turn projects head plus the user message", async () => {
-		const { handlers, sent } = harness([procedure]);
-		const { ctx } = await engage(handlers, "procedure");
-		const headCustoms = sent.slice(0, 3).map((s) => ({ role: "custom", ...s.payload }));
-		const turn = { role: "user", content: "go on", timestamp: Date.now() };
-		const messages = [...headCustoms, turn];
+		const omp = fakeOmp([procedure]);
+		const s = omp.session("s1");
+		await s.invoke("procedure");
+		await s.step("warm-up");
 
-		const out = await handler(handlers, "context")(contextEvent(messages), ctx);
-		const outMessages = projected(out)!;
+		const prompt = await s.userTurn("go on");
 
-		expect(outMessages).toHaveLength(4);
-		expect(outMessages[3]).toBe(turn);
+		expect(prompt).toHaveLength(4);
+		expect(prompt?.[0]).toBe(s.lastContextMessages?.[3]);
+		expect(prompt?.[3]).toBe(s.lastContextMessages?.at(-1));
 	});
 
-	test("the context handler never mutates event.messages, even when it truncates", async () => {
-		const { handlers, sent } = harness([smallProcedure]);
-		const { ctx } = await engage(handlers, "smallcap");
-		const headCustoms = sent.slice(0, 3).map((s) => ({ role: "custom", ...s.payload }));
-		const call = {
-			...assistantMessage("working").message,
-			content: [{ type: "toolCall", id: "call-7", name: "read", arguments: {} }],
-		};
-		const result = {
-			role: "toolResult",
-			toolCallId: "call-7",
-			toolName: "read",
-			content: [{ type: "text", text: "y".repeat(1000) }],
-			isError: false,
-			timestamp: Date.now(),
-		};
-		const messages = [...headCustoms, call, result];
-		const snapshot = structuredClone(messages);
+	test("the projection never mutates the stored transcript, even when it truncates", async () => {
+		const omp = fakeOmp([smallProcedure]);
+		const s = omp.session("s1");
+		await s.invoke("smallcap");
+		await s.step("warm-up");
+		await s.step("working", { results: ["y".repeat(1000)] });
 
-		const out = await handler(handlers, "context")(contextEvent(messages), ctx);
+		const stored = s.branch.filter((entry) => entry.type === "message").at(-1)!;
+		const message = stored.message as { content: unknown[] };
+		const snapshot = structuredClone(message.content);
+		const prompt = await s.step("done", { tools: [] });
 
-		expect(projected(out)![4]).not.toBe(result);
-		expect(messages).toEqual(snapshot);
+		expect(message.content).toEqual(snapshot);
+		expect(prompt?.[4]).not.toBe(message);
 	});
 });

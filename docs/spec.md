@@ -161,6 +161,8 @@ Caching. Prompt caching is positional: a breakpoint caches every byte before it,
 
 The model emits the patch as a fenced `json` block in its assistant text, labelled with a fixed marker, alongside its tool calls.
 
+Because the first step runs before the engage asides land (section 11), the operating rules are absent from the model's first prompt: the marker reaches the model only through `P`. A procedure spec that does not state the fence itself loses its bootstrap patch silently — `parsePatch` finds no block, the step is a legal empty patch, and nothing blocks or notifies. The bundled `zstate` skill therefore carries the fence format in its own text.
+
 Ordering, and why it works:
 
 1. `assistant_message` fires once per finalized assistant message, before the message reaches agent context, persistence, `message_end`, or tool dispatch.

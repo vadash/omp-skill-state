@@ -8,7 +8,9 @@ description: "Engage the skill-state runtime for the task given in the same invo
 
 This skill defines no task. It engages the skill-state runtime and tells you how to work inside it.
 
-The task is the `User:` line at the end of this prompt. In your first state block, copy it verbatim into `goal` and set `working_dir`. If there is no `User:` line, there is no task: say so and stop.
+The task is the `User:` line at the end of this prompt. In your first state block, copy it verbatim into `goal`, set `working_dir`, and set `next_step` to your first action. If there is no `User:` line, there is no task: say so and stop.
+
+A state block is a fenced code block. Its opening line is ` ```json state ` — the label word `state` after `json` is required — and its closing line is ` ``` `. A plain ` ```json ` fence is not a patch: the runtime ignores it silently. The runtime's operating rules reach you one step late, so this paragraph is the format for the first block; the rules repeat it from the next step.
 
 Past conversation is hidden from you while this runs. The execution state is the only record of the past; the runtime's operating rules say how to edit it. A tool result is one step's observation and is gone from the next prompt, so anything that must outlive the step goes into the state in that same step.
 
@@ -21,6 +23,8 @@ Loop:
 3. Do that action.
 4. Record the outcome: facts into `findings`, new requirements into `constraints`, what you still do not know into `open_questions`, and the remaining actions into `plan`. One string per item, phrased to stand alone.
 5. Return to step 1.
+
+The patch merges into the state: a non-null value sets its key, `null` deletes it, a key you omit is kept. Arrays are set whole, never merged: to add one item, resend the complete array, so resend an array only when it changed. Drop findings that later facts supersede: the state holds what is true now, not a log of what you did.
 
 Finish when the task is done: reply with no tool call and give the result from the state alone. If a fact is not in the state, you do not know it.
 

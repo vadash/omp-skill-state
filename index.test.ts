@@ -5,7 +5,7 @@ import path from "node:path";
 import type { ExtensionAPI, ExtensionContext, Skill } from "@oh-my-pi/pi-coding-agent";
 import { fakeOmp, invocationEntry, procedureBranch, specEntry, stateEntry } from "./fake-session";
 import extension from "./index";
-import { RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent } from "./messages";
+import { RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent, stateMessage } from "./messages";
 import { OPERATING_RULES } from "./patch";
 import type { ExecutionState } from "./state";
 import { makeSkill } from "./skill-fixtures";
@@ -92,7 +92,7 @@ const disengageNotices = (name: string, trigger: string) => [
 ];
 
 // A live step: the model's text plus one tool call, which is what keeps the
-// run going. A step without a tool call is the run's last; see finalMessage.
+// run going. A step without a tool call is the run's last.
 function assistantMessage(text: string, toolCallId = "call-1") {
 	return {
 		type: "assistant_message",
@@ -110,11 +110,6 @@ function assistantMessage(text: string, toolCallId = "call-1") {
 			timestamp: Date.now(),
 		},
 	};
-}
-
-function finalMessage(text: string) {
-	const step = assistantMessage(text);
-	return { ...step, message: { ...step.message, content: [{ type: "text", text }], stopReason: "stop" } };
 }
 
 function toolCall(name: string, id = "t1") {
@@ -531,250 +526,236 @@ async function patchHarness(skill: Skill) {
 	return { handlers, sent, ctx, notified, setIdle };
 }
 
-function stateMessage(state: ExecutionState) {
-	return {
-		role: "custom",
-		customType: STATE_MESSAGE_TYPE,
-		content: renderStateContent(state),
-		display: true,
-		details: { state },
-		timestamp: Date.now(),
-	};
-}
-
-function renderWith(theme: { fg: (color: string, text: string) => string }, expanded: boolean, state: ExecutionState) {
-	const renderer = harness([procedure]).renderers.get(STATE_MESSAGE_TYPE) as
-		| ((message: unknown, options: { expanded: boolean }, theme: unknown) => { getText(): string })
-		| undefined;
-	expect(renderer).toBeDefined();
-	return renderer!(stateMessage(state), { expanded }, theme).getText();
-}
-
 describe("omp-skill-state patch loop", () => {
-	test("the renderer shows keys collapsed and pretty JSON expanded, never the raw one-liner", () => {
-		const theme = { fg: (_color: string, text: string) => text };
+	const patch = (json: string) => `\`\`\`json state\n${json}\n\`\`\``;
 
-		const collapsed = renderWith(theme, false, { goal: "g" });
+	// A state message send as the fake records it.
+	const stateSend = (state: ExecutionState, deliverAs: "aside" | "nextTurn") => ({ payload: stateMessage(state) as Record<string, unknown>, options: { deliverAs } });
+
+	// An engaged session: the head asides are pending until the first step
+	// boundary, which is where the recorded pi left every patch test too.
+	async function engaged(skill: Skill = procedure) {
+		const omp = fakeOmp([skill]);
+		const s = omp.session("s1");
+		await s.invoke(skill.name);
+		return { omp, s };
+	}
+
+	test("the renderer shows keys collapsed and pretty JSON expanded, never the raw one-liner", () => {
+		const renderer = fakeOmp([procedure]).renderers.get(STATE_MESSAGE_TYPE) as
+			| ((message: unknown, options: { expanded: boolean }, theme: unknown) => { getText(): string })
+			| undefined;
+		expect(renderer).toBeDefined();
+		const theme = { fg: (_color: string, text: string) => text };
+		const render = (expanded: boolean, state: ExecutionState) =>
+			renderer!({ role: "custom", customType: STATE_MESSAGE_TYPE, content: renderStateContent(state), display: true, details: { state }, timestamp: Date.now() }, { expanded }, theme).getText();
+
+		const collapsed = render(false, { goal: "g" });
 		expect(collapsed).toContain("goal");
 		expect(collapsed).not.toContain('{"goal":"g"}');
 
-		const expanded = renderWith(theme, true, { goal: "g" });
+		const expanded = render(true, { goal: "g" });
 		expect(expanded).toContain('"goal": "g"');
 	});
 
 	test("no patch block is an empty patch: nothing sent, tool calls run", async () => {
-		const { handlers, sent, ctx } = await patchHarness(procedure);
+		const { s } = await engaged();
 
-		const rewritten = await handler(handlers, "assistant_message")(assistantMessage("Prose only, calling a tool."), ctx);
-		const blocked = await handler(handlers, "tool_call")(toolCall("read"), ctx);
+		await s.step("Prose only, calling a tool.");
 
-		expect(rewritten).toBeUndefined();
-		expect(sent.map((s) => s.payload.customType)).toEqual(engageAsideTypes);
-		expect(blocked).toBeUndefined();
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
+		expect(s.blocked).toEqual([]);
 	});
 
 	test("a valid patch is merged and sent as a state message, aside", async () => {
-		const { handlers, sent, ctx } = await patchHarness(procedure);
+		const { s } = await engaged();
 
-		const rewritten = await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), ctx);
-		const blocked = await handler(handlers, "tool_call")(toolCall("read"), ctx);
+		await s.step(patch('{"goal":"x"}'));
 
-		expect(rewritten).toBeUndefined();
-		expect(sent).toHaveLength(4);
-		expect(sent[3].payload.customType).toBe(STATE_MESSAGE_TYPE);
-		expect(sent[3].options.deliverAs).toBe("aside");
-		expect(sent[3].payload.details).toEqual({ state: { goal: "x" } });
-		expect(sent[3].payload.content).toBe(renderStateContent({ goal: "x" }));
-		expect(blocked).toBeUndefined();
+		expect(s.sends).toHaveLength(4);
+		expect(s.sends[3]).toEqual(stateSend({ goal: "x" }, "aside"));
+		expect(s.blocked).toEqual([]);
+		// Stored at the step boundary, before the next provider call.
+		expect(s.storedStates).toEqual([{}, { goal: "x" }]);
 	});
 
 	test("a second valid patch merges into the first instead of replacing it", async () => {
-		const { handlers, sent, ctx } = await patchHarness(procedure);
+		const { s } = await engaged();
 
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), ctx);
-		await handler(handlers, "assistant_message")(assistantMessage("```json state\n{\"extra\": 1}\n```"), ctx);
+		await s.step(patch('{"goal":"x"}'));
+		await s.step(patch('{"extra": 1}'));
 
-		expect(sent).toHaveLength(5);
-		expect(sent[4].payload.details).toEqual({ state: { goal: "x", extra: 1 } });
+		expect(s.sends).toHaveLength(5);
+		expect(s.sends[4]!.payload.details).toEqual({ state: { goal: "x", extra: 1 } });
+		expect(s.storedStates.at(-1)).toEqual({ goal: "x", extra: 1 });
 	});
 
 	test("a patch in a step with no tool call is stored as a next-turn message once the session is idle after agent_end", async () => {
-		const { handlers, sent, ctx, setIdle } = await patchHarness(procedure);
+		const { s } = await engaged();
 		jest.useFakeTimers();
 		try {
-			await handler(handlers, "assistant_message")(finalMessage('```json state\n{"goal":"x"}\n```'), ctx);
-			expect(sent).toHaveLength(3);
-
-			// agent_end fires while the session still streams: nothing is sent yet,
-			// because the harness would only hold the message until the next prompt.
-			await handler(handlers, "agent_end")({ type: "agent_end", messages: [] }, ctx);
+			await s.step(patch('{"goal":"x"}'), { tools: [] });
+			// agent_end fired inside the run: nothing is sent yet, because the
+			// harness would only hold the message until the next prompt.
+			expect(s.sends).toHaveLength(3);
 			jest.advanceTimersByTime(100);
-			expect(sent).toHaveLength(3);
+			expect(s.sends).toHaveLength(3);
 
-			setIdle(true);
+			s.setIdle(true);
 			jest.advanceTimersByTime(20);
-			expect(sent).toHaveLength(4);
-			expect(sent[3].options).toEqual({ deliverAs: "nextTurn" });
-			expect(sent[3].payload.details).toEqual({ state: { goal: "x" } });
+			expect(s.sends).toHaveLength(4);
+			expect(s.sends[3]).toEqual(stateSend({ goal: "x" }, "nextTurn"));
+			// Idle delivery lands on the branch at once, without a turn.
+			expect(s.storedStates.at(-1)).toEqual({ goal: "x" });
 
-			// Stored once: a later settle has nothing pending.
-			await handler(handlers, "agent_end")({ type: "agent_end", messages: [] }, ctx);
+			// Stored once: a later run end has nothing pending.
+			await s.step("done", { tools: [] });
 			jest.advanceTimersByTime(100);
-			expect(sent).toHaveLength(4);
+			expect(s.sends).toHaveLength(4);
 
 			// The live state advanced at the patch, not at the store.
-			await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"extra":1}\n```'), ctx);
-			expect(sent[4].payload.details).toEqual({ state: { goal: "x", extra: 1 } });
-			expect(sent[4].options).toEqual({ deliverAs: "aside" });
+			await s.step(patch('{"extra":1}'));
+			expect(s.sends).toHaveLength(5);
+			expect(s.sends[4]).toEqual(stateSend({ goal: "x", extra: 1 }, "aside"));
 		} finally {
 			jest.useRealTimers();
 		}
 	});
 
 	test("a final state superseded by a later patch before the session is idle is dropped, not stored stale", async () => {
-		const { handlers, sent, ctx, setIdle } = await patchHarness(procedure);
+		const { s } = await engaged();
 		jest.useFakeTimers();
 		try {
-			await handler(handlers, "assistant_message")(finalMessage('```json state\n{"goal":"x"}\n```'), ctx);
-			await handler(handlers, "agent_end")({ type: "agent_end", messages: [] }, ctx);
+			await s.step(patch('{"goal":"x"}'), { tools: [] });
 			// A queued prompt ran another step before the session went idle.
-			await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"y"}\n```'), ctx);
-			expect(sent).toHaveLength(4);
-			expect(sent[3].payload.details).toEqual({ state: { goal: "y" } });
+			await s.step(patch('{"goal":"y"}'));
+			expect(s.sends).toHaveLength(4);
+			expect(s.sends[3]!.payload.details).toEqual({ state: { goal: "y" } });
 
-			setIdle(true);
+			s.setIdle(true);
 			jest.advanceTimersByTime(5000);
-			expect(sent).toHaveLength(4);
+			expect(s.sends).toHaveLength(4);
 		} finally {
 			jest.useRealTimers();
 		}
 	});
 
 	test("a session that never goes idle still gets the final state after the poll budget, held by the harness for the next prompt", async () => {
-		const { handlers, sent, ctx } = await patchHarness(procedure);
+		const { s } = await engaged();
 		jest.useFakeTimers();
 		try {
-			await handler(handlers, "assistant_message")(finalMessage('```json state\n{"goal":"x"}\n```'), ctx);
-			await handler(handlers, "agent_end")({ type: "agent_end", messages: [] }, ctx);
+			await s.step(patch('{"goal":"x"}'), { tools: [] });
 			jest.advanceTimersByTime(1900);
-			expect(sent).toHaveLength(3);
+			expect(s.sends).toHaveLength(3);
 			jest.advanceTimersByTime(200);
-			expect(sent).toHaveLength(4);
-			expect(sent[3].options).toEqual({ deliverAs: "nextTurn" });
+			expect(s.sends).toHaveLength(4);
+			expect(s.sends[3]!.options).toEqual({ deliverAs: "nextTurn" });
+			// Sent while busy: held to the next step boundary, not on the branch yet.
+			expect(s.storedStates).toEqual([{}]);
 		} finally {
 			jest.useRealTimers();
 		}
 	});
 
 	test("an invalid patch blocks every tool call with the validation error and sends nothing", async () => {
-		const { handlers, sent, ctx } = await patchHarness(procedure);
+		const { s } = await engaged();
 
-		const rewritten = await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
-		const read = await handler(handlers, "tool_call")(toolCall("read", "t1"), ctx);
-		const bash = await handler(handlers, "tool_call")(toolCall("bash", "t2"), ctx);
+		await s.step(patch('{"goal": 42}'), { tools: ["read", "bash"] });
 
-		expect(rewritten).toBeUndefined();
-		expect(sent.map((s) => s.payload.customType)).toEqual(engageAsideTypes);
-		expect(read).toEqual({ block: true, reason: expect.stringContaining("goal") });
-		expect(bash).toEqual({ block: true, reason: expect.stringContaining("goal") });
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
+		expect(s.blocked.map((call) => call.toolName)).toEqual(["read", "bash"]);
+		for (const call of s.blocked) expect(call.reason).toContain("goal");
 	});
 
 	test("malformed JSON blocks with the parse error", async () => {
-		const { handlers, sent, ctx } = await patchHarness(procedure);
+		const { s } = await engaged();
 
-		await handler(handlers, "assistant_message")(assistantMessage("```json state\n{ nope\n```"), ctx);
-		const blocked = await handler(handlers, "tool_call")(toolCall("read"), ctx);
+		await s.step("```json state\n{ nope\n```");
 
-		expect(sent.map((s) => s.payload.customType)).toEqual(engageAsideTypes);
-		expect(blocked).toEqual({ block: true, reason: expect.stringContaining("valid JSON") });
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
+		expect(s.blocked).toHaveLength(1);
+		expect(s.blocked[0]!.reason).toContain("valid JSON");
 	});
 
 	test("a valid retry recovers and the session stays engaged", async () => {
-		const { handlers, sent, ctx, notified } = await patchHarness(procedure);
+		const { omp, s } = await engaged();
 
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), ctx);
+		await s.step(patch('{"goal": 42}'));
+		await s.step(patch('{"goal":"x"}'));
 
-		const blocked = await handler(handlers, "tool_call")(toolCall("read"), ctx);
-		expect(blocked).toBeUndefined();
-		expect(sent).toHaveLength(4); // engage asides plus the recovered state message
+		// Only the failed step's call was blocked; the retry's call ran.
+		expect(s.blocked).toHaveLength(1);
+		expect(s.sends).toHaveLength(4); // engage asides plus the recovered state message
 
-		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "new" }, ctx);
-		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/new")]);
+		await s.switchTo(omp.session("s2"), "new");
+		expect(s.notices).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/new")]);
 	});
 
 	test("the third consecutive invalid patch degrades and the session runs ordinarily", async () => {
-		const { handlers, sent, ctx, notified } = await patchHarness(procedure);
+		const { omp, s } = await engaged();
 
-		for (let i = 0; i < 3; i++) {
-			await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
-		}
+		for (let i = 0; i < 3; i++) await s.step(patch('{"goal": 42}'));
 
-		expect(notified).toEqual([
+		expect(s.notices).toEqual([
 			...engageNotices("procedure"),
 			{ message: 'skill-state: procedure "procedure" degraded after 3 invalid patches; running ordinarily', type: "warning" },
 		]);
+		// The degrading step runs its tools as an ordinary step would: only the
+		// first two steps were blocked.
+		expect(s.blocked).toHaveLength(2);
 
-		const blocked = await handler(handlers, "tool_call")(toolCall("read"), ctx);
-		expect(blocked).toBeUndefined();
+		await s.step(patch('{"goal": 42}'));
+		expect(s.blocked).toHaveLength(2);
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
 
-		const rewritten = await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
-		const later = await handler(handlers, "tool_call")(toolCall("read", "t9"), ctx);
-		expect(rewritten).toBeUndefined();
-		expect(later).toBeUndefined();
-
-		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "new" }, ctx);
-		expect(notified).toEqual([
+		await s.switchTo(omp.session("s2"), "new");
+		expect(s.notices).toEqual([
 			...engageNotices("procedure"),
 			{ message: 'skill-state: procedure "procedure" degraded after 3 invalid patches; running ordinarily', type: "warning" },
 		]);
-		expect(sent.map((s) => s.payload.customType)).toEqual(engageAsideTypes);
 	});
 
 	test("the degrade threshold honours x-state retries", async () => {
-		const { handlers, ctx, notified } = await patchHarness(retryProcedure);
+		const { s } = await engaged(retryProcedure);
 
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
-		expect(notified).toEqual(engageNotices("retryproc"));
+		await s.step(patch('{"goal": 42}'));
+		expect(s.notices).toEqual(engageNotices("retryproc"));
 
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
-		expect(notified).toEqual([
+		await s.step(patch('{"goal": 42}'));
+		expect(s.notices).toEqual([
 			...engageNotices("retryproc"),
 			{ message: 'skill-state: procedure "retryproc" degraded after 2 invalid patches; running ordinarily', type: "warning" },
 		]);
 	});
 
 	test("a valid patch between failures resets the consecutive counter", async () => {
-		const { handlers, ctx, notified } = await patchHarness(procedure);
+		const { omp, s } = await engaged();
 
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), ctx);
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
+		await s.step(patch('{"goal": 42}'));
+		await s.step(patch('{"goal": 42}'));
+		await s.step(patch('{"goal":"x"}'));
+		await s.step(patch('{"goal": 42}'));
+		await s.step(patch('{"goal": 42}'));
+		expect(s.notices).toEqual(engageNotices("procedure"));
 
-		expect(notified).toEqual(engageNotices("procedure"));
-
-		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "new" }, ctx);
-		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/new")]);
+		await s.switchTo(omp.session("s2"), "new");
+		expect(s.notices).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/new")]);
 	});
 
 	test("assistant_message and tool_call are inert when not engaged and in a subagent", async () => {
-		const { handlers, sent } = harness([procedure]);
+		const omp = fakeOmp([procedure]);
 
-		const main = mockCtx("s1");
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), main.ctx);
-		const mainBlocked = await handler(handlers, "tool_call")(toolCall("read"), main.ctx);
-		expect(sent).toEqual([]);
-		expect(mainBlocked).toBeUndefined();
-		expect(main.notified).toEqual([]);
+		const main = omp.session("s1");
+		await main.step(patch('{"goal":"x"}'));
+		expect(main.sends).toEqual([]);
+		expect(main.blocked).toEqual([]);
+		expect(main.notices).toEqual([]);
 
-		const sub = mockCtx("s2", "sub");
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), sub.ctx);
-		const subBlocked = await handler(handlers, "tool_call")(toolCall("read"), sub.ctx);
-		expect(sent).toEqual([]);
-		expect(subBlocked).toBeUndefined();
-		expect(sub.notified).toEqual([]);
+		const sub = omp.session("s2", { kind: "sub" });
+		await sub.step(patch('{"goal":"x"}'));
+		expect(sub.sends).toEqual([]);
+		expect(sub.blocked).toEqual([]);
+		expect(sub.notices).toEqual([]);
 	});
 });
 

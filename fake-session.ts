@@ -50,6 +50,9 @@ interface Internals {
 	// The session whose event is dispatching; sendMessage has no session of its
 	// own, so the fake attributes sends to it.
 	current?: FakeSession;
+	// The most recent dispatcher: a send from a timer (the settle poll) fires
+	// after the dispatch returned and belongs to the session that scheduled it.
+	last?: FakeSession;
 }
 
 export interface FakeOmp {
@@ -64,7 +67,7 @@ export function fakeOmp(skills: Skill[]): FakeOmp {
 			internals.handlers.set(event, handler);
 		},
 		sendMessage(payload: Record<string, unknown>, options: Record<string, unknown> = {}) {
-			internals.current?.recordSend(payload, options);
+			(internals.current ?? internals.last)?.recordSend(payload, options);
 		},
 		registerMessageRenderer(type: string, renderer: unknown) {
 			internals.renderers.set(type, renderer);
@@ -294,6 +297,7 @@ export class FakeSession {
 		if (handler === undefined) return undefined;
 		const previous = this.internals.current;
 		this.internals.current = this;
+		this.internals.last = this;
 		try {
 			return await handler(payload, this.ctx());
 		} finally {

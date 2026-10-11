@@ -10,5 +10,5 @@
 		"next_step": { "type": "string" }
 	},
 	"additionalProperties": true,
-	"x-state": { "observationBytes": 32768, "idleSteps": 3, "retries": 3 }
+	"x-state": { "observationBytes": 32768, "idleSteps": 7, "retries": 3 }
 }

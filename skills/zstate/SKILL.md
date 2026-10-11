@@ -28,7 +28,7 @@ The patch merges into the state: a non-null value sets its key, `null` deletes i
 
 Finish when the task is done: reply with no tool call and give the result from the state alone. If a fact is not in the state, you do not know it.
 
-Keep the state current. Steps that leave it unchanged count as idle, and an idle run disengages the runtime and returns the session to ordinary execution.
+Every reply carries a state block, even a step that only reads: set `next_step` to the action this step performs. Steps that leave the state unchanged count as idle, and an idle run disengages the runtime and returns the session to ordinary execution.
 
 Field meanings:
 

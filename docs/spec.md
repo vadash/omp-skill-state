@@ -276,12 +276,14 @@ Every mechanism above is public extension API. Nothing else is touched.
 ```
 omp-skill-state/
   package.json          "omp": { "extensions": ["./index.ts"] }
-  index.ts              the runtime
+  index.ts              the harness adapter: event registrations, sends, blocks, notices
   index.test.ts         unit tests (bun test)
   projection.ts         the projection (pure message assembly)
   projection.test.ts    projection unit tests (bun test)
   branch.ts             pure reads over the stored branch (re-derive scan, compaction cut)
   branch.test.ts        branch read unit tests (bun test)
+  procedure.ts          the procedure record and the step policy (patch outcomes, head, compaction)
+  procedure.test.ts     step policy unit tests (bun test)
   tsconfig.json         typecheck config (tsc --noEmit)
   skills/               optional bundled procedure skills, discovered from the plugin root
   CONTEXT.md            glossary
@@ -300,6 +302,7 @@ Unit, no harness needed:
 - schema validation: each type, unknown keys under both `additionalProperties` values, non-object top level.
 - projection assembly: exact message order and roles; each dropped block type; the pinned tail pair; the byte cap and its marker.
 - branch reads: the re-derive scan (latest invocation wins, an incomplete head is inert) and the compaction cut.
+- step policy: each reply outcome (none, store as aside or final, block, ended by degrade or idle), the counters and their resets, the head and the compaction result.
 
 Against a real session (`docs/verification.md` records the outcome of each item; the invalid-patch and degrade items did not occur in the run and rest on the unit tests):
 

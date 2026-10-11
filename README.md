@@ -9,9 +9,10 @@ Status: implemented and verified against a long real session (`docs/verification
 | Path | Role |
 | --- | --- |
 | `package.json` | Plugin manifest: `"omp": { "extensions": ["./index.ts"] }` |
-| `index.ts` | The extension. omp imports the TypeScript directly; there is no build step. |
+| `index.ts` | The extension: a thin harness adapter over the modules below. omp imports the TypeScript directly; there is no build step. |
 | `branch.ts` | Pure reads over the stored branch: the re-derive scan and the compaction cut. |
-| `index.test.ts`, `*.test.ts` | Unit tests for the factory contract, the state merge, the patch parser and the projection |
+| `procedure.ts` | The procedure record and the step policy: patch outcomes, idle and retry counters, head and compaction construction. |
+| `index.test.ts`, `*.test.ts` | Unit tests for the factory contract, the step policy, the branch reads, the state merge, the patch parser and the projection |
 | `skills/recon/` | Bundled sample procedure skill (`SKILL.md` + `state.schema.json`) |
 | `docs/spec.md`, `docs/adr/`, `CONTEXT.md` | Design, decisions, glossary |
 | `docs/verification.md`, `verification/` | The long-session integration run: findings, and the session analyzer plus the config that drives it |

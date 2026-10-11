@@ -1,9 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Text } from "@oh-my-pi/pi-coding-agent";
-import { SKILL_PROMPT_MESSAGE_TYPE, contentText, currentStepCut, scanBranch } from "./branch";
-import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, parsePatch, renderStateContent } from "./patch";
+import { SKILL_PROMPT_MESSAGE_TYPE, contentText, scanBranch } from "./branch";
+import { STATE_MESSAGE_TYPE } from "./patch";
+import { compactionFor, headMessages, newProcedure, noteProjected, recordReply, stateMessage, takeFinalState } from "./procedure";
+import type { Procedure } from "./procedure";
 import { project } from "./projection";
-import { applyPatch, isPlainObject, loadStateSchema } from "./state";
+import { isPlainObject, loadStateSchema } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
 
 // The final state waits for the session to go idle before it is stored; the
@@ -13,72 +15,39 @@ import type { ExecutionState, StateParams, StateSchema } from "./state";
 const FINAL_STATE_POLL_MS = 20;
 const FINAL_STATE_POLL_ATTEMPTS = 100;
 
-interface Engagement {
-	name: string;
-	// P, held so a re-head after compaction never depends on a branch scan.
-	spec: string;
-	schema: StateSchema;
-	params: StateParams;
-	state: ExecutionState;
-	pendingError?: string;
-	invalidPatches: number;
-	idle: number;
-	// Whether the latest provider call carried the head. The first step runs
-	// before the engage asides land, and the step after a compaction can too;
-	// the model has not seen the rules in such a step, so it cannot be idle.
-	projected: boolean;
-	// A state accepted from a message with no tool call: the run is ending, and
-	// an aside that outlives a run wakes a turn of its own, so this one goes out
-	// as a next-turn message once the session is idle after agent_end instead.
-	finalState?: ExecutionState;
-}
-
-// details.state lets later re-derives rebuild t from the branch without
-// re-parsing the content.
-function stateMessage(state: ExecutionState) {
-	return { customType: STATE_MESSAGE_TYPE, content: renderStateContent(state), display: true, details: { state } };
-}
-
-// Keyed by session id, not a bare flag: extension module state is shared across
-// every session in one process, so one flag would leak a procedure between sessions.
+// The harness adapter. Every mechanism is a public extension event or action:
+// each handler finds the session's procedure, hands the event to the step
+// policy in procedure.ts, and turns the outcome into sends, blocks and notices.
+// Procedures are keyed by session id, not held in a bare flag: extension module
+// state is shared across every session in one process, so one flag would leak
+// a procedure between sessions.
 export default function (pi: ExtensionAPI): void {
-	const engaged = new Map<string, Engagement>();
+	const procedures = new Map<string, Procedure>();
 	let compactRegistered = false;
 
+	// The engaged procedure of the main-agent session the event belongs to;
+	// undefined when the session is inert or the event comes from a subagent.
+	function current(ctx: ExtensionContext): Procedure | undefined {
+		if (ctx.agent.kind !== "main") return undefined;
+		return procedures.get(ctx.sessionManager.getSessionId());
+	}
+
+	// Every ending shares one reset: drop the record, then say why. The notice
+	// is UI-only and never enters model context.
+	function end(ctx: ExtensionContext, procedure: Procedure, notice: string, level: "info" | "warning" = "info"): void {
+		procedures.delete(ctx.sessionManager.getSessionId());
+		ctx.ui.notify(`skill-state: procedure "${procedure.name}" ${notice}`, level);
+	}
+
 	function disengage(ctx: ExtensionContext, trigger: string): void {
-		const sessionId = ctx.sessionManager.getSessionId();
-		const engagement = engaged.get(sessionId);
-		if (engagement === undefined) return;
-		engaged.delete(sessionId);
-		ctx.ui.notify(`skill-state: procedure "${engagement.name}" disengaged (${trigger})`, "info");
+		const procedure = procedures.get(ctx.sessionManager.getSessionId());
+		if (procedure === undefined) return;
+		end(ctx, procedure, `disengaged (${trigger})`);
 	}
 
-	// Degrade drops the engagement at once: the disengaging step is already
-	// ordinary, and the pending error and invalid-patch counter die with the engagement.
-	// A patch of any kind counts as activity, so it also breaks an idle run.
-	function recordInvalidPatch(engagement: Engagement, ctx: ExtensionContext, error: string): void {
-		engagement.pendingError = error;
-		engagement.invalidPatches += 1;
-		engagement.idle = 0;
-		if (engagement.invalidPatches < engagement.params.retries) return;
-		engaged.delete(ctx.sessionManager.getSessionId());
-		ctx.ui.notify(
-			`skill-state: procedure "${engagement.name}" degraded after ${engagement.params.retries} invalid patches; running ordinarily`,
-			"warning",
-		);
-	}
-
-	// A step the model spent without editing its state. A step whose prompt
-	// carried no head does not count: the model never saw the rules in it.
-	function recordIdle(engagement: Engagement, ctx: ExtensionContext): void {
-		if (!engagement.projected) return;
-		engagement.idle += 1;
-		if (engagement.idle >= engagement.params.idleSteps) disengage(ctx, `idle for ${engagement.params.idleSteps} steps`);
-	}
-
-	// Every engagement starts here with fresh counters, from a new invocation and
+	// Every procedure starts here with fresh counters, from a new invocation and
 	// from a re-derive alike. Both notices are UI-only and never enter model context.
-	function engage(ctx: ExtensionContext, sessionId: string, name: string, spec: string, loaded: { schema: StateSchema; params: StateParams }, state: ExecutionState): Engagement {
+	function engage(ctx: ExtensionContext, sessionId: string, name: string, spec: string, loaded: { schema: StateSchema; params: StateParams }, state: ExecutionState): Procedure {
 		// Registering a session_before_compact handler disables speculative
 		// compaction for the session and pi.on has no counterpart, so the handler
 		// can never be removed (ADR 0001): it is registered lazily, on the first
@@ -86,33 +55,22 @@ export default function (pi: ExtensionAPI): void {
 		if (!compactRegistered) {
 			compactRegistered = true;
 			pi.on("session_before_compact", (event, ctx) => {
-				if (ctx.agent.kind !== "main") return undefined;
-				const engagement = engaged.get(ctx.sessionManager.getSessionId());
-				if (engagement === undefined) return undefined;
-				return {
-					compaction: {
-						summary: `Execution state of procedure "${engagement.name}" (skill-state runtime):\n\n${JSON.stringify(engagement.state, null, 2)}`,
-						shortSummary: `skill-state: procedure "${engagement.name}" execution state`,
-						firstKeptEntryId: currentStepCut(event.branchEntries) ?? event.preparation.firstKeptEntryId,
-						tokensBefore: event.preparation.tokensBefore,
-						preserveData: { state: engagement.state },
-					},
-				};
+				const procedure = current(ctx);
+				if (procedure === undefined) return undefined;
+				return compactionFor(procedure, event.preparation, event.branchEntries);
 			});
 		}
-		const engagement: Engagement = { name, spec, schema: loaded.schema, params: loaded.params, state, invalidPatches: 0, idle: 0, projected: false };
-		engaged.set(sessionId, engagement);
+		const procedure = newProcedure(name, spec, loaded.schema, loaded.params, state);
+		procedures.set(sessionId, procedure);
 		ctx.ui.notify(`skill-state: procedure "${name}" engaged`, "info");
 		ctx.ui.notify("skill-state: history is hidden from the model while engaged; finish with /new", "info");
-		return engagement;
+		return procedure;
 	}
 
 	// The head: the operating rules, P and the current state, one message each
 	// so the projection can take the last stored copy of every type.
-	function sendHead(engagement: Engagement, options: { deliverAs: "aside" | "nextTurn" }): void {
-		pi.sendMessage({ customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false }, options);
-		pi.sendMessage({ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: engagement.spec, display: false, details: { name: engagement.name } }, options);
-		pi.sendMessage(stateMessage(engagement.state), options);
+	function sendHead(procedure: Procedure, options: { deliverAs: "aside" | "nextTurn" }): void {
+		for (const payload of headMessages(procedure)) pi.sendMessage(payload, options);
 	}
 
 	// Re-derives engagement from what is stored on the branch, so a cold load, a
@@ -148,44 +106,28 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.on("assistant_message", (event, ctx) => {
-		if (ctx.agent.kind !== "main") return undefined;
-		const engagement = engaged.get(ctx.sessionManager.getSessionId());
-		if (engagement === undefined) return undefined;
-		const text = event.message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
-		const patch = parsePatch(text);
-		if (patch.kind === "none") {
-			engagement.pendingError = undefined;
-			engagement.invalidPatches = 0;
-			recordIdle(engagement, ctx);
-			return undefined;
+		const procedure = current(ctx);
+		if (procedure === undefined) return undefined;
+		const content = event.message.content;
+		const outcome = recordReply(procedure, {
+			text: content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n"),
+			hasToolCall: content.some((block) => block.type === "toolCall"),
+		});
+		switch (outcome.kind) {
+			case "store":
+				// Aside delivery lands the message at the next step boundary, so the
+				// state is stored before the next provider call without interrupting
+				// the in-flight tool batch. The final state instead waits for agent_end.
+				if (outcome.delivery === "aside") pi.sendMessage(stateMessage(outcome.state), { deliverAs: "aside" });
+				break;
+			case "ended":
+				if (outcome.cause === "degrade") end(ctx, procedure, `degraded after ${procedure.params.retries} invalid patches; running ordinarily`, "warning");
+				else end(ctx, procedure, `disengaged (idle for ${procedure.params.idleSteps} steps)`);
+				break;
+			default:
+				// none needs nothing; a blocked step is refused at tool_call.
+				break;
 		}
-		if (patch.kind === "json") {
-			const applied = applyPatch(engagement.state, patch.value, engagement.schema);
-			if (applied.ok) {
-				engagement.pendingError = undefined;
-				engagement.invalidPatches = 0;
-				// A patch that leaves the state as it was is an empty patch: there is
-				// nothing to store, and the model did not edit its state this step.
-				if (renderStateContent(applied.state) === renderStateContent(engagement.state)) {
-					recordIdle(engagement, ctx);
-					return undefined;
-				}
-				engagement.state = applied.state;
-				engagement.idle = 0;
-				if (event.message.content.some((block) => block.type === "toolCall")) {
-					// Aside delivery lands the message at the next step boundary, so the
-					// state is stored before the next provider call without interrupting
-					// the in-flight tool batch.
-					pi.sendMessage(stateMessage(engagement.state), { deliverAs: "aside" });
-				} else {
-					engagement.finalState = engagement.state;
-				}
-				return undefined;
-			}
-			recordInvalidPatch(engagement, ctx, applied.error);
-			return undefined;
-		}
-		recordInvalidPatch(engagement, ctx, patch.error);
 		return undefined;
 	});
 
@@ -196,14 +138,13 @@ export default function (pi: ExtensionAPI): void {
 	// appends it to context and history at once, so the send waits for idle. A
 	// patch accepted meanwhile makes this state stale, and it is dropped.
 	pi.on("agent_end", (_event, ctx) => {
-		if (ctx.agent.kind !== "main") return;
+		const procedure = current(ctx);
+		if (procedure === undefined) return;
+		const state = takeFinalState(procedure);
+		if (state === undefined) return;
 		const sessionId = ctx.sessionManager.getSessionId();
-		const engagement = engaged.get(sessionId);
-		if (engagement?.finalState === undefined) return;
-		const state = engagement.finalState;
-		engagement.finalState = undefined;
 		const settle = (attempts: number): void => {
-			if (engaged.get(sessionId) !== engagement || engagement.state !== state) return;
+			if (procedures.get(sessionId) !== procedure || procedure.state !== state) return;
 			if (ctx.isIdle() || attempts === 0) {
 				pi.sendMessage(stateMessage(state), { deliverAs: "nextTurn" });
 				return;
@@ -214,12 +155,11 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.on("tool_call", (_event, ctx) => {
-		if (ctx.agent.kind !== "main") return undefined;
-		const engagement = engaged.get(ctx.sessionManager.getSessionId());
-		if (engagement?.pendingError === undefined) return undefined;
-		// pendingError is cleared only by the next assistant_message, so every call
-		// of the failed step is blocked, not just the first.
-		return { block: true, reason: engagement.pendingError };
+		const procedure = current(ctx);
+		// pendingError is cleared only by the next reply, so every call of the
+		// failed step is blocked, not just the first.
+		if (procedure?.pendingError === undefined) return undefined;
+		return { block: true, reason: procedure.pendingError };
 	});
 
 	pi.on("message_end", async (event, ctx) => {
@@ -231,19 +171,19 @@ export default function (pi: ExtensionAPI): void {
 		const name = details?.name;
 		if (typeof name !== "string" || name.length === 0) return;
 		const sessionId = ctx.sessionManager.getSessionId();
-		if (engaged.has(sessionId)) return;
+		if (procedures.has(sessionId)) return;
 		const loaded = await loadStateSchema(name, pi.pi.getActiveSkills());
 		// Re-check after the await: the agent dispatches events without awaiting
 		// handlers, so a second invocation in the same batch can pass the check
 		// above before this read resolves.
-		if (!loaded.ok || engaged.has(sessionId)) return;
+		if (!loaded.ok || procedures.has(sessionId)) return;
 		// P is the rendered skill prompt the harness already produced for this
 		// invocation; it keeps the user's invocation args in every step and needs
 		// no second file read.
-		const engagement = engage(ctx, sessionId, name, contentText(message.content), loaded, {});
+		const procedure = engage(ctx, sessionId, name, contentText(message.content), loaded, {});
 		// The projected prompt's head is pinned here at engage so it exists from
 		// the first step.
-		sendHead(engagement, { deliverAs: "aside" });
+		sendHead(procedure, { deliverAs: "aside" });
 	});
 
 	// A compaction cuts the context at the harness's kept entry, which can sit
@@ -255,21 +195,19 @@ export default function (pi: ExtensionAPI): void {
 	// and when the session is idle, as with a manual /compact, a next-turn
 	// message is appended to context without waking anything.
 	pi.on("session_compact", (_event, ctx) => {
-		if (ctx.agent.kind !== "main") return;
-		const engagement = engaged.get(ctx.sessionManager.getSessionId());
-		if (engagement === undefined) return;
-		sendHead(engagement, ctx.isIdle() ? { deliverAs: "nextTurn" } : { deliverAs: "aside" });
+		const procedure = current(ctx);
+		if (procedure === undefined) return;
+		sendHead(procedure, ctx.isIdle() ? { deliverAs: "nextTurn" } : { deliverAs: "aside" });
 	});
 
 	// The projection rewrites only the prompt; the stored transcript stays
 	// complete. undefined keeps the ordinary context: safe fallback when not
 	// engaged, in a subagent, or when the head is not in place yet.
 	pi.on("context", (event, ctx) => {
-		if (ctx.agent.kind !== "main") return undefined;
-		const engagement = engaged.get(ctx.sessionManager.getSessionId());
-		if (engagement === undefined) return undefined;
-		const messages = project(event.messages, engagement.params.observationBytes);
-		engagement.projected = messages !== undefined;
+		const procedure = current(ctx);
+		if (procedure === undefined) return undefined;
+		const messages = project(event.messages, procedure.params.observationBytes);
+		noteProjected(procedure, messages !== undefined);
 		return messages === undefined ? undefined : { messages };
 	});
 

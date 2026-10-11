@@ -52,6 +52,10 @@ _Avoid_: boundary, checkpoint, kept tail
 The state accepted from a reply with no tool call, which ends the run. It is stored as a next-turn message once the session is idle, not as an aside.
 _Avoid_: result, answer, summary
 
+**Branch**:
+The stored entries from the session root to the current leaf, as the harness keeps them. The runtime reads it in two places: re-derive scans it for the latest procedure and its head, and the compaction cut is its latest assistant message.
+_Avoid_: history, log
+
 **Re-derive**:
 Rebuilding engagement from the branch on session start, switch, rewind or tree navigation: no user invocation of a procedure skill followed by its procedure-spec message and a state message means inert; otherwise engaged with that state.
 _Avoid_: restore, rehydrate, reload

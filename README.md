@@ -15,7 +15,7 @@ Status: implemented and verified against a long real session (`docs/verification
 | `messages.ts` | The custom message vocabulary: the head message types, the state renderer and the state message builder. |
 | `fake-session.ts` | The fake omp session the adapter tests drive: branch, delivery timing, sends and notices. |
 | `index.test.ts`, `*.test.ts` | Unit tests for the factory contract, the step policy, the branch reads, the state merge, the patch parser and the projection |
-| `skills/recon/` | Bundled sample procedure skill (`SKILL.md` + `state.schema.json`) |
+| `skills/recon/` | Bundled mode-entry procedure skill (`SKILL.md` + `state.schema.json`): it carries no task of its own; the task is the text given with the invocation |
 | `docs/spec.md`, `docs/adr/`, `CONTEXT.md` | Design, decisions, glossary |
 | `docs/verification.md`, `verification/` | The long-session integration run: findings, and the session analyzer plus the config that drives it |
 
@@ -43,7 +43,7 @@ omp plugin doctor   # 0 errors
 
 `link` creates a junction at `~/.omp/plugins/node_modules/omp-skill-state` and an enabled entry in `~/.omp/plugins/omp-plugins.lock.json`. Changes to `index.ts` take effect at the next session start. Remove the link with `omp plugin uninstall omp-skill-state`.
 
-Invoke a procedure skill (a skill with a `state.schema.json`) in the main agent and it engages:
+Invoke a procedure skill (a skill with a `state.schema.json`) in the main agent and it engages. The bundled `recon` skill takes its task from the invocation text, e.g. `/skill:recon read skill://implement and work on issue 67`:
 
 ```
 skill-state: procedure "recon" engaged

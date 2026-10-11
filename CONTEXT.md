@@ -12,6 +12,10 @@ _Avoid_: task, job, workflow, session
 A skill that declares a state schema. Only these can start a procedure.
 _Avoid_: stateful skill, state skill
 
+**Mode-entry skill**:
+A procedure skill whose spec carries no task of its own. The task is the text the user gives with the invocation, and the spec says only how to work under the runtime. The bundled `recon` skill is one.
+_Avoid_: wrapper skill, meta skill, generic skill
+
 **Procedure spec**:
 The immutable instruction text of the procedure, taken from the skill body and held as `P`. It never changes during the run.
 _Avoid_: prompt, instructions, spec

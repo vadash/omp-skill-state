@@ -3,8 +3,9 @@
 	"properties": {
 		"goal": { "type": "string" },
 		"working_dir": { "type": "string" },
+		"constraints": { "type": "array", "items": { "type": "string" } },
+		"plan": { "type": "array", "items": { "type": "string" } },
 		"findings": { "type": "array", "items": { "type": "string" } },
-		"tested_hypotheses": { "type": "array", "items": { "type": "string" } },
 		"open_questions": { "type": "array", "items": { "type": "string" } },
 		"next_step": { "type": "string" }
 	},

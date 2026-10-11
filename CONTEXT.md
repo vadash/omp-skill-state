@@ -40,6 +40,10 @@ _Avoid_: turn, iteration, round
 The per-step rewrite that replaces the message list sent to the model with the triple spec, state, observation. The stored transcript is never changed by it.
 _Avoid_: compaction, truncation, filtering
 
+**Re-derive**:
+Rebuilding engagement from the branch on session start, switch, rewind or tree navigation: no user invocation of a procedure skill followed by a state message means inert; otherwise engaged with that state.
+_Avoid_: restore, rehydrate, reload
+
 **Engage**:
 The runtime taking control of the projection for a procedure.
 _Avoid_: activate, enable, start

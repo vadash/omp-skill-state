@@ -134,7 +134,7 @@ Validation, on every patch, before merge:
 - Unknown keys are accepted when `additionalProperties` is true.
 - A rejected patch changes nothing. The runtime does not partially apply.
 
-Persistence: after each accepted patch the runtime sends the state as a custom message of type `sh.omp.skill-state.state`, delivered as an aside so it lands at the next step boundary, before the next provider call. The message is stored in the transcript like any other, which is what lets the projection reuse it byte-for-byte (section 7). On `session_start` and `session_branch` the runtime rebuilds `t` from the latest such message on the branch, so `/resume` and rewinds keep it.
+Persistence: after each accepted patch the runtime sends the state as a custom message of type `sh.omp.skill-state.state`, delivered as an aside so it lands at the next step boundary, before the next provider call. The message is stored in the transcript like any other, which is what lets the projection reuse it byte-for-byte (section 7). On `session_start`, `session_switch`, `session_branch` and `session_tree` the runtime re-derives engagement from the latest invocation and such message on the branch, so `/resume`, rewinds and tree navigation keep it.
 
 ## 7. The projection
 
@@ -204,9 +204,9 @@ Because auto-compaction floors on the stored transcript, it still fires while en
 
 Four triggers, all leading to the same reset (clear `t`, clear engaged flag, stop projecting):
 
-1. **New session.** `/new` starts one and fires `session_start`. This is the intended ending, and the runtime tells the user so (section 12). On every `session_start` the runtime re-derives engagement from the branch rather than resetting blindly: an empty branch is inert; a branch holding a user skill invocation for a procedure skill and a state message re-engages with that state. That is what makes `/resume` restore `t` while `/new` starts clean.
+1. **New session.** `/new` starts one, firing `session_before_switch` and then `session_switch` with reason `new`; `session_start` fires only on a cold load. This is the intended ending, and the runtime tells the user so (section 12). On every `session_start` and `session_switch` the runtime re-derives engagement from the branch rather than resetting blindly: an empty branch is inert; a branch holding a user skill invocation for a procedure skill and a state message re-engages with that state. That is what makes `/resume` restore `t` while `/new` starts clean.
 2. **Context reset.** `/clear` keeps the session and drops messages in place, and emits nothing to extensions. The `input` event runs before command interpretation and does see the raw text, so the runtime disengages on `/clear` directly.
-3. **Session change.** `session_before_switch`, `session_branch`, and `session_tree` all reset, so a rewind or fork cannot inherit a stale procedure.
+3. **Session change.** A switch, a rewind or a fork all land in a different session id, so `session_before_switch` and `session_before_branch` end the outgoing engagement with the usual disengage notice. `session_switch`, `session_branch` and `session_tree` then re-derive engagement from the branch now loaded: a rewind that lands after the invocation re-engages with that branch's state, one that lands before it stays inert, and a fork re-derives like any other branch.
 4. **Idleness.** Three consecutive steps with no patch and an unchanged state. The model has stopped editing its state; the runtime stands down.
 
 The remaining exit is **degrade**, from section 8, which is a failure path rather than a normal ending.
@@ -232,7 +232,7 @@ Extension factories are rebound into every subagent session, so the handler runs
 | Oversized observation | byte cap | truncate from the end of the largest result, insert a marker |
 | Provider rejects the prompt shape | provider error surfaced to the session | the harness's own retry and compaction paths apply; the runtime does not intercept them |
 | Model stops updating the state | 3 idle steps | disengage, notify |
-| State lost on resume | rebuild finds no entry | start from `{}`, notify |
+| State message missing on rebuild | invocation without a following state message | stay inert: there is no head to project |
 
 Degrade is terminal for the session. The user gets ordinary history-based execution back, which is always correct, only more expensive.
 
@@ -261,7 +261,7 @@ Every mechanism above is public extension API. Nothing else is touched.
 | own compaction | `session_before_compact`, lazily registered |
 | detect `/clear` | `input` |
 | detect a user skill invocation | `message_end`; the harness's own skill-prompt message, checked for `attribution === "user"` |
-| detect a session change | `session_before_switch`, `session_branch`, `session_tree`; `session_start` re-derives engagement instead of resetting it (section 12) |
+| detect a session change | `session_before_switch`, `session_before_branch`; `session_start`, `session_switch`, `session_branch`, `session_tree` re-derive engagement from the branch (section 11) |
 | read the schema | `skill://<name>/state.schema.json`, plus `pi.pi.getActiveSkills()` |
 | visibility | `ctx.ui.notify`, `registerMessageRenderer` |
 

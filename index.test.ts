@@ -56,7 +56,7 @@ function handler(handlers: Map<string, Handler>, event: string): Handler {
 	return h;
 }
 
-function mockCtx(sessionId: string, kind: "main" | "sub" = "main") {
+function mockCtx(sessionId: string, kind: "main" | "sub" = "main", branch: unknown[] = []) {
 	const notified: Array<{ message: string; type?: string }> = [];
 	const ctx = {
 		agent: { kind },
@@ -65,9 +65,38 @@ function mockCtx(sessionId: string, kind: "main" | "sub" = "main") {
 				notified.push({ message, type });
 			},
 		},
-		sessionManager: { getSessionId: () => sessionId },
+		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch },
 	} as unknown as ExtensionContext;
 	return { ctx, notified };
+}
+
+// The harness persists a user skill invocation and our state messages as
+// custom_message entries on the branch; re-derive scans exactly this shape.
+function invocationEntry(name: string, attribution: "user" | "agent" = "user") {
+	return {
+		type: "custom_message" as const,
+		id: "invocation",
+		parentId: null,
+		timestamp: new Date().toISOString(),
+		customType: "skill-prompt",
+		content: `Running skill ${name}`,
+		display: true,
+		details: { name },
+		attribution,
+	};
+}
+
+function stateEntry(state: ExecutionState) {
+	return {
+		type: "custom_message" as const,
+		id: "state",
+		parentId: null,
+		timestamp: new Date().toISOString(),
+		customType: STATE_MESSAGE_TYPE,
+		content: renderStateContent(state),
+		display: true,
+		details: { state },
+	};
 }
 
 const engageNotices = (name: string) => [
@@ -105,6 +134,7 @@ let plain: Skill;
 let brokenArray: Skill;
 let brokenJson: Skill;
 let smallProcedure: Skill;
+let idleProcedure: Skill;
 
 beforeAll(async () => {
 	root = await mkdtemp(path.join(tmpdir(), "omp-skill-state-"));
@@ -118,6 +148,11 @@ beforeAll(async () => {
 		root,
 		"retryproc",
 		JSON.stringify({ type: "object", properties: { goal: { type: "string" } }, "x-state": { retries: 2 } }),
+	);
+	idleProcedure = await makeSkill(
+		root,
+		"idleproc",
+		JSON.stringify({ type: "object", properties: { goal: { type: "string" } }, "x-state": { idleSteps: 2 } }),
 	);
 	plain = await makeSkill(root, "plain");
 	brokenArray = await makeSkill(root, "brokenarray", "[]");
@@ -255,8 +290,9 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		const { handlers } = harness([procedure]);
 		const { ctx, notified } = await engage(handlers, "procedure");
 
-		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "resume" }, ctx);
+		const result = await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "resume" }, ctx);
 
+		expect(result).toBeUndefined();
 		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/resume")]);
 	});
 
@@ -269,13 +305,179 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "fork")]);
 	});
 
-	test("disengages on a branch", async () => {
-		const { handlers } = harness([procedure]);
+	test("a rewind to before the invocation leaves the runtime inert", async () => {
+		const { handlers, sent } = harness([procedure]);
 		const { ctx, notified } = await engage(handlers, "procedure");
 
-		await handler(handlers, "session_branch")({ type: "session_branch", reason: "branch", previousSessionFile: undefined }, ctx);
-
+		// The harness ends the outgoing session in session_before_branch ...
+		const before = await handler(handlers, "session_before_branch")(
+			{ type: "session_before_branch", reason: "branch", entryId: "e1" },
+			ctx,
+		);
+		expect(before).toBeUndefined();
 		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "branch")]);
+
+		// ... and the branched-off session is a different id with an empty branch.
+		const fresh = mockCtx("s2", "main", []);
+		await handler(handlers, "session_branch")({ type: "session_branch", reason: "branch", previousSessionFile: undefined }, fresh.ctx);
+
+		expect(fresh.notified).toEqual([]);
+		expect(await handler(handlers, "context")({ type: "context", messages: [skillPrompt("procedure")] }, fresh.ctx)).toBeUndefined();
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), fresh.ctx);
+		expect(sent.map((s) => s.payload.customType)).toEqual(engageAsideTypes);
+	});
+
+	test("a rewind to after the invocation re-engages with the state as of that point", async () => {
+		const { handlers, sent } = harness([procedure]);
+		const { ctx, notified } = await engage(handlers, "procedure");
+
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"y"}\n```'), ctx);
+		expect(sent.map((s) => s.payload.customType)).toEqual([...engageAsideTypes, STATE_MESSAGE_TYPE, STATE_MESSAGE_TYPE]);
+
+		await handler(handlers, "session_before_branch")({ type: "session_before_branch", reason: "branch", entryId: "e1" }, ctx);
+		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "branch")]);
+
+		// The new session carries the rewound branch: invocation, initial state, goal:x.
+		const fresh = mockCtx("s2", "main", [invocationEntry("procedure"), stateEntry({}), stateEntry({ goal: "x" })]);
+		await handler(handlers, "session_branch")({ type: "session_branch", reason: "branch", previousSessionFile: undefined }, fresh.ctx);
+
+		expect(fresh.notified).toEqual(engageNotices("procedure"));
+		// The head asides are s1's sends; the re-derive on s2 re-sent none.
+		expect(sent.map((s) => s.payload.customType)).toEqual([...engageAsideTypes, STATE_MESSAGE_TYPE, STATE_MESSAGE_TYPE]);
+
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"extra":1}\n```'), fresh.ctx);
+		expect(sent[sent.length - 1].payload.details).toEqual({ state: { goal: "x", extra: 1 } });
+	});
+
+	test("tree navigation re-derives like a rewind", async () => {
+		const { handlers, sent } = harness([procedure]);
+		const branch: unknown[] = [];
+		const { ctx, notified } = mockCtx("s1", "main", branch);
+		branch.push(invocationEntry("procedure"), stateEntry({}), stateEntry({ goal: "x" }));
+
+		await handler(handlers, "session_tree")({ type: "session_tree", newLeafId: "l2", oldLeafId: "l1" }, ctx);
+
+		expect(notified).toEqual(engageNotices("procedure"));
+		expect(sent).toEqual([]);
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"extra":1}\n```'), ctx);
+		expect(sent[sent.length - 1].payload.details).toEqual({ state: { goal: "x", extra: 1 } });
+	});
+
+	test("/resume of an engaged session re-derives its state and re-engages without resending the head", async () => {
+		const { handlers, sent } = harness([procedure]);
+		const { ctx, notified } = await engage(handlers, "procedure");
+
+		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "resume", targetSessionFile: "s2" }, ctx);
+		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/resume")]);
+
+		const target = mockCtx("s2", "main", [invocationEntry("procedure"), stateEntry({}), stateEntry({ goal: "x" })]);
+		await handler(handlers, "session_switch")({ type: "session_switch", reason: "resume", previousSessionFile: "s1" }, target.ctx);
+
+		expect(target.notified).toEqual(engageNotices("procedure"));
+		// The head asides are s1's engage sends; re-derive added none.
+		expect(sent.map((s) => s.payload.customType)).toEqual(engageAsideTypes);
+
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"extra":1}\n```'), target.ctx);
+		expect(sent[sent.length - 1].payload.details).toEqual({ state: { goal: "x", extra: 1 } });
+	});
+
+	test("/new starts the next session inert", async () => {
+		const { handlers, sent } = harness([procedure]);
+		const { ctx, notified } = await engage(handlers, "procedure");
+
+		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "new" }, ctx);
+		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/new")]);
+
+		const fresh = mockCtx("s2", "main", []);
+		await handler(handlers, "session_switch")({ type: "session_switch", reason: "new", previousSessionFile: "s1" }, fresh.ctx);
+		expect(fresh.notified).toEqual([]);
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), fresh.ctx);
+		expect(sent.map((s) => s.payload.customType)).toEqual(engageAsideTypes);
+		expect(await handler(handlers, "context")({ type: "context", messages: [skillPrompt("procedure")] }, fresh.ctx)).toBeUndefined();
+	});
+
+	test("cold session_start re-engages from the branch without resending the head", async () => {
+		const { handlers, sent } = harness([procedure]);
+		const { ctx, notified } = mockCtx("s1", "main", [invocationEntry("procedure"), stateEntry({ goal: "x" })]);
+
+		await handler(handlers, "session_start")({ type: "session_start" }, ctx);
+
+		expect(notified).toEqual(engageNotices("procedure"));
+		expect(sent).toEqual([]);
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"extra":1}\n```'), ctx);
+		expect(sent[sent.length - 1].payload.details).toEqual({ state: { goal: "x", extra: 1 } });
+	});
+
+	test("session_start stays inert without a usable procedure on the branch", async () => {
+		const empty = harness([procedure]);
+		const emptyCtx = mockCtx("s1");
+		await handler(empty.handlers, "session_start")({ type: "session_start" }, emptyCtx.ctx);
+		expect(emptyCtx.notified).toEqual([]);
+		expect(await handler(empty.handlers, "context")({ type: "context", messages: [skillPrompt("procedure")] }, emptyCtx.ctx)).toBeUndefined();
+
+		const agent = harness([procedure]);
+		const agentCtx = mockCtx("s1", "main", [invocationEntry("procedure", "agent"), stateEntry({ goal: "x" })]);
+		await handler(agent.handlers, "session_start")({ type: "session_start" }, agentCtx.ctx);
+		expect(agentCtx.notified).toEqual([]);
+
+		const schemaless = harness([plain]);
+		const schemalessCtx = mockCtx("s1", "main", [invocationEntry("plain"), stateEntry({ goal: "x" })]);
+		await handler(schemaless.handlers, "session_start")({ type: "session_start" }, schemalessCtx.ctx);
+		expect(schemalessCtx.notified).toEqual([]);
+		expect(
+			await handler(schemaless.handlers, "context")({ type: "context", messages: [skillPrompt("plain")] }, schemalessCtx.ctx),
+		).toBeUndefined();
+
+		const sub = harness([procedure]);
+		const subCtx = mockCtx("s1", "sub", [invocationEntry("procedure"), stateEntry({ goal: "x" })]);
+		await handler(sub.handlers, "session_start")({ type: "session_start" }, subCtx.ctx);
+		expect(subCtx.notified).toEqual([]);
+	});
+
+	test("a later invocation re-derives with its own state, never the earlier skill's", async () => {
+		const { handlers, sent } = harness([procedure, smallProcedure]);
+		const { ctx, notified } = mockCtx("s1", "main", [
+			invocationEntry("procedure"),
+			stateEntry({ goal: "old" }),
+			invocationEntry("smallcap"),
+			stateEntry({ goal: "new" }),
+		]);
+
+		await handler(handlers, "session_start")({ type: "session_start" }, ctx);
+
+		expect(notified).toEqual(engageNotices("smallcap"));
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"extra":1}\n```'), ctx);
+		expect(sent[sent.length - 1].payload.details).toEqual({ state: { goal: "new", extra: 1 } });
+	});
+
+	test("an invocation with no state message after it stays inert, even when an earlier procedure left one", async () => {
+		const { handlers } = harness([procedure, smallProcedure]);
+		const { ctx, notified } = mockCtx("s1", "main", [
+			invocationEntry("procedure"),
+			stateEntry({ goal: "old" }),
+			invocationEntry("smallcap"),
+		]);
+
+		await handler(handlers, "session_start")({ type: "session_start" }, ctx);
+
+		expect(notified).toEqual([]);
+		expect(await handler(handlers, "context")({ type: "context", messages: [skillPrompt("smallcap")] }, ctx)).toBeUndefined();
+	});
+
+	test("a fork re-derives like any switch", async () => {
+		const { handlers, sent } = harness([procedure]);
+		const { ctx, notified } = await engage(handlers, "procedure");
+
+		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "fork" }, ctx);
+		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "fork")]);
+
+		const fork = mockCtx("s2", "main", [invocationEntry("procedure"), stateEntry({ goal: "x" })]);
+		await handler(handlers, "session_switch")({ type: "session_switch", reason: "fork", previousSessionFile: "s1" }, fork.ctx);
+
+		expect(fork.notified).toEqual(engageNotices("procedure"));
+		// The head asides are s1's engage sends; the fork's re-derive re-sent none.
+		expect(sent.map((s) => s.payload.customType)).toEqual(engageAsideTypes);
 	});
 
 	test("disengages on tree navigation", async () => {
@@ -328,6 +530,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "new" }, ctx);
 		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "resume" }, ctx);
 		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "fork" }, ctx);
+		await handler(handlers, "session_before_branch")({ type: "session_before_branch", reason: "branch", entryId: "e1" }, ctx);
 		await handler(handlers, "session_branch")({ type: "session_branch", reason: "branch", previousSessionFile: undefined }, ctx);
 		await handler(handlers, "session_tree")({ type: "session_tree", newLeafId: null, oldLeafId: null }, ctx);
 		await handler(handlers, "input")({ type: "input", text: "/clear", source: "interactive" }, ctx);
@@ -559,6 +762,75 @@ describe("omp-skill-state patch loop", () => {
 		expect(sent).toEqual([]);
 		expect(subBlocked).toBeUndefined();
 		expect(sub.notified).toEqual([]);
+	});
+});
+
+describe("omp-skill-state idle disengage", () => {
+	test("three consecutive no-patch steps disengage; two stay engaged", async () => {
+		const { handlers, ctx, notified } = await patchHarness(procedure);
+
+		await handler(handlers, "assistant_message")(assistantMessage("step 1"), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage("step 2"), ctx);
+		expect(notified).toEqual(engageNotices("procedure"));
+
+		await handler(handlers, "assistant_message")(assistantMessage("step 3"), ctx);
+		expect(notified).toEqual([
+			...engageNotices("procedure"),
+			{ message: 'skill-state: procedure "procedure" disengaged (idle for 3 steps)', type: "info" },
+		]);
+	});
+
+	test("the idle threshold honours x-state idleSteps", async () => {
+		const { handlers, ctx, notified } = await patchHarness(idleProcedure);
+
+		await handler(handlers, "assistant_message")(assistantMessage("step 1"), ctx);
+		expect(notified).toEqual(engageNotices("idleproc"));
+
+		await handler(handlers, "assistant_message")(assistantMessage("step 2"), ctx);
+		expect(notified).toEqual([
+			...engageNotices("idleproc"),
+			{ message: 'skill-state: procedure "idleproc" disengaged (idle for 2 steps)', type: "info" },
+		]);
+	});
+
+	test("a valid patch between idle steps resets the idle run", async () => {
+		const { handlers, ctx, notified } = await patchHarness(procedure);
+
+		await handler(handlers, "assistant_message")(assistantMessage("no patch"), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage("no patch"), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage("no patch"), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage("no patch"), ctx);
+
+		expect(notified).toEqual(engageNotices("procedure"));
+	});
+
+	test("an invalid patch also resets the idle run", async () => {
+		const { handlers, ctx, notified } = await patchHarness(procedure);
+
+		await handler(handlers, "assistant_message")(assistantMessage("no patch"), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage("no patch"), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage("no patch"), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage("no patch"), ctx);
+
+		expect(notified).toEqual(engageNotices("procedure"));
+	});
+
+	test("after an idle disengage the step is ordinary", async () => {
+		const { handlers, sent, ctx, notified } = await patchHarness(idleProcedure);
+
+		await handler(handlers, "assistant_message")(assistantMessage("step 1"), ctx);
+		await handler(handlers, "assistant_message")(assistantMessage("step 2"), ctx);
+		expect(notified).toEqual([
+			...engageNotices("idleproc"),
+			...disengageNotices("idleproc", "idle for 2 steps"),
+		]);
+
+		const blocked = await handler(handlers, "tool_call")(toolCall("read"), ctx);
+		expect(blocked).toBeUndefined();
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), ctx);
+		expect(sent.map((s) => s.payload.customType)).toEqual(engageAsideTypes);
 	});
 });
 

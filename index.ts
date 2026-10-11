@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext, SessionBeforeSwitchEvent, Skill } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Text } from "@oh-my-pi/pi-coding-agent";
 import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, parsePatch, renderStateContent } from "./patch";
 import { project } from "./projection";
@@ -7,12 +7,6 @@ import type { ExecutionState, StateParams, StateSchema } from "./state";
 
 const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 
-const SWITCH_TRIGGER: Record<SessionBeforeSwitchEvent["reason"], string> = {
-	new: "/new",
-	resume: "/resume",
-	fork: "fork",
-};
-
 interface Engagement {
 	name: string;
 	schema: StateSchema;
@@ -20,6 +14,7 @@ interface Engagement {
 	state: ExecutionState;
 	pendingError?: string;
 	invalidPatches: number;
+	idle: number;
 }
 
 // Keyed by session id, not a bare flag: extension module state is shared across
@@ -37,15 +32,60 @@ export default function (pi: ExtensionAPI): void {
 
 	// Degrade drops the engagement at once: the disengaging step is already
 	// ordinary, and the pending error and invalid-patch counter die with the engagement.
+	// A patch of any kind counts as activity, so it also breaks an idle run.
 	function recordInvalidPatch(engagement: Engagement, ctx: ExtensionContext, error: string): void {
 		engagement.pendingError = error;
 		engagement.invalidPatches += 1;
+		engagement.idle = 0;
 		if (engagement.invalidPatches < engagement.params.retries) return;
 		engaged.delete(ctx.sessionManager.getSessionId());
 		ctx.ui.notify(
 			`skill-state: procedure "${engagement.name}" degraded after ${engagement.params.retries} invalid patches; running ordinarily`,
 			"warning",
 		);
+	}
+
+	// Every engagement starts here with fresh counters, from a new invocation and
+	// from a re-derive alike. Both notices are UI-only and never enter model context.
+	function engage(ctx: ExtensionContext, sessionId: string, name: string, loaded: { schema: StateSchema; params: StateParams }, state: ExecutionState): void {
+		engaged.set(sessionId, { name, schema: loaded.schema, params: loaded.params, state, invalidPatches: 0, idle: 0 });
+		ctx.ui.notify(`skill-state: procedure "${name}" engaged`, "info");
+		ctx.ui.notify("skill-state: history is hidden from the model while engaged; finish with /new", "info");
+	}
+
+	// Re-derives engagement from what is stored on the branch, so a cold load, a
+	// /resume, a rewind or a tree navigation land on the procedure state that
+	// branch actually carries. The head asides (rules, P, state) are already on
+	// the branch and are never re-sent: the projection takes the last of each
+	// type, and a fresh aside would shadow the real stored state.
+	async function rederive(ctx: ExtensionContext, trigger: string): Promise<void> {
+		if (ctx.agent.kind !== "main") return;
+		let name: string | undefined;
+		let state: ExecutionState | undefined;
+		for (const entry of ctx.sessionManager.getBranch()) {
+			if (entry.type !== "custom_message") continue;
+			if (entry.customType === SKILL_PROMPT_MESSAGE_TYPE && entry.attribution === "user") {
+				const details = entry.details as { name?: unknown } | undefined;
+				if (typeof details?.name === "string" && details.name.length > 0) {
+					// A later invocation restarts the procedure, so its state messages
+					// must not be attributed to the earlier one.
+					name = details.name;
+					state = undefined;
+				}
+			} else if (entry.customType === STATE_MESSAGE_TYPE && name !== undefined) {
+				const details = entry.details as { state?: unknown } | undefined;
+				// Only entries this runtime wrote carry a plain-object details.state.
+				if (isPlainObject(details?.state)) state = details.state as ExecutionState;
+			}
+		}
+		if (name !== undefined && state !== undefined) {
+			const loaded = await loadStateSchema(name, pi.pi.getActiveSkills());
+			if (loaded.ok) {
+				engage(ctx, ctx.sessionManager.getSessionId(), name, loaded, state);
+				return;
+			}
+		}
+		disengage(ctx, trigger);
 	}
 
 	// Renderer registration is a load-time call and needs no session state, so it
@@ -71,6 +111,10 @@ export default function (pi: ExtensionAPI): void {
 		if (patch.kind === "none") {
 			engagement.pendingError = undefined;
 			engagement.invalidPatches = 0;
+			engagement.idle += 1;
+			if (engagement.idle >= engagement.params.idleSteps) {
+				disengage(ctx, `idle for ${engagement.params.idleSteps} steps`);
+			}
 			return undefined;
 		}
 		if (patch.kind === "json") {
@@ -79,6 +123,7 @@ export default function (pi: ExtensionAPI): void {
 				engagement.state = applied.state;
 				engagement.pendingError = undefined;
 				engagement.invalidPatches = 0;
+				engagement.idle = 0;
 				// Aside delivery lands the message at the next step boundary, so the
 				// state is stored before the next provider call without interrupting
 				// the in-flight tool batch. details.state lets later issues rebuild t
@@ -125,7 +170,7 @@ export default function (pi: ExtensionAPI): void {
 		// handlers, so a second invocation in the same batch can pass the check
 		// above before this read resolves.
 		if (!loaded.ok || engaged.has(sessionId)) return;
-		engaged.set(sessionId, { name, schema: loaded.schema, params: loaded.params, state: {}, invalidPatches: 0 });
+		engage(ctx, sessionId, name, loaded, {});
 		// The projected prompt's head is pinned here at engage: the operating rules,
 		// the procedure spec P, and the initial state so the head exists from the
 		// first step. P is the rendered skill prompt the harness already produced
@@ -142,8 +187,6 @@ export default function (pi: ExtensionAPI): void {
 			{ customType: STATE_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {} } },
 			{ deliverAs: "aside" },
 		);
-		ctx.ui.notify(`skill-state: procedure "${name}" engaged`, "info");
-		ctx.ui.notify("skill-state: history is hidden from the model while engaged; finish with /new", "info");
 	});
 
 	// The projection rewrites only the prompt; the stored transcript stays
@@ -157,16 +200,38 @@ export default function (pi: ExtensionAPI): void {
 		return messages === undefined ? undefined : { messages };
 	});
 
+	// A switch, rewind or fork lands in a different session id, so the outgoing
+	// record is ended here (with the spec's disengage notice) and the incoming
+	// session re-derives from the branch it loads; a fork re-derives like any
+	// branch because the state it carries is current, not stale.
+	const switchLabels: Record<"new" | "resume" | "fork", string> = { new: "/new", resume: "/resume", fork: "fork" };
 	pi.on("session_before_switch", (event, ctx) => {
-		disengage(ctx, SWITCH_TRIGGER[event.reason]);
+		disengage(ctx, switchLabels[event.reason]);
+		return undefined;
 	});
 
-	pi.on("session_branch", (_event, ctx) => {
-		disengage(ctx, "branch");
+	pi.on("session_before_branch", (event, ctx) => {
+		disengage(ctx, event.reason);
+		return undefined;
 	});
 
-	pi.on("session_tree", (_event, ctx) => {
-		disengage(ctx, "tree navigation");
+	pi.on("session_switch", async (_event, ctx) => {
+		await rederive(ctx, "session switch");
+	});
+
+	pi.on("session_start", async (_event, ctx) => {
+		await rederive(ctx, "session start");
+	});
+
+	// Both fire after the branch changed. A rewind lands in a new session id,
+	// whose record was never engaged; tree navigation keeps the id, so there the
+	// scan also disengages when the new leaf sits before the invocation.
+	pi.on("session_branch", async (_event, ctx) => {
+		await rederive(ctx, "branch");
+	});
+
+	pi.on("session_tree", async (_event, ctx) => {
+		await rederive(ctx, "tree navigation");
 	});
 
 	pi.on("input", (event, ctx) => {

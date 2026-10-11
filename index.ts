@@ -1,11 +1,10 @@
-import type { ExtensionAPI, ExtensionContext, SessionBeforeCompactEvent } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Text } from "@oh-my-pi/pi-coding-agent";
+import { SKILL_PROMPT_MESSAGE_TYPE, contentText, currentStepCut, scanBranch } from "./branch";
 import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, parsePatch, renderStateContent } from "./patch";
 import { project } from "./projection";
 import { applyPatch, isPlainObject, loadStateSchema } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
-
-const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 
 // The final state waits for the session to go idle before it is stored; the
 // harness settles within a few event-loop turns of agent_end, and a queued
@@ -34,36 +33,10 @@ interface Engagement {
 	finalState?: ExecutionState;
 }
 
-// Custom message content is a string or text blocks; the invocation's P is
-// taken from and the stored P is read back through the same path.
-function contentText(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (Array.isArray(content)) {
-		return content
-			.flatMap((block) => (isPlainObject(block) && block.type === "text" && typeof block.text === "string" ? [block.text] : []))
-			.join("\n");
-	}
-	return String(content);
-}
-
 // details.state lets later re-derives rebuild t from the branch without
 // re-parsing the content.
 function stateMessage(state: ExecutionState) {
 	return { customType: STATE_MESSAGE_TYPE, content: renderStateContent(state), display: true, details: { state } };
-}
-
-// The compaction cut: the latest assistant message on the branch, i.e. the
-// start of the current step, so the kept tail is exactly the step the next
-// projection pins (its tool results follow it). The harness's own cut keeps a
-// turn-sized tail the projection never sends but the harness still counts; a
-// tail still over its recovery band makes it "rescue" the compaction with an
-// elide pass that rewrites kept entries in place, the state messages included.
-function currentStepCut(branch: SessionBeforeCompactEvent["branchEntries"]): string | undefined {
-	for (let i = branch.length - 1; i >= 0; i--) {
-		const entry = branch[i]!;
-		if (entry.type === "message" && entry.message?.role === "assistant") return entry.id;
-	}
-	return undefined;
 }
 
 // Keyed by session id, not a bare flag: extension module state is shared across
@@ -149,32 +122,11 @@ export default function (pi: ExtensionAPI): void {
 	// type, and a fresh aside would shadow the real stored state.
 	async function rederive(ctx: ExtensionContext, trigger: string): Promise<void> {
 		if (ctx.agent.kind !== "main") return;
-		let name: string | undefined;
-		let spec: string | undefined;
-		let state: ExecutionState | undefined;
-		for (const entry of ctx.sessionManager.getBranch()) {
-			if (entry.type !== "custom_message") continue;
-			if (entry.customType === SKILL_PROMPT_MESSAGE_TYPE && entry.attribution === "user") {
-				const details = entry.details as { name?: unknown } | undefined;
-				if (typeof details?.name === "string" && details.name.length > 0) {
-					// A later invocation restarts the procedure, so its head messages
-					// must not be attributed to the earlier one.
-					name = details.name;
-					spec = undefined;
-					state = undefined;
-				}
-			} else if (entry.customType === PROCEDURE_SPEC_MESSAGE_TYPE && name !== undefined) {
-				spec = contentText(entry.content);
-			} else if (entry.customType === STATE_MESSAGE_TYPE && name !== undefined) {
-				const details = entry.details as { state?: unknown } | undefined;
-				// Only entries this runtime wrote carry a plain-object details.state.
-				if (isPlainObject(details?.state)) state = details.state as ExecutionState;
-			}
-		}
-		if (name !== undefined && spec !== undefined && state !== undefined) {
-			const loaded = await loadStateSchema(name, pi.pi.getActiveSkills());
+		const found = scanBranch(ctx.sessionManager.getBranch());
+		if (found !== undefined) {
+			const loaded = await loadStateSchema(found.name, pi.pi.getActiveSkills());
 			if (loaded.ok) {
-				engage(ctx, ctx.sessionManager.getSessionId(), name, spec, loaded, state);
+				engage(ctx, ctx.sessionManager.getSessionId(), found.name, found.spec, loaded, found.state);
 				return;
 			}
 		}

@@ -10,6 +10,7 @@ Status: implemented and verified against a long real session (`docs/verification
 | --- | --- |
 | `package.json` | Plugin manifest: `"omp": { "extensions": ["./index.ts"] }` |
 | `index.ts` | The extension. omp imports the TypeScript directly; there is no build step. |
+| `branch.ts` | Pure reads over the stored branch: the re-derive scan and the compaction cut. |
 | `index.test.ts`, `*.test.ts` | Unit tests for the factory contract, the state merge, the patch parser and the projection |
 | `skills/recon/` | Bundled sample procedure skill (`SKILL.md` + `state.schema.json`) |
 | `docs/spec.md`, `docs/adr/`, `CONTEXT.md` | Design, decisions, glossary |

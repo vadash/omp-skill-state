@@ -1,0 +1,206 @@
+import { describe, expect, test } from "bun:test";
+import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
+import { SKILL_PROMPT_MESSAGE_TYPE, contentText, currentStepCut, scanBranch } from "./branch";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent } from "./patch";
+import type { ExecutionState } from "./state";
+
+// Branch entries as the harness stores them; ids and timestamps are
+// placeholders, only the shape matters to the reads under test.
+let seq = 0;
+const nextId = () => `e${seq++}`;
+const stamp = () => new Date(0).toISOString();
+
+const ZERO_USAGE = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+function invocation(name: string, attribution: "user" | "agent" = "user", details: unknown = { name }): SessionEntry {
+	return {
+		type: "custom_message",
+		id: nextId(),
+		parentId: null,
+		timestamp: stamp(),
+		customType: SKILL_PROMPT_MESSAGE_TYPE,
+		content: `Running skill ${name}`,
+		display: true,
+		details,
+		attribution,
+	};
+}
+
+function specEntry(name: string): SessionEntry {
+	return {
+		type: "custom_message",
+		id: nextId(),
+		parentId: null,
+		timestamp: stamp(),
+		customType: PROCEDURE_SPEC_MESSAGE_TYPE,
+		content: `Running skill ${name}`,
+		display: false,
+		details: { name },
+	};
+}
+
+function stateEntry(state: ExecutionState, details: unknown = { state }): SessionEntry {
+	return {
+		type: "custom_message",
+		id: nextId(),
+		parentId: null,
+		timestamp: stamp(),
+		customType: STATE_MESSAGE_TYPE,
+		content: renderStateContent(state),
+		display: true,
+		details,
+	};
+}
+
+// A state message with no details at all, as a foreign writer might store it.
+function bareStateEntry(): SessionEntry {
+	return {
+		type: "custom_message",
+		id: nextId(),
+		parentId: null,
+		timestamp: stamp(),
+		customType: STATE_MESSAGE_TYPE,
+		content: renderStateContent({}),
+		display: true,
+	};
+}
+
+function assistantEntry(id: string): SessionEntry {
+	return {
+		type: "message",
+		id,
+		parentId: null,
+		timestamp: stamp(),
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "step" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "m",
+			usage: ZERO_USAGE,
+			stopReason: "toolUse",
+			timestamp: 0,
+		},
+	};
+}
+
+function toolResultEntry(id: string): SessionEntry {
+	return {
+		type: "message",
+		id,
+		parentId: null,
+		timestamp: stamp(),
+		message: { role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "ok" }], isError: false, timestamp: 0 },
+	};
+}
+
+function customEntry(id: string): SessionEntry {
+	return { type: "custom", id, parentId: null, timestamp: stamp(), customType: "tool_execution_start" };
+}
+
+describe("scanBranch", () => {
+	test("an empty branch is inert", () => {
+		expect(scanBranch([])).toBeUndefined();
+	});
+
+	test("a user invocation followed by its spec and a state message re-derives that state", () => {
+		const found = scanBranch([invocation("recon"), specEntry("recon"), stateEntry({ goal: "x" })]);
+
+		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x" } });
+	});
+
+	test("the latest state message wins", () => {
+		const found = scanBranch([invocation("recon"), specEntry("recon"), stateEntry({ goal: "x" }), stateEntry({ goal: "y" })]);
+
+		expect(found?.state).toEqual({ goal: "y" });
+	});
+
+	test("an incomplete head is inert: no spec, or no state", () => {
+		expect(scanBranch([invocation("recon"), stateEntry({ goal: "x" })])).toBeUndefined();
+		expect(scanBranch([invocation("recon"), specEntry("recon")])).toBeUndefined();
+	});
+
+	test("a later invocation restarts the procedure: the earlier head is not attributed to it", () => {
+		const branch = [invocation("recon"), specEntry("recon"), stateEntry({ goal: "old" }), invocation("other")];
+		expect(scanBranch(branch)).toBeUndefined();
+
+		const found = scanBranch([...branch, specEntry("other"), stateEntry({ goal: "new" })]);
+		expect(found).toEqual({ name: "other", spec: "Running skill other", state: { goal: "new" } });
+	});
+
+	test("an agent-attributed invocation and one without a name never count", () => {
+		expect(scanBranch([invocation("recon", "agent"), specEntry("recon"), stateEntry({ goal: "x" })])).toBeUndefined();
+		expect(scanBranch([invocation("recon", "user", {}), specEntry("recon"), stateEntry({ goal: "x" })])).toBeUndefined();
+		expect(scanBranch([invocation("recon", "user", { name: "" }), specEntry("recon"), stateEntry({ goal: "x" })])).toBeUndefined();
+	});
+
+	test("head messages before any invocation are ignored", () => {
+		expect(scanBranch([specEntry("recon"), stateEntry({ goal: "x" }), invocation("recon")])).toBeUndefined();
+	});
+
+	test("only a plain-object details.state counts as a state", () => {
+		const head = [invocation("recon"), specEntry("recon")];
+
+		expect(scanBranch([...head, bareStateEntry()])).toBeUndefined();
+		expect(scanBranch([...head, stateEntry({ goal: "x" }, {})])).toBeUndefined();
+		expect(scanBranch([...head, stateEntry({ goal: "x" }, { state: ["x"] })])).toBeUndefined();
+		expect(scanBranch([...head, stateEntry({ goal: "x" }, { state: null })])).toBeUndefined();
+	});
+
+	test("entries of other kinds are skipped", () => {
+		const found = scanBranch([
+			customEntry("c1"),
+			invocation("recon"),
+			assistantEntry("a1"),
+			specEntry("recon"),
+			toolResultEntry("r1"),
+			stateEntry({ goal: "x" }),
+			customEntry("c2"),
+		]);
+
+		expect(found?.state).toEqual({ goal: "x" });
+	});
+});
+
+describe("currentStepCut", () => {
+	test("is the latest assistant message, even when results and customs follow it", () => {
+		const cut = currentStepCut([
+			assistantEntry("a1"),
+			toolResultEntry("r1"),
+			assistantEntry("a2"),
+			customEntry("c1"),
+			toolResultEntry("r2"),
+			stateEntry({}),
+		]);
+
+		expect(cut).toBe("a2");
+	});
+
+	test("is undefined when the branch holds no assistant message", () => {
+		expect(currentStepCut([])).toBeUndefined();
+		expect(currentStepCut([invocation("recon"), specEntry("recon"), stateEntry({})])).toBeUndefined();
+	});
+});
+
+describe("contentText", () => {
+	test("a string passes through", () => {
+		expect(contentText("body")).toBe("body");
+	});
+
+	test("text blocks join with newlines and other blocks are skipped", () => {
+		const blocks = [{ type: "text", text: "a" }, { type: "image", data: "x", mimeType: "image/png" }, { type: "text", text: "b" }];
+
+		expect(contentText(blocks)).toBe("a\nb");
+	});
+
+	test("anything else is stringified", () => {
+		expect(contentText(42)).toBe("42");
+	});
+});

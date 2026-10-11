@@ -280,6 +280,8 @@ omp-skill-state/
   index.test.ts         unit tests (bun test)
   projection.ts         the projection (pure message assembly)
   projection.test.ts    projection unit tests (bun test)
+  branch.ts             pure reads over the stored branch (re-derive scan, compaction cut)
+  branch.test.ts        branch read unit tests (bun test)
   tsconfig.json         typecheck config (tsc --noEmit)
   skills/               optional bundled procedure skills, discovered from the plugin root
   CONTEXT.md            glossary
@@ -297,6 +299,7 @@ Unit, no harness needed:
 - merge operator: set, null-delete, nested object merge, array replace, absent-key preservation.
 - schema validation: each type, unknown keys under both `additionalProperties` values, non-object top level.
 - projection assembly: exact message order and roles; each dropped block type; the pinned tail pair; the byte cap and its marker.
+- branch reads: the re-derive scan (latest invocation wins, an incomplete head is inert) and the compaction cut.
 
 Against a real session (`docs/verification.md` records the outcome of each item; the invalid-patch and degrade items did not occur in the run and rest on the unit tests):
 

@@ -834,6 +834,94 @@ describe("omp-skill-state idle disengage", () => {
 	});
 });
 
+describe("omp-skill-state compaction ownership", () => {
+	// The shape SessionBeforeCompactResult takes through this suite's seams; the
+	// harness stores handlers as unknown-taking functions, so the event shape and
+	// result type live here once instead of at every call.
+	interface CompactionOutput {
+		compaction?: {
+			summary: string;
+			shortSummary?: string;
+			firstKeptEntryId: string;
+			tokensBefore: number;
+			preserveData?: unknown;
+		};
+	}
+
+	async function compact(
+		handlers: Map<string, Handler>,
+		ctx: ExtensionContext,
+		preparation: Record<string, unknown>,
+	): Promise<CompactionOutput | undefined> {
+		const result = await handler(handlers, "session_before_compact")(
+			{ type: "session_before_compact", preparation, signal: new AbortController().signal, branchEntries: [] },
+			ctx,
+		);
+		return result as CompactionOutput | undefined;
+	}
+
+	test("registers session_before_compact lazily on the first engage, never at load", async () => {
+		const { handlers } = harness([procedure]);
+		expect(handlers.has("session_before_compact")).toBe(false);
+
+		await engage(handlers, "procedure");
+
+		expect(handlers.has("session_before_compact")).toBe(true);
+	});
+
+	test("engaged compaction returns the state summary built from the harness preparation", async () => {
+		const { handlers, sent } = harness([procedure]);
+		const { ctx } = await engage(handlers, "procedure");
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"g"}\n```'), ctx);
+
+		const result = await compact(handlers, ctx, { firstKeptEntryId: "e7", tokensBefore: 4321 });
+
+		const compaction = result?.compaction;
+		expect(compaction?.firstKeptEntryId).toBe("e7");
+		expect(compaction?.tokensBefore).toBe(4321);
+		expect(compaction?.summary).toContain('Execution state of procedure "procedure"');
+		expect(compaction?.summary).toContain(renderStateContent({ goal: "g" }));
+		expect(compaction?.shortSummary).toContain('"procedure"');
+		expect(compaction?.preserveData).toEqual({ state: { goal: "g" } });
+		// No summarizer step: compaction adds no sends beyond the patch loop's own.
+		expect(sent.map((s) => s.payload.customType)).toEqual([...engageAsideTypes, STATE_MESSAGE_TYPE]);
+	});
+
+	test("a second compaction carries the live state, not an echo of previousPreserveData", async () => {
+		const { handlers } = harness([procedure]);
+		const { ctx } = await engage(handlers, "procedure");
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"g"}\n```'), ctx);
+
+		const first = await compact(handlers, ctx, { firstKeptEntryId: "e7", tokensBefore: 4321 });
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"step":2}\n```'), ctx);
+		const second = await compact(handlers, ctx, {
+			firstKeptEntryId: "e9",
+			tokensBefore: 5000,
+			previousPreserveData: first?.compaction?.preserveData,
+		});
+
+		expect(first?.compaction?.preserveData).toEqual({ state: { goal: "g" } });
+		expect(second?.compaction?.firstKeptEntryId).toBe("e9");
+		expect(second?.compaction?.preserveData).toEqual({ state: { goal: "g", step: 2 } });
+	});
+
+	test("yields to the harness default when never engaged, in a subagent, or after disengage", async () => {
+		const { handlers } = harness([procedure]);
+		// Engaging s2 registers the process-wide handler; s1 has never engaged.
+		await engage(handlers, "procedure", "s2");
+		const never = mockCtx("s1");
+		expect(await compact(handlers, never.ctx, { firstKeptEntryId: "e1", tokensBefore: 1 })).toBeUndefined();
+
+		const { ctx, notified } = await engage(handlers, "procedure");
+		const sub = mockCtx("s1", "sub");
+		expect(await compact(handlers, sub.ctx, { firstKeptEntryId: "e2", tokensBefore: 2 })).toBeUndefined();
+
+		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "new" }, ctx);
+		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/new")]);
+		expect(await compact(handlers, ctx, { firstKeptEntryId: "e3", tokensBefore: 3 })).toBeUndefined();
+	});
+});
+
 describe("omp-skill-state projection (context seam)", () => {
 	function contextEvent(messages: unknown[]) {
 		return { type: "context", messages };

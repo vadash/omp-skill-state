@@ -21,6 +21,7 @@ interface Engagement {
 // every session in one process, so one flag would leak a procedure between sessions.
 export default function (pi: ExtensionAPI): void {
 	const engaged = new Map<string, Engagement>();
+	let compactRegistered = false;
 
 	function disengage(ctx: ExtensionContext, trigger: string): void {
 		const sessionId = ctx.sessionManager.getSessionId();
@@ -48,6 +49,27 @@ export default function (pi: ExtensionAPI): void {
 	// Every engagement starts here with fresh counters, from a new invocation and
 	// from a re-derive alike. Both notices are UI-only and never enter model context.
 	function engage(ctx: ExtensionContext, sessionId: string, name: string, loaded: { schema: StateSchema; params: StateParams }, state: ExecutionState): void {
+		// Registering a session_before_compact handler disables speculative
+		// compaction for the session and pi.on has no counterpart, so the handler
+		// can never be removed (ADR 0001): it is registered lazily, on the first
+		// engage, so sessions that never run a procedure keep the harness default.
+		if (!compactRegistered) {
+			compactRegistered = true;
+			pi.on("session_before_compact", (event, ctx) => {
+				if (ctx.agent.kind !== "main") return undefined;
+				const engagement = engaged.get(ctx.sessionManager.getSessionId());
+				if (engagement === undefined) return undefined;
+				return {
+					compaction: {
+						summary: `Execution state of procedure "${engagement.name}" (skill-state runtime):\n\n${renderStateContent(engagement.state)}`,
+						shortSummary: `skill-state: procedure "${engagement.name}" execution state`,
+						firstKeptEntryId: event.preparation.firstKeptEntryId,
+						tokensBefore: event.preparation.tokensBefore,
+						preserveData: { state: engagement.state },
+					},
+				};
+			});
+		}
 		engaged.set(sessionId, { name, schema: loaded.schema, params: loaded.params, state, invalidPatches: 0, idle: 0 });
 		ctx.ui.notify(`skill-state: procedure "${name}" engaged`, "info");
 		ctx.ui.notify("skill-state: history is hidden from the model while engaged; finish with /new", "info");

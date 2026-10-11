@@ -286,6 +286,7 @@ omp-skill-state/
   procedure.test.ts     step policy unit tests (bun test)
   messages.ts           the message vocabulary: the head message types, the state renderer and the state message builder
   messages.test.ts      message vocabulary unit tests (bun test)
+  fake-session.ts       the fake omp session for the adapter tests (branch, delivery timing, sends)
   tsconfig.json         typecheck config (tsc --noEmit)
   skills/               optional bundled procedure skills, discovered from the plugin root
   CONTEXT.md            glossary
@@ -305,6 +306,8 @@ Unit, no harness needed:
 - projection assembly: exact message order and roles; each dropped block type; the pinned tail pair; the byte cap and its marker.
 - branch reads: the re-derive scan (latest invocation wins, an incomplete head is inert) and the compaction cut.
 - step policy: each reply outcome (none, store as aside or final, block, ended by degrade or idle), the counters and their resets, the head and the compaction result.
+
+`index.test.ts` drives the factory through a fake omp session (`fake-session.ts`): one factory with N sessions keyed by id, each owning its branch, sends, notices and idle flag. The fake auto-dispatches the harness event order inside one verb, assembles the context of each provider call from its branch, and models delivery timing: messages sent while busy flush at the end of the current step (so the first step after engage carries no head), messages sent while idle are appended at once, and a reply with no tool call ends the run. The delivery model is the fake interface contract; `docs/verification.md` remains the real-session ground truth.
 
 Against a real session (`docs/verification.md` records the outcome of each item; the invalid-patch and degrade items did not occur in the run and rest on the unit tests):
 

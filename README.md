@@ -13,6 +13,7 @@ Status: implemented and verified against a long real session (`docs/verification
 | `branch.ts` | Pure reads over the stored branch: the re-derive scan and the compaction cut. |
 | `procedure.ts` | The procedure record and the step policy: patch outcomes, idle and retry counters, head and compaction construction. |
 | `messages.ts` | The custom message vocabulary: the head message types, the state renderer and the state message builder. |
+| `fake-session.ts` | The fake omp session the adapter tests drive: branch, delivery timing, sends and notices. |
 | `index.test.ts`, `*.test.ts` | Unit tests for the factory contract, the step policy, the branch reads, the state merge, the patch parser and the projection |
 | `skills/recon/` | Bundled sample procedure skill (`SKILL.md` + `state.schema.json`) |
 | `docs/spec.md`, `docs/adr/`, `CONTEXT.md` | Design, decisions, glossary |

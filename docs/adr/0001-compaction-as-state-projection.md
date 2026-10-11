@@ -11,3 +11,7 @@ While a procedure is engaged the prompt is bounded, but omp's auto-compaction st
 ## Consequences
 
 Speculative compaction is unavailable from the first engage until the end of that session. Blocking compaction still works, so context overflow remains protected.
+
+## Amendment: the cut is the current step
+
+The integration run (`docs/verification.md`) showed that `firstKeptEntryId` cannot be taken from `preparation`. The harness proposes a turn-sized kept tail; a procedure is one user turn, so the proposal keeps most of the run, and the harness's post-compaction headroom check then fails. Its dead-end rescue runs `shake("elide")`, which rewrites the kept entries in place on disk — tool results and any fenced or XML block of 400+ tokens, custom messages included — so the stored state messages and the current observation became placeholders and the model lost `t`. The handler now cuts at the latest assistant message on the branch (the current step), which leaves the rescue nothing to do, and the state message is rendered as plain JSON without a fence so no shake path can target it. Spec section 10 carries the detail.

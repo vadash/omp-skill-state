@@ -41,10 +41,10 @@ describe("parsePatch", () => {
 });
 
 describe("renderStateContent", () => {
-	test("wraps the state in a json fence that parses back", () => {
+	test("renders the state as labelled plain JSON: no fence line, so the harness's elide pass never targets it, and never a patch", () => {
 		const content = renderStateContent({ a: 1 });
-		expect(content.startsWith("```json\n")).toBe(true);
-		expect(content.endsWith("\n```")).toBe(true);
-		expect(JSON.parse(content.slice("```json\n".length, -"\n```".length))).toEqual({ a: 1 });
+		expect(content.split("\n").some((line) => line.trimStart().startsWith("```"))).toBe(false);
+		expect(content).toContain(JSON.stringify({ a: 1 }, null, 2));
+		expect(parsePatch(content)).toEqual({ kind: "none" });
 	});
 });

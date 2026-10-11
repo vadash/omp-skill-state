@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, jest, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -25,9 +25,15 @@ function skillPrompt(name: string, attribution: "user" | "agent" = "user") {
 	};
 }
 
+// One pi.sendMessage call as the factory made it.
+interface Sent {
+	payload: Record<string, unknown>;
+	options: Record<string, unknown>;
+}
+
 function recordingPi(skills: Skill[]) {
 	const handlers = new Map<string, Handler>();
-	const sent: Array<{ payload: Record<string, unknown>; options: Record<string, unknown> }> = [];
+	const sent: Sent[] = [];
 	const renderers = new Map<string, unknown>();
 	const pi = {
 		on(event: string, handler: Handler) {
@@ -56,8 +62,9 @@ function handler(handlers: Map<string, Handler>, event: string): Handler {
 	return h;
 }
 
-function mockCtx(sessionId: string, kind: "main" | "sub" = "main", branch: unknown[] = []) {
+function mockCtx(sessionId: string, kind: "main" | "sub" = "main", branch: unknown[] = [], idle = false) {
 	const notified: Array<{ message: string; type?: string }> = [];
+	const live = { idle };
 	const ctx = {
 		agent: { kind },
 		ui: {
@@ -66,8 +73,12 @@ function mockCtx(sessionId: string, kind: "main" | "sub" = "main", branch: unkno
 			},
 		},
 		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch },
+		isIdle: () => live.idle,
 	} as unknown as ExtensionContext;
-	return { ctx, notified };
+	const setIdle = (value: boolean) => {
+		live.idle = value;
+	};
+	return { ctx, notified, setIdle };
 }
 
 // The harness persists a user skill invocation and our state messages as
@@ -86,6 +97,19 @@ function invocationEntry(name: string, attribution: "user" | "agent" = "user") {
 	};
 }
 
+function specEntry(name: string) {
+	return {
+		type: "custom_message" as const,
+		id: "spec",
+		parentId: null,
+		timestamp: new Date().toISOString(),
+		customType: PROCEDURE_SPEC_MESSAGE_TYPE,
+		content: `Running skill ${name}`,
+		display: false,
+		details: { name },
+	};
+}
+
 function stateEntry(state: ExecutionState) {
 	return {
 		type: "custom_message" as const,
@@ -99,6 +123,12 @@ function stateEntry(state: ExecutionState) {
 	};
 }
 
+// What an engaged run leaves on the branch: the invocation, then the head
+// asides, then one state entry per accepted patch.
+function procedureBranch(name: string, ...states: ExecutionState[]) {
+	return [invocationEntry(name), specEntry(name), ...states.map(stateEntry)];
+}
+
 const engageNotices = (name: string) => [
 	{ message: `skill-state: procedure "${name}" engaged`, type: "info" },
 	{ message: "skill-state: history is hidden from the model while engaged; finish with /new", type: "info" },
@@ -107,12 +137,17 @@ const disengageNotices = (name: string, trigger: string) => [
 	{ message: `skill-state: procedure "${name}" disengaged (${trigger})`, type: "info" },
 ];
 
-function assistantMessage(text: string) {
+// A live step: the model's text plus one tool call, which is what keeps the
+// run going. A step without a tool call is the run's last; see finalMessage.
+function assistantMessage(text: string, toolCallId = "call-1") {
 	return {
 		type: "assistant_message",
 		message: {
 			role: "assistant",
-			content: [{ type: "text", text }],
+			content: [
+				{ type: "text", text },
+				{ type: "toolCall", id: toolCallId, name: "read", arguments: { path: "x" } },
+			],
 			api: "anthropic-messages",
 			provider: "anthropic",
 			model: "m",
@@ -121,6 +156,11 @@ function assistantMessage(text: string) {
 			timestamp: Date.now(),
 		},
 	};
+}
+
+function finalMessage(text: string) {
+	const step = assistantMessage(text);
+	return { ...step, message: { ...step.message, content: [{ type: "text", text }], stopReason: "stop" } };
 }
 
 function toolCall(name: string, id = "t1") {
@@ -164,9 +204,9 @@ afterAll(async () => {
 });
 
 async function engage(handlers: Map<string, Handler>, name: string, sessionId = "s1", kind: "main" | "sub" = "main") {
-	const { ctx, notified } = mockCtx(sessionId, kind);
+	const { ctx, notified, setIdle } = mockCtx(sessionId, kind);
 	await handler(handlers, "message_end")({ type: "message_end", message: skillPrompt(name) }, ctx);
-	return { ctx, notified };
+	return { ctx, notified, setIdle };
 }
 
 describe("omp-skill-state engage/disengage lifecycle", () => {
@@ -338,8 +378,8 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		await handler(handlers, "session_before_branch")({ type: "session_before_branch", reason: "branch", entryId: "e1" }, ctx);
 		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "branch")]);
 
-		// The new session carries the rewound branch: invocation, initial state, goal:x.
-		const fresh = mockCtx("s2", "main", [invocationEntry("procedure"), stateEntry({}), stateEntry({ goal: "x" })]);
+		// The new session carries the rewound branch: invocation, head, goal:x.
+		const fresh = mockCtx("s2", "main", procedureBranch("procedure", {}, { goal: "x" }));
 		await handler(handlers, "session_branch")({ type: "session_branch", reason: "branch", previousSessionFile: undefined }, fresh.ctx);
 
 		expect(fresh.notified).toEqual(engageNotices("procedure"));
@@ -354,7 +394,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		const { handlers, sent } = harness([procedure]);
 		const branch: unknown[] = [];
 		const { ctx, notified } = mockCtx("s1", "main", branch);
-		branch.push(invocationEntry("procedure"), stateEntry({}), stateEntry({ goal: "x" }));
+		branch.push(...procedureBranch("procedure", {}, { goal: "x" }));
 
 		await handler(handlers, "session_tree")({ type: "session_tree", newLeafId: "l2", oldLeafId: "l1" }, ctx);
 
@@ -371,7 +411,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "resume", targetSessionFile: "s2" }, ctx);
 		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/resume")]);
 
-		const target = mockCtx("s2", "main", [invocationEntry("procedure"), stateEntry({}), stateEntry({ goal: "x" })]);
+		const target = mockCtx("s2", "main", procedureBranch("procedure", {}, { goal: "x" }));
 		await handler(handlers, "session_switch")({ type: "session_switch", reason: "resume", previousSessionFile: "s1" }, target.ctx);
 
 		expect(target.notified).toEqual(engageNotices("procedure"));
@@ -399,7 +439,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 
 	test("cold session_start re-engages from the branch without resending the head", async () => {
 		const { handlers, sent } = harness([procedure]);
-		const { ctx, notified } = mockCtx("s1", "main", [invocationEntry("procedure"), stateEntry({ goal: "x" })]);
+		const { ctx, notified } = mockCtx("s1", "main", procedureBranch("procedure", { goal: "x" }));
 
 		await handler(handlers, "session_start")({ type: "session_start" }, ctx);
 
@@ -417,12 +457,12 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		expect(await handler(empty.handlers, "context")({ type: "context", messages: [skillPrompt("procedure")] }, emptyCtx.ctx)).toBeUndefined();
 
 		const agent = harness([procedure]);
-		const agentCtx = mockCtx("s1", "main", [invocationEntry("procedure", "agent"), stateEntry({ goal: "x" })]);
+		const agentCtx = mockCtx("s1", "main", [invocationEntry("procedure", "agent"), specEntry("procedure"), stateEntry({ goal: "x" })]);
 		await handler(agent.handlers, "session_start")({ type: "session_start" }, agentCtx.ctx);
 		expect(agentCtx.notified).toEqual([]);
 
 		const schemaless = harness([plain]);
-		const schemalessCtx = mockCtx("s1", "main", [invocationEntry("plain"), stateEntry({ goal: "x" })]);
+		const schemalessCtx = mockCtx("s1", "main", procedureBranch("plain", { goal: "x" }));
 		await handler(schemaless.handlers, "session_start")({ type: "session_start" }, schemalessCtx.ctx);
 		expect(schemalessCtx.notified).toEqual([]);
 		expect(
@@ -430,18 +470,22 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		).toBeUndefined();
 
 		const sub = harness([procedure]);
-		const subCtx = mockCtx("s1", "sub", [invocationEntry("procedure"), stateEntry({ goal: "x" })]);
+		const subCtx = mockCtx("s1", "sub", procedureBranch("procedure", { goal: "x" }));
 		await handler(sub.handlers, "session_start")({ type: "session_start" }, subCtx.ctx);
 		expect(subCtx.notified).toEqual([]);
+
+		// Without the stored P there is no head to re-send after a compaction.
+		const specless = harness([procedure]);
+		const speclessCtx = mockCtx("s1", "main", [invocationEntry("procedure"), stateEntry({ goal: "x" })]);
+		await handler(specless.handlers, "session_start")({ type: "session_start" }, speclessCtx.ctx);
+		expect(speclessCtx.notified).toEqual([]);
 	});
 
 	test("a later invocation re-derives with its own state, never the earlier skill's", async () => {
 		const { handlers, sent } = harness([procedure, smallProcedure]);
 		const { ctx, notified } = mockCtx("s1", "main", [
-			invocationEntry("procedure"),
-			stateEntry({ goal: "old" }),
-			invocationEntry("smallcap"),
-			stateEntry({ goal: "new" }),
+			...procedureBranch("procedure", { goal: "old" }),
+			...procedureBranch("smallcap", { goal: "new" }),
 		]);
 
 		await handler(handlers, "session_start")({ type: "session_start" }, ctx);
@@ -453,11 +497,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 
 	test("an invocation with no state message after it stays inert, even when an earlier procedure left one", async () => {
 		const { handlers } = harness([procedure, smallProcedure]);
-		const { ctx, notified } = mockCtx("s1", "main", [
-			invocationEntry("procedure"),
-			stateEntry({ goal: "old" }),
-			invocationEntry("smallcap"),
-		]);
+		const { ctx, notified } = mockCtx("s1", "main", [...procedureBranch("procedure", { goal: "old" }), ...procedureBranch("smallcap")]);
 
 		await handler(handlers, "session_start")({ type: "session_start" }, ctx);
 
@@ -472,7 +512,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		await handler(handlers, "session_before_switch")({ type: "session_before_switch", reason: "fork" }, ctx);
 		expect(notified).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "fork")]);
 
-		const fork = mockCtx("s2", "main", [invocationEntry("procedure"), stateEntry({ goal: "x" })]);
+		const fork = mockCtx("s2", "main", procedureBranch("procedure", { goal: "x" }));
 		await handler(handlers, "session_switch")({ type: "session_switch", reason: "fork", previousSessionFile: "s1" }, fork.ctx);
 
 		expect(fork.notified).toEqual(engageNotices("procedure"));
@@ -580,10 +620,10 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 
 async function patchHarness(skill: Skill) {
 	const { handlers, sent } = harness([skill]);
-	const { ctx, notified } = await engage(handlers, skill.name);
+	const { ctx, notified, setIdle } = await engage(handlers, skill.name);
 	// sent starts with the three engage asides (rules, P, initial t); patch tests
 	// index past them.
-	return { handlers, sent, ctx, notified };
+	return { handlers, sent, ctx, notified, setIdle };
 }
 
 function stateMessage(state: ExecutionState) {
@@ -651,6 +691,74 @@ describe("omp-skill-state patch loop", () => {
 
 		expect(sent).toHaveLength(5);
 		expect(sent[4].payload.details).toEqual({ state: { goal: "x", extra: 1 } });
+	});
+
+	test("a patch in a step with no tool call is stored as a next-turn message once the session is idle after agent_end", async () => {
+		const { handlers, sent, ctx, setIdle } = await patchHarness(procedure);
+		jest.useFakeTimers();
+		try {
+			await handler(handlers, "assistant_message")(finalMessage('```json state\n{"goal":"x"}\n```'), ctx);
+			expect(sent).toHaveLength(3);
+
+			// agent_end fires while the session still streams: nothing is sent yet,
+			// because the harness would only hold the message until the next prompt.
+			await handler(handlers, "agent_end")({ type: "agent_end", messages: [] }, ctx);
+			jest.advanceTimersByTime(100);
+			expect(sent).toHaveLength(3);
+
+			setIdle(true);
+			jest.advanceTimersByTime(20);
+			expect(sent).toHaveLength(4);
+			expect(sent[3].options).toEqual({ deliverAs: "nextTurn" });
+			expect(sent[3].payload.details).toEqual({ state: { goal: "x" } });
+
+			// Stored once: a later settle has nothing pending.
+			await handler(handlers, "agent_end")({ type: "agent_end", messages: [] }, ctx);
+			jest.advanceTimersByTime(100);
+			expect(sent).toHaveLength(4);
+
+			// The live state advanced at the patch, not at the store.
+			await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"extra":1}\n```'), ctx);
+			expect(sent[4].payload.details).toEqual({ state: { goal: "x", extra: 1 } });
+			expect(sent[4].options).toEqual({ deliverAs: "aside" });
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
+	test("a final state superseded by a later patch before the session is idle is dropped, not stored stale", async () => {
+		const { handlers, sent, ctx, setIdle } = await patchHarness(procedure);
+		jest.useFakeTimers();
+		try {
+			await handler(handlers, "assistant_message")(finalMessage('```json state\n{"goal":"x"}\n```'), ctx);
+			await handler(handlers, "agent_end")({ type: "agent_end", messages: [] }, ctx);
+			// A queued prompt ran another step before the session went idle.
+			await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"y"}\n```'), ctx);
+			expect(sent).toHaveLength(4);
+			expect(sent[3].payload.details).toEqual({ state: { goal: "y" } });
+
+			setIdle(true);
+			jest.advanceTimersByTime(5000);
+			expect(sent).toHaveLength(4);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
+	test("a session that never goes idle still gets the final state after the poll budget, held by the harness for the next prompt", async () => {
+		const { handlers, sent, ctx } = await patchHarness(procedure);
+		jest.useFakeTimers();
+		try {
+			await handler(handlers, "assistant_message")(finalMessage('```json state\n{"goal":"x"}\n```'), ctx);
+			await handler(handlers, "agent_end")({ type: "agent_end", messages: [] }, ctx);
+			jest.advanceTimersByTime(1900);
+			expect(sent).toHaveLength(3);
+			jest.advanceTimersByTime(200);
+			expect(sent).toHaveLength(4);
+			expect(sent[3].options).toEqual({ deliverAs: "nextTurn" });
+		} finally {
+			jest.useRealTimers();
+		}
 	});
 
 	test("an invalid patch blocks every tool call with the validation error and sends nothing", async () => {
@@ -766,14 +874,22 @@ describe("omp-skill-state patch loop", () => {
 });
 
 describe("omp-skill-state idle disengage", () => {
-	test("three consecutive no-patch steps disengage; two stay engaged", async () => {
-		const { handlers, ctx, notified } = await patchHarness(procedure);
+	// A projected step: the provider call sees the head, built from the asides
+	// sent so far, then the model answers.
+	async function step(handlers: Map<string, Handler>, sent: Sent[], ctx: ExtensionContext, text: string) {
+		const head = sent.map((s) => ({ role: "custom", ...s.payload }));
+		await handler(handlers, "context")({ type: "context", messages: head }, ctx);
+		await handler(handlers, "assistant_message")(assistantMessage(text), ctx);
+	}
 
-		await handler(handlers, "assistant_message")(assistantMessage("step 1"), ctx);
-		await handler(handlers, "assistant_message")(assistantMessage("step 2"), ctx);
+	test("three consecutive no-patch steps disengage; two stay engaged", async () => {
+		const { handlers, sent, ctx, notified } = await patchHarness(procedure);
+
+		await step(handlers, sent, ctx, "step 1");
+		await step(handlers, sent, ctx, "step 2");
 		expect(notified).toEqual(engageNotices("procedure"));
 
-		await handler(handlers, "assistant_message")(assistantMessage("step 3"), ctx);
+		await step(handlers, sent, ctx, "step 3");
 		expect(notified).toEqual([
 			...engageNotices("procedure"),
 			{ message: 'skill-state: procedure "procedure" disengaged (idle for 3 steps)', type: "info" },
@@ -781,38 +897,66 @@ describe("omp-skill-state idle disengage", () => {
 	});
 
 	test("the idle threshold honours x-state idleSteps", async () => {
-		const { handlers, ctx, notified } = await patchHarness(idleProcedure);
+		const { handlers, sent, ctx, notified } = await patchHarness(idleProcedure);
 
-		await handler(handlers, "assistant_message")(assistantMessage("step 1"), ctx);
+		await step(handlers, sent, ctx, "step 1");
 		expect(notified).toEqual(engageNotices("idleproc"));
 
-		await handler(handlers, "assistant_message")(assistantMessage("step 2"), ctx);
+		await step(handlers, sent, ctx, "step 2");
 		expect(notified).toEqual([
 			...engageNotices("idleproc"),
 			{ message: 'skill-state: procedure "idleproc" disengaged (idle for 2 steps)', type: "info" },
 		]);
 	});
 
-	test("a valid patch between idle steps resets the idle run", async () => {
-		const { handlers, ctx, notified } = await patchHarness(procedure);
+	test("a step whose prompt carried no head is not an idle step", async () => {
+		const { handlers, sent, ctx, notified } = await patchHarness(idleProcedure);
 
-		await handler(handlers, "assistant_message")(assistantMessage("no patch"), ctx);
-		await handler(handlers, "assistant_message")(assistantMessage("no patch"), ctx);
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"x"}\n```'), ctx);
-		await handler(handlers, "assistant_message")(assistantMessage("no patch"), ctx);
-		await handler(handlers, "assistant_message")(assistantMessage("no patch"), ctx);
+		// The engage asides land after the first provider call; that step never
+		// saw the rules, so the model cannot be idle in it.
+		await handler(handlers, "assistant_message")(assistantMessage("step 1"), ctx);
+		await step(handlers, sent, ctx, "step 2");
+		expect(notified).toEqual(engageNotices("idleproc"));
+
+		await step(handlers, sent, ctx, "step 3");
+		expect(notified).toEqual([...engageNotices("idleproc"), ...disengageNotices("idleproc", "idle for 2 steps")]);
+	});
+
+	test("a patch that leaves the state unchanged is an empty patch: nothing stored, and the step is idle", async () => {
+		const { handlers, sent, ctx, notified } = await patchHarness(idleProcedure);
+
+		await step(handlers, sent, ctx, '```json state\n{"goal":"x"}\n```');
+		expect(sent).toHaveLength(4);
+
+		await step(handlers, sent, ctx, '```json state\n{"goal":"x"}\n```');
+		expect(sent).toHaveLength(4);
+		expect(notified).toEqual(engageNotices("idleproc"));
+
+		await step(handlers, sent, ctx, '```json state\n{"goal":"x"}\n```');
+		expect(sent).toHaveLength(4);
+		expect(notified).toEqual([...engageNotices("idleproc"), ...disengageNotices("idleproc", "idle for 2 steps")]);
+	});
+
+	test("a valid patch between idle steps resets the idle run", async () => {
+		const { handlers, sent, ctx, notified } = await patchHarness(procedure);
+
+		await step(handlers, sent, ctx, "no patch");
+		await step(handlers, sent, ctx, "no patch");
+		await step(handlers, sent, ctx, '```json state\n{"goal":"x"}\n```');
+		await step(handlers, sent, ctx, "no patch");
+		await step(handlers, sent, ctx, "no patch");
 
 		expect(notified).toEqual(engageNotices("procedure"));
 	});
 
 	test("an invalid patch also resets the idle run", async () => {
-		const { handlers, ctx, notified } = await patchHarness(procedure);
+		const { handlers, sent, ctx, notified } = await patchHarness(procedure);
 
-		await handler(handlers, "assistant_message")(assistantMessage("no patch"), ctx);
-		await handler(handlers, "assistant_message")(assistantMessage("no patch"), ctx);
-		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal": 42}\n```'), ctx);
-		await handler(handlers, "assistant_message")(assistantMessage("no patch"), ctx);
-		await handler(handlers, "assistant_message")(assistantMessage("no patch"), ctx);
+		await step(handlers, sent, ctx, "no patch");
+		await step(handlers, sent, ctx, "no patch");
+		await step(handlers, sent, ctx, '```json state\n{"goal": 42}\n```');
+		await step(handlers, sent, ctx, "no patch");
+		await step(handlers, sent, ctx, "no patch");
 
 		expect(notified).toEqual(engageNotices("procedure"));
 	});
@@ -820,8 +964,8 @@ describe("omp-skill-state idle disengage", () => {
 	test("after an idle disengage the step is ordinary", async () => {
 		const { handlers, sent, ctx, notified } = await patchHarness(idleProcedure);
 
-		await handler(handlers, "assistant_message")(assistantMessage("step 1"), ctx);
-		await handler(handlers, "assistant_message")(assistantMessage("step 2"), ctx);
+		await step(handlers, sent, ctx, "step 1");
+		await step(handlers, sent, ctx, "step 2");
 		expect(notified).toEqual([
 			...engageNotices("idleproc"),
 			...disengageNotices("idleproc", "idle for 2 steps"),
@@ -852,13 +996,26 @@ describe("omp-skill-state compaction ownership", () => {
 		handlers: Map<string, Handler>,
 		ctx: ExtensionContext,
 		preparation: Record<string, unknown>,
+		branchEntries: unknown[] = [],
 	): Promise<CompactionOutput | undefined> {
 		const result = await handler(handlers, "session_before_compact")(
-			{ type: "session_before_compact", preparation, signal: new AbortController().signal, branchEntries: [] },
+			{ type: "session_before_compact", preparation, signal: new AbortController().signal, branchEntries },
 			ctx,
 		);
 		return result as CompactionOutput | undefined;
 	}
+
+	// A branch mid-step: the latest assistant message is the step's pinned
+	// message, and its tool result sits after it, so a cut there keeps the pair.
+	const midStepBranch = [
+		{ type: "custom_message", id: "h1", customType: RULES_MESSAGE_TYPE },
+		{ type: "message", id: "a1", message: { role: "assistant" } },
+		{ type: "message", id: "r1", message: { role: "toolResult" } },
+		{ type: "custom_message", id: "s1", customType: STATE_MESSAGE_TYPE },
+		{ type: "message", id: "a2", message: { role: "assistant" } },
+		{ type: "custom", id: "x1", customType: "tool_execution_start" },
+		{ type: "message", id: "r2", message: { role: "toolResult" } },
+	];
 
 	test("registers session_before_compact lazily on the first engage, never at load", async () => {
 		const { handlers } = harness([procedure]);
@@ -869,22 +1026,31 @@ describe("omp-skill-state compaction ownership", () => {
 		expect(handlers.has("session_before_compact")).toBe(true);
 	});
 
-	test("engaged compaction returns the state summary built from the harness preparation", async () => {
+	test("engaged compaction summarises to the state and cuts at the current step, not at the harness's turn-sized tail", async () => {
 		const { handlers, sent } = harness([procedure]);
 		const { ctx } = await engage(handlers, "procedure");
 		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"g"}\n```'), ctx);
 
-		const result = await compact(handlers, ctx, { firstKeptEntryId: "e7", tokensBefore: 4321 });
+		const result = await compact(handlers, ctx, { firstKeptEntryId: "h1", tokensBefore: 4321 }, midStepBranch);
 
 		const compaction = result?.compaction;
-		expect(compaction?.firstKeptEntryId).toBe("e7");
+		expect(compaction?.firstKeptEntryId).toBe("a2");
 		expect(compaction?.tokensBefore).toBe(4321);
 		expect(compaction?.summary).toContain('Execution state of procedure "procedure"');
-		expect(compaction?.summary).toContain(renderStateContent({ goal: "g" }));
+		expect(compaction?.summary).toContain(JSON.stringify({ goal: "g" }, null, 2));
 		expect(compaction?.shortSummary).toContain('"procedure"');
 		expect(compaction?.preserveData).toEqual({ state: { goal: "g" } });
 		// No summarizer step: compaction adds no sends beyond the patch loop's own.
 		expect(sent.map((s) => s.payload.customType)).toEqual([...engageAsideTypes, STATE_MESSAGE_TYPE]);
+	});
+
+	test("a branch with no assistant message yet falls back to the harness's cut", async () => {
+		const { handlers } = harness([procedure]);
+		const { ctx } = await engage(handlers, "procedure");
+
+		const result = await compact(handlers, ctx, { firstKeptEntryId: "e7", tokensBefore: 10 }, [midStepBranch[0]]);
+
+		expect(result?.compaction?.firstKeptEntryId).toBe("e7");
 	});
 
 	test("a second compaction carries the live state, not an echo of previousPreserveData", async () => {
@@ -903,6 +1069,48 @@ describe("omp-skill-state compaction ownership", () => {
 		expect(first?.compaction?.preserveData).toEqual({ state: { goal: "g" } });
 		expect(second?.compaction?.firstKeptEntryId).toBe("e9");
 		expect(second?.compaction?.preserveData).toEqual({ state: { goal: "g", step: 2 } });
+	});
+
+	test("after a compaction the head is sent again, byte-equal, so the projection survives the cut", async () => {
+		const { handlers, sent } = harness([procedure]);
+		const { ctx } = await engage(handlers, "procedure");
+		await handler(handlers, "assistant_message")(assistantMessage('```json state\n{"goal":"g"}\n```'), ctx);
+
+		await handler(handlers, "session_compact")({ type: "session_compact", compactionEntry: {}, fromExtension: true }, ctx);
+
+		expect(sent.map((s) => s.payload.customType)).toEqual([...engageAsideTypes, STATE_MESSAGE_TYPE, ...engageAsideTypes]);
+		expect(sent.slice(4).map((s) => s.payload)).toEqual([sent[0].payload, sent[1].payload, sent[3].payload]);
+		// Mid-run: asides, so the copies land before the next provider call.
+		expect(sent.slice(4).map((s) => s.options)).toEqual([{ deliverAs: "aside" }, { deliverAs: "aside" }, { deliverAs: "aside" }]);
+
+		// The copies alone are a complete head.
+		const kept = sent.slice(4).map((s) => ({ role: "custom", ...s.payload }));
+		expect(await handler(handlers, "context")({ type: "context", messages: kept }, ctx)).toEqual({ messages: kept });
+	});
+
+	test("a compaction while idle re-sends the head as next-turn messages, which wake no turn", async () => {
+		const { handlers, sent } = harness([procedure]);
+		const { ctx } = mockCtx("s1", "main", [], true);
+		await handler(handlers, "message_end")({ type: "message_end", message: skillPrompt("procedure") }, ctx);
+
+		await handler(handlers, "session_compact")({ type: "session_compact", compactionEntry: {}, fromExtension: true }, ctx);
+
+		expect(sent).toHaveLength(6);
+		expect(sent.slice(3).map((s) => s.options)).toEqual([{ deliverAs: "nextTurn" }, { deliverAs: "nextTurn" }, { deliverAs: "nextTurn" }]);
+	});
+
+	test("a re-derived engagement re-heads with the P and state stored on the branch", async () => {
+		const { handlers, sent } = harness([procedure]);
+		const { ctx } = mockCtx("s1", "main", procedureBranch("procedure", {}, { goal: "x" }));
+		await handler(handlers, "session_start")({ type: "session_start" }, ctx);
+
+		await handler(handlers, "session_compact")({ type: "session_compact", compactionEntry: {}, fromExtension: true }, ctx);
+
+		expect(sent.map((s) => s.payload)).toEqual([
+			{ customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false },
+			{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: "Running skill procedure", display: false, details: { name: "procedure" } },
+			{ customType: STATE_MESSAGE_TYPE, content: renderStateContent({ goal: "x" }), display: true, details: { state: { goal: "x" } } },
+		]);
 	});
 
 	test("yields to the harness default when never engaged, in a subagent, or after disengage", async () => {

@@ -16,9 +16,11 @@ To change the state, emit exactly one fenced block labelled \`state\` whose body
 {"key": "value", "obsolete": null}
 \`\`\`
 
-Merge semantics: a non-null value sets its key, null deletes its key, keys absent from the object are left untouched.
+Merge semantics: a non-null value sets its key, null deletes its key, keys absent from the object are left untouched. Arrays are set whole, never merged: to add one item, send the complete array with the item added. Send only the keys that change.
 
 A reply with no state block is an empty patch and is fine.
+
+Each reply is one step: the state block recording only what the last observation established, then the tool call that performs the next action. End a reply without a tool call only when the procedure is complete.
 
 An invalid block blocks every tool call of the step, and the error comes back as the tool result; fix the block and emit it again.
 `;
@@ -28,7 +30,7 @@ export type ParsedPatch =
 	| { kind: "json"; value: unknown }
 	| { kind: "error"; error: string };
 
-// A plain ```json block without the marker is not a patch, so the stored-state block renderStateContent emits can never be parsed as one.
+// A plain ```json block without the marker is not a patch: JSON the model quotes for other reasons must not be validated as state.
 const FENCE_OPEN = new RegExp(`^[ \\t]*\`\`\`json[ \\t]+${PATCH_MARKER}[ \\t]*$`);
 const FENCE_CLOSE = /^[ \t]*```[ \t]*$/;
 
@@ -57,6 +59,11 @@ export function parsePatch(text: string): ParsedPatch {
 	return { kind: "none" };
 }
 
+// The stored state carries no fence and no XML: the harness's shake ("elide")
+// pass rewrites any stored message in place when it holds a fenced or XML
+// block of 400+ tokens, custom messages included, and a placeholder in t's
+// place would be sent to the model as its state. Plain JSON under a label is
+// never a shake region. The patch template lives in the operating rules only.
 export function renderStateContent(state: ExecutionState): string {
-	return `\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\``;
+	return `Execution state (edit it with the state block the rules describe):\n${JSON.stringify(state, null, 2)}`;
 }

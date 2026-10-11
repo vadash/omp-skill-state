@@ -40,8 +40,20 @@ _Avoid_: turn, iteration, round
 The per-step rewrite that replaces the message list sent to the model with the triple spec, state, observation. The stored transcript is never changed by it.
 _Avoid_: compaction, truncation, filtering
 
+**Head**:
+The three stored custom messages the projection pins at the front of every prompt: the operating rules, the procedure spec and the latest state. Sent at engage and again after every compaction, byte-equal, so the provider's prefix cache holds across the cut.
+_Avoid_: preamble, prefix, context
+
+**Cut**:
+The compaction's first kept entry. While engaged it is the current step, the latest assistant message on the branch, not the turn-sized tail the harness proposes.
+_Avoid_: boundary, checkpoint, kept tail
+
+**Final state**:
+The state accepted from a reply with no tool call, which ends the run. It is stored as a next-turn message once the session is idle, not as an aside.
+_Avoid_: result, answer, summary
+
 **Re-derive**:
-Rebuilding engagement from the branch on session start, switch, rewind or tree navigation: no user invocation of a procedure skill followed by a state message means inert; otherwise engaged with that state.
+Rebuilding engagement from the branch on session start, switch, rewind or tree navigation: no user invocation of a procedure skill followed by its procedure-spec message and a state message means inert; otherwise engaged with that state.
 _Avoid_: restore, rehydrate, reload
 
 **Engage**:

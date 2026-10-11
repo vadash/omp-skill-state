@@ -2,7 +2,7 @@
 
 An [omp](https://omp.sh) plugin that runs a procedural skill against an explicit execution state instead of a growing transcript. The design is in `docs/spec.md`; the vocabulary is in `CONTEXT.md`.
 
-Status: engage/disengage lifecycle, the patch loop and the projection implemented. A procedure skill can engage and disengage; the model's fenced `state` patches are validated, merged and persisted as state messages, and invalid patches block the step and degrade after `retries` failures. While engaged, every provider call sees only the operating rules, the procedure spec, the latest state, the current step's observation (byte-capped) and the current user turn; the stored transcript stays complete.
+Status: implemented and verified against a long real session (`docs/verification.md`). A procedure skill engages and disengages; the model's fenced `state` patches are validated, merged and persisted as state messages, and invalid patches block the step and degrade after `retries` failures. While engaged, every provider call sees only the operating rules, the procedure spec, the latest state, the current step's observation (byte-capped) and the current user turn; the stored transcript stays complete. Compaction while engaged is owned by the runtime: the summary is the state, the cut is the current step, and no summarizer call is made.
 
 ## Layout
 
@@ -10,9 +10,10 @@ Status: engage/disengage lifecycle, the patch loop and the projection implemente
 | --- | --- |
 | `package.json` | Plugin manifest: `"omp": { "extensions": ["./index.ts"] }` |
 | `index.ts` | The extension. omp imports the TypeScript directly; there is no build step. |
-| `index.test.ts` | Unit tests for the factory contract |
+| `index.test.ts`, `*.test.ts` | Unit tests for the factory contract, the state merge, the patch parser and the projection |
 | `skills/recon/` | Bundled sample procedure skill (`SKILL.md` + `state.schema.json`) |
 | `docs/spec.md`, `docs/adr/`, `CONTEXT.md` | Design, decisions, glossary |
+| `docs/verification.md`, `verification/` | The long-session integration run: findings, and the session analyzer plus the config that drives it |
 
 ## Develop
 
@@ -55,7 +56,7 @@ Skills without a state schema, model-initiated skill reads, and subagent session
 
 ## Extension types
 
-`index.ts` imports `ExtensionAPI` and friends as types only, plus one value import: `InternalUrlRouter` from `@oh-my-pi/pi-coding-agent/internal-urls`. At load time omp rewrites every `@oh-my-pi/pi-coding-agent/*` import from a plugin onto its own bundled copy (the plugin compat layer in the harness, `legacy-pi-compat`), so there is still no separate runtime dependency to install.
+`index.ts` imports `ExtensionAPI` and friends as types only, plus two value imports: `Text` from `@oh-my-pi/pi-coding-agent` (the state message renderer) and `InternalUrlRouter` from `@oh-my-pi/pi-coding-agent/internal-urls` (in `state.ts`, to resolve `skill://` paths). At load time omp rewrites every `@oh-my-pi/pi-coding-agent/*` import from a plugin onto its own bundled copy (the plugin compat layer in the harness, `legacy-pi-compat`), so there is still no separate runtime dependency to install.
 
 The types come from the published `@oh-my-pi/pi-coding-agent` package, pinned to the version of the installed omp (`omp --version`). The published package ships `dist/types/*.d.ts`, which keeps `tsc` fast and independent of the harness source.
 

@@ -1,0 +1,61 @@
+# Verification: one long real session
+
+Integration run for issue #9: the bundled `recon` procedure driven end to end in the interactive omp TUI, to confirm the runtime's promises hold together. Six runs were needed; the first five each exposed one defect or limit, fixed on this branch before the next run. Run F is the acceptance run.
+
+## Setup
+
+- omp 18.6.3, interactive TUI in a pseudo-terminal, driven by typed input. The plugin is linked (`omp plugin link`), so the live code is this checkout.
+- Launch: `omp --session-dir verification/sessions --config verification/compact-early.yml --model glm-5.3-flash --thinking low`. The config sets `compaction.thresholdPercent: 10`, so compaction fires several times inside 50 steps (at 11.1K–12.7K tokens in run F).
+- Model: `zcode0/glm-5.3-flash`.
+- Procedure: `/skill:recon` with `working_dir` = the harness checkout's `docs/` (82 `.md` files). Question: the H1 title of each of the first 50 files in case-insensitive order, one finding per file. Constraints in the invocation: the first action is one `task` subagent call that lists the files; then exactly one file per step, read with the selector `:1-5`. Run F's invocation also says to record the file list in the state in the step it arrives (see run E).
+- Evidence: `bun verification/analyze.ts <session.jsonl> [--titles <dir> <n>]` reads the stored transcript and prints the step timeline, token statistics over the projected steps, the compaction entries, the last stored state, the subagent transcripts and a check of the findings against the real H1 titles. The session files stay out of git (`verification/sessions/` is ignored); the ids below locate them.
+
+Projected step: an assistant message produced while a state head message is on the branch. Prompt tokens: `input + cacheRead + cacheWrite` of that message's usage.
+
+## Runs
+
+| Run | Session | Steps (projected) | State messages | Compactions (by runtime) | Prompt tokens per step, median / max | Steps with cacheRead > 0 | Correct findings | Outcome |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A | `01a12941` | 24 (23) | 18 | 1 (1) | 10314 / 13677 | 19/23 | 14/50 | stopped: the compaction grew the context (10456 → 27755) and the harness's rescue rewrote 37 entries |
+| B | `01a12956` | 68 (67) | 14 | 7 (1) | 26579 / 30013 | 63/67 | 11/50 | the rescue replaced the stored state with placeholders; no state message after entry 66; the harness compacted 6 more times itself |
+| C | `01a12974` | 36 (35) | 37 | 2 (2) | 10548 / 14165 | 18/35 | 22/50 | cut and fence fixes hold (0 rewritten entries); the model resent the whole state every step and once replaced `findings` with 2 items; stopped to extend the rules |
+| D | `01a1297f` | 52 (51) +2 | 54 | 3 (3) | 10672 / 11608 | 34/53 | 49/50 | the final step's state (50 findings) was never stored: lost at `/resume` |
+| E | `01a129a0` | 37 (36) | 1 | 1 (0) | 17436 / 30102 | 33/36 | 0/50 | idle disengage at step 4; the rest ran as an ordinary conversation |
+| F | `01a129ac` | 52 (51) +2 | 57 | 5 (5) | 11348 / 13644 | 49/51 | 50/50 | acceptance run |
+
+## Acceptance, run F
+
+Flat input: 51 projected steps. Prompt tokens per step min 10366, median 11348, p90 11975, max 13644 (max/median 1.20). The two largest steps are 2 and 3, where the state takes on the 82-file list. Uncached input per step min 407, median 788. The cached prefix is the system prompt, the rules, `P` and the part of the state before the step's change (`cacheRead` 8320–10944, growing as `findings` grows: the provider matches the prompt prefix token by token, and a patch appends to the end of the array); the changed tail of the state, the observation and the user turn are the uncached remainder. `cacheRead > 0` on 49 of 51 steps and ≥ 50 % of the prompt on the same 49; the misses are the two cold steps 2 and 3. No step after a compaction missed: the re-sent head is byte-equal to the original, so the prefix still matches.
+
+Compaction: 5 entries, all `fromExtension: true`, each with the summary `Execution state of procedure "recon" (skill-state runtime):` followed by the state as plain JSON and `preserveData.state` set; `tokensBefore → tokensAfter` 11115 → 9172, 11555 → 9365, 11876 → 9582, 12282 → 9837, 12731 → 10251. No summarizer call appears in the transcript (the `model_usage` entries are the harness's own unexpected-stop judge, one after each reply without a tool call). 0 entries rewritten by a rescue pass.
+
+Final state: 50 findings, `open_questions` empty, 50/50 titles match the files. The final reply (step 52, no tool call) is entry 232; the state message is entry 234, written 2 s later, before any prompt.
+
+`/resume`: switched to run D's session and back, then prompted `Continue the procedure from the execution state ...`. The step was projected (11178 prompt tokens, no tool call) and the reply came from the state alone: `50 findings. Last: plugin-manager-installer-plumbing.md: Plugin manager and installer plumbing.` This resume came after the run had ended. The mid-run case is run D: its stored state at the switch held 49 findings and one open question; after switching away and back, the `Continue` prompt was projected (10091 prompt tokens) and the model carried on from that state, read the one remaining file (step 53) and gave the full answer (step 54). What run D lost was only the never-stored final state, finding 4 below.
+
+`/new`: a fresh session (`01a129b7`); the probe `What is the current execution state of the recon procedure? ...` ran unprojected (8457 prompt tokens, no head messages) and the reply was `no state.`
+
+`/clear`: back on run F's session, `/clear` wrote a `reset_boundary` (entry 238); the same probe ran unprojected (8457 prompt tokens) and the reply was `no state`.
+
+Subagent: the `task` call spawned `RollingMarlin` (scout). Its transcript, stored beside the session, holds 3 assistant messages and 3 tool calls and no skill-state message; it ran under ordinary context and returned its list to the parent as a normal tool result.
+
+## Findings and deviations from the spec
+
+Each item names the run that exposed it and where the branch records the change.
+
+1. **The compaction cut is the current step, not the harness's proposal** (runs A, B). `preparation.firstKeptEntryId` keeps a turn-sized tail, and a procedure is one user turn, so the proposal kept most of the run: `tokensAfter` exceeded `tokensBefore` (A: 10456 → 27755; B: 11359 → 27637). The harness then judged the compaction a dead end and rescued it with `shake("elide")`, which rewrites the kept entries in place on disk: tool results and every fenced or XML block of 400+ tokens, custom messages included. In run B the stored state messages became placeholders, the model lost `t`, and no state message was accepted after entry 66. The handler now cuts at the latest assistant message on the branch (`currentStepCut` in `index.ts`). Spec section 10; ADR 0001 amendment.
+2. **The stored state carries no fence** (run B). `renderStateContent` emits labelled plain JSON instead of a ```` ```json ```` block, so no rescue pass can target it; the compaction summary is plain JSON for the same reason. Spec sections 6 and 10. The patch template lives in the operating rules only; `parsePatch` still accepts only a ```` ```json state ```` fence.
+3. **The head is re-sent after every compaction** (run A). The harness's cut can land after the rules and `P`, and the projection then finds no head and falls back to ordinary context. `session_compact` now re-sends the rules, `P` and the state while engaged, as asides during a run and as next-turn messages when idle. `P` is held in the engagement (`spec`) so no branch scan is needed, and a re-derive reads it back from the stored procedure-spec message: a branch holding the invocation and a state message but no procedure-spec message stays inert. Run F: `headRules = headSpec = 6`, one per engage and per compaction. Spec sections 6, 7, 11, 14, 16.
+4. **The final step's state waits for idle** (run D). A reply with no tool call ends the run; an aside sent then wakes a turn of its own, and a next-turn message sent at `agent_end` is only held in memory until the next prompt, which `/resume`, `/new` and quitting discard. Run D stored 49 findings; the 50th existed only in that queue and was lost at `/resume`, so the model re-read the last file after the resume. The handler now polls `ctx.isIdle()` every 20 ms for up to 2 s after `agent_end`, then sends the state as a next-turn message, which the harness appends to context and history at once. Run F: stored 2 s after the final reply. Spec section 6.
+5. **Operating rules for arrays and step shape** (run C). The model resent the whole state in every early step (steps 2–13: ≈1200 output tokens each) and once replaced `findings` with a 2-item array (entry 67, 12 → 2 findings). The rules now say arrays are set whole and must be sent complete, to send only the keys that change, and that one reply is one step: the state block for what the last observation established, then the tool call. Median output tokens per step: run C 627, run D 679, run F 416; `findings` never shrank in D or F.
+6. **A patch that changes nothing is an idle step.** The runtime compares the rendered state before and after the merge; an unchanged state stores nothing and counts toward `idleSteps`. A step whose prompt carried no head (the first step, and a step straight after a compaction before the re-sent head lands) never counts: the model had not seen the rules. Spec section 11.
+7. **Idle disengage is tight for this skill** (run E). The model spent steps 2–5 paging the subagent's output (a truncated preview, its tail, a nonexistent file, then the JSON path) without a state block. After 3 projected idle steps the runtime disengaged (`idle for 3 steps`, a toast only); the remaining 33 steps ran as an ordinary conversation with a growing prompt (median 17436, max 30102), the harness's own `snapcompact` fired at 31061 tokens, and its rescue rewrote 43 entries. The runtime followed the spec. Not changed here: the sample schema keeps `idleSteps: 3`, and run F's invocation tells the model to record the file list in the step it arrives. Two options for a follow-up: count idle steps only after the first accepted patch, or raise the sample's `idleSteps`.
+8. **Disengaging leaves no stored trace.** Only a toast marks it. The analyzer reports `steps after the last stored state`; a count above `idleSteps` means the runtime disengaged or the final state was never stored (run E: 36; run D before the fix: 3, the final step and the two after the resume, with the 50th finding missing from the stored state).
+9. **Harness behaviours seen along the way.** The unexpected-stop judge (`model_usage purpose=unexpected-stop role=judge`) runs after every reply without a tool call; it is outside the projection and costs no step. `tool_execution_start` custom entries interleave with the messages and are ignored by the projection. The TUI holds toasts outside the scrollback, so runtime notices are not in `proc://` screen dumps; the transcript is the evidence.
+
+## Not covered
+
+- The byte cap on the observation never triggered: `:1-5` reads stay far under 32768 bytes.
+- The invalid-patch block and the degrade path (three invalid patches) did not occur in any run; both rest on the unit tests.
+- Of the spec's real-session list (section 18): a rewind and the inert cases (a skill without a schema, a model-initiated `read skill://…`) were not exercised here and rest on the unit tests; that speculative compaction is off once the handler is registered is the harness's own behaviour and was not observed directly.
+- One model and one provider. Cache figures are what `zai` reports for `glm-5.3-flash`.

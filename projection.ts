@@ -37,7 +37,7 @@ function isSkippable(message: AgentMessage): boolean {
 // undefined means no projection: the call gets ordinary context. That is the
 // safe fallback whenever the head is incomplete or provider pairing cannot be
 // established; a wrong prompt is worse than a plain one.
-export function project(messages: readonly AgentMessage[], observationBytes: number): AgentMessage[] | undefined {
+export function project(messages: readonly AgentMessage[], observationBytes: number, observationWindow = 1): AgentMessage[] | undefined {
 	const rules = lastCustom(messages, RULES_MESSAGE_TYPE);
 	const procedureSpec = lastCustom(messages, PROCEDURE_SPEC_MESSAGE_TYPE);
 	const state = lastCustom(messages, STATE_MESSAGE_TYPE);
@@ -49,26 +49,45 @@ export function project(messages: readonly AgentMessage[], observationBytes: num
 
 	const last = messages[end - 1]!;
 	if (last.role === "toolResult") {
-		const results: ToolResult[] = [];
-		let pinned: AgentMessage | undefined;
-		for (let i = end - 1; i >= 0; i--) {
-			const message = messages[i]!;
-			if (message.role === "toolResult") {
-				results.unshift(message);
-				continue;
+		// Walk back over the observation window's tool pairs, newest first. The
+		// newest pair is mandatory: any pairing failure there leaves the call
+		// unprojected. An unpairable older pair only ends the walk, keeping the
+		// pairs collected before it.
+		const pairs: AgentMessage[][] = [];
+		let cursor = end;
+		for (let collected = 0; collected < observationWindow; collected++) {
+			const results: ToolResult[] = [];
+			let pinned: AgentMessage | undefined;
+			for (let i = cursor - 1; i >= 0; i--) {
+				const message = messages[i]!;
+				if (message.role === "toolResult") {
+					results.unshift(message);
+					continue;
+				}
+				if (isSkippable(message)) continue;
+				pinned = message;
+				cursor = i;
+				break;
 			}
-			if (isSkippable(message)) continue;
-			pinned = message;
-			break;
+			// Every result must answer a toolCall block in the assistant message
+			// right before it; that is what keeps provider pairing intact without
+			// repair. Otherwise fall back to no projection. A call that never got
+			// a result is a history condition the harness handles on its own, so
+			// it is not checked.
+			if (results.length === 0 || pinned?.role !== "assistant") {
+				if (collected === 0) return undefined;
+				break;
+			}
+			const callIds = new Set(pinned.content.flatMap((block) => (block.type === "toolCall" ? [block.id] : [])));
+			if (results.some((result) => !callIds.has(result.toolCallId))) {
+				if (collected === 0) return undefined;
+				break;
+			}
+			pairs.push([pinned, ...results]);
 		}
-		// Every result must answer a toolCall block in the assistant message right
-		// before it; that is what keeps provider pairing intact without repair.
-		// Otherwise fall back to no projection. A call that never got a result is
-		// a history condition the harness handles on its own, so it is not checked.
-		if (pinned?.role !== "assistant") return undefined;
-		const callIds = new Set(pinned.content.flatMap((block) => (block.type === "toolCall" ? [block.id] : [])));
-		if (results.some((result) => !callIds.has(result.toolCallId))) return undefined;
-		return [rules, procedureSpec, state, ...capObservation([pinned, ...results], observationBytes)];
+		const window: AgentMessage[] = [];
+		for (let i = pairs.length - 1; i >= 0; i--) window.push(...pairs[i]!);
+		return [rules, procedureSpec, state, ...capObservation(window, observationBytes)];
 	}
 	if (last.role === "user") {
 		const turn: AgentMessage[] = [];

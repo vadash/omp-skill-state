@@ -29,7 +29,7 @@ A_t = (P, t, O_t)
 
 - `P` — the procedure spec: the skill body as the harness renders it for the user invocation (body, skill directory, user arguments), immutable for the run.
 - `t` — the execution state: a JSON object satisfying the state schema.
-- `O_t` — the observation: the tool results and user turn of the current step, under a byte cap.
+- `O_t` — the observation: the most recent tool pairs and the current user turn, under a byte cap.
 
 The model replies with a state patch `Δt`, tool calls, or both. The runtime validates `Δt`, merges it into `t`, and lets the tool calls run. Nothing else from the past is ever sent.
 
@@ -150,7 +150,7 @@ Items 1 to 3 are the head: stored transcript messages, not synthesised text. The
 
 The operating rules also reach the model on the invocation batch itself. `before_agent_start` fires at the batch's dequeue, before the skill prompt's `message_end` can engage, so the handler cannot consult engagement state; it answers with the rules message when the prompt announces a procedure skill. The harness's user-invocation announcement line names the invoked skill, and the state-schema check filters every other prompt, so an ordinary prompt matches nothing. The harness appends the returned message to the batch and stores it with the transcript; the copy is byte-equal to the head's rules. The first step runs on ordinary context plus this message; from the second step on the projection takes the stored head's copy, and the first-step copy is dropped with the rest of the hidden history, so the cache never sees a difference.
 4. `O_t`, the current step's observations, as the original observation messages with their roles preserved.
-5. The last assistant `toolCall` and its `toolResult` pair, when the step's observation is itself a tool result. Every result must answer a `toolCall` block of that assistant message; otherwise the call is not projected. This keeps provider tool pairing intact so no repair is needed.
+5. The observation window: the `observationWindow` most recent assistant `toolCall`/`toolResult` pairs, oldest first. The newest pair is mandatory: when the step's observation is itself a tool result, every result must answer a `toolCall` block of its assistant message, or the call is not projected. Older pairs follow the same pairing rule; the walk stops at the first unpairable older pair and keeps the pairs collected before it. This keeps provider tool pairing intact so no repair is needed.
 6. The current user turn, when it is a user prompt rather than a tool result: every trailing user message of the batch. A trailing assistant message with no observation yet contributes nothing.
 
 Everything else is dropped: all earlier assistant turns, all earlier tool results, all earlier user turns, and every injected live-state block — `goal-mode-context`, `plan-mode-context`, the eager-todo and mid-run-todo nudges, TTSR injections, and todo reminders.
@@ -190,10 +190,10 @@ No JSON repair exists on this channel. Tool arguments are protocol-level JSON, s
 
 `O_t` is capped at `observationBytes`, default 32768.
 
-- The cap applies to the step's combined observation text, not to each result.
+- The cap applies to the combined text of the whole observation window across its pairs, not to each result.
 - Over the cap, the runtime truncates from the end of the largest result and inserts a marker naming what was cut and how to re-read it.
 - Markers are never cut. When every result is cut to nothing, the observation is the markers alone, so the cap's floor is one marker per result.
-- The cap is per step. Exactly one observation set is ever in the prompt, so the cap is a ceiling on the steady state, not a cumulative budget.
+- The cap is per step. Exactly one observation window is ever in the prompt, so the cap is a ceiling on the steady state, not a cumulative budget.
 
 ## 10. Compaction
 
@@ -255,7 +255,7 @@ Degrade is terminal for the session. The user gets ordinary history-based execut
 | `observationBytes` | 32768 | schema `x-state`, else runtime default |
 | `idleSteps` | 5 | schema `x-state` |
 | `retries` | 3 | schema `x-state` |
-| pinned tail | last tool pair | fixed in v1 |
+| `observationWindow` | 1 | schema `x-state`, else runtime default |
 | dropped blocks | all live-state blocks | fixed in v1 |
 
 ## 16. Harness surfaces used
@@ -312,7 +312,7 @@ Unit, no harness needed:
 
 - merge operator: set, null-delete, nested object merge, array replace, absent-key preservation.
 - schema validation: each type, unknown keys under both `additionalProperties` values, non-object top level.
-- projection assembly: exact message order and roles; each dropped block type; the pinned tail pair; the byte cap and its marker.
+- projection assembly: exact message order and roles; each dropped block type; the observation window; the byte cap and its marker.
 - branch reads: the re-derive scan (latest invocation wins, an incomplete head is inert) and the compaction cut.
 - step policy: each reply outcome (none, store, block, ended by degrade or idle), the counters and their resets, the head and the compaction result.
 - first-step rules delivery on engage, and its absence for non-procedure prompts, agent-attributed invocations, subagents and mid-procedure batches.

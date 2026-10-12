@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, jest, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { SessionEntry, Skill } from "@oh-my-pi/pi-coding-agent";
@@ -44,6 +44,7 @@ let plain: Skill;
 let brokenArray: Skill;
 let brokenJson: Skill;
 let smallProcedure: Skill;
+let windowProcedure: Skill;
 let idleProcedure: Skill;
 let warnProcedure: Skill;
 
@@ -54,6 +55,13 @@ beforeAll(async () => {
 		root,
 		"smallcap",
 		JSON.stringify({ type: "object", properties: { goal: { type: "string" } }, "x-state": { observationBytes: 300 } }),
+	);
+	// The bundled zstate schema, loaded from the repo so a change to its
+	// x-state window flows into this suite.
+	windowProcedure = await makeSkill(
+		root,
+		"zstate",
+		await readFile(path.join(import.meta.dir, "skills", "zstate", "state.schema.json"), "utf8"),
 	);
 	retryProcedure = await makeSkill(
 		root,
@@ -1217,5 +1225,35 @@ describe("omp-skill-state projection (context seam)", () => {
 
 		expect(message.content).toEqual(snapshot);
 		expect(prompt?.[4]).not.toBe(message);
+	});
+
+	test("engaged: the bundled schema's observation window pins three pairs", async () => {
+		const omp = fakeOmp([windowProcedure]);
+		const s = omp.session("s1");
+		await s.invoke("zstate");
+		// The first step runs before the engage asides land; from the second one
+		// the projection pins the step before as the observation.
+		await s.step("warm-up");
+		await s.step("step one");
+		await s.step("step two");
+		await s.step("step three");
+
+		const prompt = await s.step("done", { tools: [] });
+
+		expect(prompt).toHaveLength(9);
+		// One id per message: the assistant's toolCall id, or the result's
+		// message-level toolCallId. The session counter feeds both call ids and
+		// entry ids, so the three pinned pairs are call-9/12/15 and the dropped
+		// warm-up pair is call-3.
+		const ids = (prompt ?? []).map((message) => {
+			const { toolCallId, content } = message as { toolCallId?: unknown; content?: unknown };
+			if (typeof toolCallId === "string") return toolCallId;
+			if (!Array.isArray(content)) return "";
+			for (const block of content as Array<{ type?: string; id?: string }>) {
+				if (block.type === "toolCall" && typeof block.id === "string") return block.id;
+			}
+			return "";
+		});
+		expect(ids.filter(Boolean)).toEqual(["call-9", "call-9", "call-12", "call-12", "call-15", "call-15"]);
 	});
 });

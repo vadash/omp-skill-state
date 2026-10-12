@@ -18,6 +18,8 @@ let stringTop: Skill;
 let numberTop: Skill;
 let plain: Skill;
 let garbage: Skill;
+let windowed: Skill;
+let zerowindow: Skill;
 
 beforeAll(async () => {
 	root = await mkdtemp(path.join(tmpdir(), "omp-skill-state-core-"));
@@ -37,6 +39,12 @@ beforeAll(async () => {
 	garbage = await makeSkill(root, "garbage", JSON.stringify({
 		"x-state": { observationBytes: "65536", idleSteps: 2, retries: null },
 	}));
+	windowed = await makeSkill(root, "windowed", JSON.stringify({
+		"x-state": { observationWindow: 3 },
+	}));
+	zerowindow = await makeSkill(root, "zerowindow", JSON.stringify({
+		"x-state": { observationWindow: 0 },
+	}));
 });
 
 afterAll(async () => {
@@ -49,7 +57,7 @@ describe("loadStateSchema", () => {
 
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
-		expect(loaded.params).toEqual({ observationBytes: 4096, idleSteps: 5, retries: 2 });
+		expect(loaded.params).toEqual({ observationBytes: 4096, observationWindow: 1, idleSteps: 5, retries: 2 });
 		expect(loaded.schema.properties?.goal).toEqual({ type: "string" });
 	});
 
@@ -58,7 +66,7 @@ describe("loadStateSchema", () => {
 
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
-		expect(loaded.params).toEqual({ observationBytes: 32768, idleSteps: 7, retries: 3 });
+		expect(loaded.params).toEqual({ observationBytes: 32768, observationWindow: 1, idleSteps: 7, retries: 3 });
 	});
 
 	test("uses defaults when x-state is absent", async () => {
@@ -66,7 +74,18 @@ describe("loadStateSchema", () => {
 
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
-		expect(loaded.params).toEqual({ observationBytes: 32768, idleSteps: 5, retries: 3 });
+		expect(loaded.params).toEqual({ observationBytes: 32768, observationWindow: 1, idleSteps: 5, retries: 3 });
+	});
+
+	test("reads the observation window and floors values below one", async () => {
+		const withWindow = await loadStateSchema("windowed", [windowed]);
+		const zero = await loadStateSchema("zerowindow", [zerowindow]);
+
+		expect(withWindow.ok).toBe(true);
+		expect(zero.ok).toBe(true);
+		if (!withWindow.ok || !zero.ok) return;
+		expect(withWindow.params.observationWindow).toBe(3);
+		expect(zero.params.observationWindow).toBe(1);
 	});
 
 	test("ignores non-numeric x-state fields", async () => {
@@ -74,7 +93,7 @@ describe("loadStateSchema", () => {
 
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
-		expect(loaded.params).toEqual({ observationBytes: 32768, idleSteps: 2, retries: 3 });
+		expect(loaded.params).toEqual({ observationBytes: 32768, observationWindow: 1, idleSteps: 2, retries: 3 });
 	});
 });
 

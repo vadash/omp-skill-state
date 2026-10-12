@@ -389,6 +389,142 @@ describe("project observation cap", () => {
 	});
 });
 
+describe("project observation window", () => {
+	test("window 3 pins the three most recent pairs in chronological order and drops older pairs", () => {
+		const h = head();
+		const droppedCall = assistantToolCall("t0");
+		const droppedResult = toolResult("t0", "old");
+		const call1 = assistantToolCall("t1");
+		const result1 = toolResult("t1", "first");
+		const call2 = assistantToolCall("t2", "bash");
+		const result2 = toolResult("t2", "second", "bash");
+		const call3 = assistantToolCall("t3");
+		const result3 = toolResult("t3", "third");
+		const out = project(
+			[...h.all, droppedCall, droppedResult, call1, result1, call2, result2, call3, result3],
+			32768,
+			3,
+		)!;
+
+		expect(out).toHaveLength(9);
+		expect(out[3]).toBe(call1);
+		expect(out[4]).toBe(result1);
+		expect(out[5]).toBe(call2);
+		expect(out[6]).toBe(result2);
+		expect(out[7]).toBe(call3);
+		expect(out[8]).toBe(result3);
+	});
+
+	test("a mismatched older pair stops the walk and keeps the newer pairs", () => {
+		const h = head();
+		const call1 = assistantToolCall("t1");
+		const result1 = toolResult("t1", "first");
+		const call2 = assistantToolCall("t2");
+		const result2 = toolResult("t2", "second");
+		const out = project(
+			[...h.all, assistantToolCall("t0"), toolResult("tZ", "mismatch"), call1, result1, call2, result2],
+			32768,
+			3,
+		)!;
+
+		expect(out).toHaveLength(7);
+		expect(out[3]).toBe(call1);
+		expect(out[4]).toBe(result1);
+		expect(out[5]).toBe(call2);
+		expect(out[6]).toBe(result2);
+	});
+
+	test("an older pair whose nearest message is not an assistant stops the walk", () => {
+		const h = head();
+		const call1 = assistantToolCall("t1");
+		const result1 = toolResult("t1", "first");
+		const call2 = assistantToolCall("t2");
+		const result2 = toolResult("t2", "second");
+		const out = project([...h.all, userMsg("plain turn"), call1, result1, call2, result2], 32768, 3)!;
+
+		expect(out).toHaveLength(7);
+		expect(out[3]).toBe(call1);
+		expect(out[6]).toBe(result2);
+	});
+
+	test("an older assistant with no results of its own stops the walk", () => {
+		const h = head();
+		const call2 = assistantToolCall("t2");
+		const result2 = toolResult("t2", "second");
+		const out = project([...h.all, assistantToolCall("t1"), call2, result2], 32768, 3)!;
+
+		expect(out).toHaveLength(5);
+		expect(out[3]).toBe(call2);
+		expect(out[4]).toBe(result2);
+	});
+
+	test("a window wider than the available pairs projects the pairs that exist", () => {
+		const h = head();
+		const call1 = assistantToolCall("t1");
+		const result1 = toolResult("t1", "first");
+		const call2 = assistantToolCall("t2");
+		const result2 = toolResult("t2", "second");
+		const out = project([...h.all, call1, result1, call2, result2], 32768, 5)!;
+
+		expect(out).toHaveLength(7);
+		expect(out[3]).toBe(call1);
+		expect(out[6]).toBe(result2);
+	});
+
+	test("the cap covers the whole window: both pairs are cut, largest first", () => {
+		const h = head();
+		const r1 = toolResult("t1", "1".repeat(300));
+		const r2 = toolResult("t2", "2".repeat(300), "bash");
+		const out = project(
+			[...h.all, assistantToolCall("t1"), r1, assistantToolCall("t2", "bash"), r2],
+			350,
+			2,
+		)!;
+		const capped1 = asToolResult(out[4]!);
+		const capped2 = asToolResult(out[6]!);
+
+		expect(out[4]).not.toBe(r1);
+		expect(out[6]).not.toBe(r2);
+		expect(capped1.content.at(-1)).toMatchObject({ type: "text", text: expect.stringContaining("this read result (t1)") });
+		expect(capped2.content.at(-1)).toMatchObject({ type: "text", text: expect.stringContaining("this bash result (t2)") });
+		expect(textBytes(out.filter((m) => m.role === "toolResult"))).toBeLessThanOrEqual(350);
+	});
+
+	test("below one marker per result across the window, every result is cut to its whole marker", () => {
+		const h = head();
+		const r1 = toolResult("t1", "1".repeat(300));
+		const r2 = toolResult("t2", "2".repeat(300), "bash");
+		const out = project(
+			[...h.all, assistantToolCall("t1"), r1, assistantToolCall("t2", "bash"), r2],
+			100,
+			2,
+		)!;
+		const capped = [asToolResult(out[4]!), asToolResult(out[6]!)];
+
+		for (const [i, result] of capped.entries()) {
+			expect(result.content).toHaveLength(1);
+			const marker = result.content[0]!;
+			expect(marker.type === "text" && marker.text).toContain(`cut 300 bytes from the end of this ${i === 0 ? "read" : "bash"} result`);
+		}
+		expect(textBytes(capped)).toBeGreaterThan(100);
+	});
+
+	test("project never mutates its input with a wider window, including under truncation", () => {
+		const messages = [
+			...head().all,
+			assistantToolCall("t1"),
+			toolResult("t1", "y".repeat(500)),
+			assistantToolCall("t2"),
+			toolResult("t2", "z".repeat(500)),
+			assistantToolCall("t3"),
+			toolResult("t3", "w".repeat(500)),
+		];
+		const snapshot = structuredClone(messages);
+		project(messages, 200, 3);
+		expect(messages).toEqual(snapshot);
+	});
+});
+
 describe("project flat band", () => {
 	test("projected length and size at step 30 match step 5 within a fixed constant", () => {
 		const messages: AgentMessage[] = [...head().all];

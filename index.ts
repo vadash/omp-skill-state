@@ -271,7 +271,7 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("context", (event, ctx) => {
 		const procedure = current(ctx);
 		if (procedure === undefined) return undefined;
-		const messages = project(event.messages, procedure.params.observationBytes);
+		const messages = project(event.messages, procedure.params.observationBytes, procedure.params.observationWindow);
 		noteProjected(procedure, messages !== undefined);
 		if (messages === undefined) return undefined;
 		// The nudge rides on the per-call prompt only: never stored, never

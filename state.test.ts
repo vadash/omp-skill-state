@@ -141,22 +141,23 @@ describe("validatePatch types", () => {
 		properties: { [name]: sub },
 	});
 
-	test("string value passes, wrong type fails", () => {
+	test("string value passes, wrong type fails naming what was sent", () => {
 		const schema = schemaWith("goal", { type: "string" });
 		expect(validatePatch({ goal: "ship" }, schema)).toBeNull();
-		expect(validatePatch({ goal: 1 }, schema)).toContain("goal");
+		expect(validatePatch({ goal: 1 }, schema)).toBe('state key "goal" must be a string (was number)');
+		expect(validatePatch({ goal: ["x"] }, schema)).toBe('state key "goal" must be a string (was array)');
 	});
 
-	test("number value passes, wrong type fails", () => {
+	test("number value passes, wrong type fails naming what was sent", () => {
 		const schema = schemaWith("count", { type: "number" });
 		expect(validatePatch({ count: 2 }, schema)).toBeNull();
-		expect(validatePatch({ count: "two" }, schema)).toContain("count");
+		expect(validatePatch({ count: "two" }, schema)).toBe('state key "count" must be a number (was string)');
 	});
 
-	test("boolean value passes, wrong type fails", () => {
+	test("boolean value passes, wrong type fails naming what was sent", () => {
 		const schema = schemaWith("done", { type: "boolean" });
 		expect(validatePatch({ done: true }, schema)).toBeNull();
-		expect(validatePatch({ done: "yes" }, schema)).toContain("done");
+		expect(validatePatch({ done: "yes" }, schema)).toBe('state key "done" must be a boolean (was string)');
 	});
 
 	test("null value passes, wrong type fails", () => {
@@ -172,6 +173,12 @@ describe("validatePatch types", () => {
 		const error = validatePatch({ tags: ["a", 2] }, schema);
 		expect(error).toContain("tags");
 		expect(error).toContain("[1]");
+	});
+
+	test("an object in a string-typed array reports the element's actual type", () => {
+		const schema = schemaWith("constraints", { type: "array", items: { type: "string" } });
+
+		expect(validatePatch({ constraints: [{ rule: "x" }] }, schema)).toBe('state key "constraints[0]" must be a string (was object)');
 	});
 
 	test("object value passes, nested property type fails", () => {
@@ -374,9 +381,10 @@ describe("validatePatch $append", () => {
 		expect(appended).toContain('findings.$append[0]" must be a string');
 	});
 
-	test("members riding an $append op are rejected, so the merge drops nothing silently", () => {
-		const error = validatePatch({ findings: { $append: ["a"], note: "x" } }, schema);
-		expect(error).toContain('state key "findings" must be an array or an object carrying only $append');
+	test("members riding an $append op are rejected by name, so the merge drops nothing silently", () => {
+		const error = validatePatch({ findings: { $append: ["a"], next_step: "y" } }, schema);
+		expect(error).toContain('state key "findings" contains $append with unexpected sibling keys: "next_step"');
+		expect(error).toContain("Move those keys to the top level of the patch.");
 	});
 
 	test("a malformed $append on an undeclared key is rejected instead of merging literally", () => {

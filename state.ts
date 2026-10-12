@@ -171,12 +171,18 @@ function validateValue(value: unknown, schema: JsonSchema, path: string): string
 		// array element's null must satisfy the items schema like any other.
 		case undefined:
 			return checkDeepPatch(value, path);
-		case "string":
-			return typeof value === "string" ? null : `state key "${path}" must be a string`;
-		case "number":
-			return typeof value === "number" ? null : `state key "${path}" must be a number`;
-		case "boolean":
-			return typeof value === "boolean" ? null : `state key "${path}" must be a boolean`;
+		case "string": {
+			const actual = Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
+			return typeof value === "string" ? null : `state key "${path}" must be a string (was ${actual})`;
+		}
+		case "number": {
+			const actual = Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
+			return typeof value === "number" ? null : `state key "${path}" must be a number (was ${actual})`;
+		}
+		case "boolean": {
+			const actual = Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
+			return typeof value === "boolean" ? null : `state key "${path}" must be a boolean (was ${actual})`;
+		}
 		case "null":
 			return value === null ? null : `state key "${path}" must be null`;
 		case "array": {
@@ -184,8 +190,15 @@ function validateValue(value: unknown, schema: JsonSchema, path: string): string
 			// appended items are validated, against the items schema.
 			if (isAppendOp(value)) {
 				// Extra members riding the op would be silently dropped by the
-				// merge, so the op object must carry nothing but $append.
-				if (Object.keys(value).length !== 1) return `state key "${path}" must be an array or an object carrying only $append`;
+				// merge, so the op object must carry nothing but $append; the
+				// error names them, so the model moves them to the patch's top
+				// level instead of concluding that $append forbids company.
+				const extraKeys = Object.keys(value).filter((key) => key !== "$append");
+				if (extraKeys.length > 0) {
+					return `state key "${path}" contains $append with unexpected sibling keys: ${extraKeys
+						.map((key) => `"${key}"`)
+						.join(", ")}. Move those keys to the top level of the patch.`;
+				}
 				if (schema.items !== undefined) {
 					for (let i = 0; i < value.$append.length; i++) {
 						const error = validateValue(value.$append[i], schema.items, `${path}.$append[${i}]`);

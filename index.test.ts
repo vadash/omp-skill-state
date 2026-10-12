@@ -721,7 +721,7 @@ describe("omp-skill-state patch loop", () => {
 
 		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
 		expect(s.blocked.map((call) => call.toolName)).toEqual([STATE_UPDATE_TOOL_NAME, "read", "bash"]);
-		for (const call of s.blocked) expect(call.reason).toBe('state key "goal" must be a string');
+		for (const call of s.blocked) expect(call.reason).toBe('state key "goal" must be a string (was number)');
 	});
 
 	test("a state_update call without a patch argument blocks with the shape error", async () => {
@@ -948,7 +948,7 @@ describe("omp-skill-state state_update registration", () => {
 		const result = await def.execute("t1", { patch: { goal: 42 } }, undefined, undefined, s.ctx());
 
 		expect(result.isError).toBe(true);
-		expect(result.content).toEqual([{ type: "text", text: 'state key "goal" must be a string' }]);
+		expect(result.content).toEqual([{ type: "text", text: 'state key "goal" must be a string (was number)' }]);
 	});
 
 	test("a direct execute after disengage returns the graceful no-active-procedure error", async () => {

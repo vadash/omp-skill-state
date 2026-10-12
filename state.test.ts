@@ -96,6 +96,14 @@ describe("loadStateSchema failures", () => {
 		expect(loaded).toEqual({ ok: false, error: expect.any(String) });
 	});
 
+	test("a non-object schema file names the skill in the error", async () => {
+		const loaded = await loadStateSchema("arraytop", [arrayTop]);
+		expect(loaded.ok).toBe(false);
+		if (loaded.ok) return;
+		expect(loaded.error).toContain("arraytop");
+		expect(loaded.error).toContain("not a JSON object");
+	});
+
 	test("unknown skill name fails without throwing", async () => {
 		const loaded = await loadStateSchema("nosuch", [plain]);
 		expect(loaded).toEqual({ ok: false, error: expect.any(String) });
@@ -274,6 +282,25 @@ describe("validatePatch prototype keys", () => {
 		const nested: StateSchema = { type: "object", properties: { meta: { type: "object", properties: {} } } };
 		const wired = JSON.parse('{"meta": {"__proto__": {}}}') as ExecutionState;
 		expect(validatePatch(wired, nested)).toBe('invalid state key "meta.__proto__"');
+	});
+
+	test("hazardous keys are rejected inside undeclared keys and typeless subschemas too", () => {
+		const open: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
+		const undeclared = JSON.parse('{"extra": {"deep": {"__proto__": {}}}}') as ExecutionState;
+		expect(validatePatch(undeclared, open)).toBe('invalid state key "extra.deep.__proto__"');
+		const inArray = JSON.parse('{"extra": [{"constructor": 1}]}') as ExecutionState;
+		expect(validatePatch(inArray, open)).toBe('invalid state key "extra[0].constructor"');
+
+		const untyped: StateSchema = { type: "object", properties: { free: {} } };
+		const hidden = JSON.parse('{"free": {"prototype": {}}}') as ExecutionState;
+		expect(validatePatch(hidden, untyped)).toBe('invalid state key "free.prototype"');
+	});
+});
+
+describe("validatePatch $append scope", () => {
+	test("an object-typed key rejects the append operator", () => {
+		const schema: StateSchema = { type: "object", properties: { meta: { type: "object", properties: {} } } };
+		expect(validatePatch({ meta: { $append: ["x"] } }, schema)).toBe('state key "meta" does not accept $append');
 	});
 });
 

@@ -29,7 +29,7 @@ const stateSends = (state: ExecutionState, deliverAs: "aside" | "nextTurn") => {
 // The step options for a reply whose batch calls state_update with a patch,
 // optionally alongside extra tools.
 const patchStep = (patch: unknown, extraTools: string[] = []) => ({
-	tools: ["state_update", ...extraTools],
+	tools: [STATE_UPDATE_TOOL_NAME, ...extraTools],
 	arguments: [{ patch }, ...extraTools.map(() => ({}))],
 });
 
@@ -692,16 +692,16 @@ describe("omp-skill-state patch loop", () => {
 		await s.step("recording", patchStep({ goal: 42 }, ["read", "bash"]));
 
 		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
-		expect(s.blocked.map((call) => call.toolName)).toEqual(["state_update", "read", "bash"]);
+		expect(s.blocked.map((call) => call.toolName)).toEqual([STATE_UPDATE_TOOL_NAME, "read", "bash"]);;
 		for (const call of s.blocked) expect(call.reason).toBe('state key "goal" must be a string');
 	});
 
 	test("a state_update call without a patch argument blocks with the shape error", async () => {
 		const { s } = await engaged();
 
-		await s.step("recording", { tools: ["state_update"] });
+		await s.step("recording", { tools: [STATE_UPDATE_TOOL_NAME] });
 
-		expect(s.blocked.map((call) => call.toolName)).toEqual(["state_update"]);
+		expect(s.blocked.map((call) => call.toolName)).toEqual([STATE_UPDATE_TOOL_NAME]);;
 		expect(s.blocked[0]!.reason).toBe("state patch must be a JSON object");
 	});
 
@@ -885,22 +885,22 @@ describe("omp-skill-state state_update registration", () => {
 
 		await omp.session("s1").invoke("procedure");
 
-		expect(omp.tool("state_update")!.loadMode).toBe("essential");
+		expect(omp.tool(STATE_UPDATE_TOOL_NAME)!.loadMode).toBe("essential");
 	});
 
 	test("the operating rules name the tool the definition registers", async () => {
 		const omp = fakeOmp([procedure]);
 		await omp.session("s1").invoke("procedure");
 
-		expect(omp.tool("state_update")!.name).toBe("state_update");
-		expect(OPERATING_RULES).toContain("state_update");
+		expect(omp.tool(STATE_UPDATE_TOOL_NAME)!.name).toBe(STATE_UPDATE_TOOL_NAME);
+		expect(OPERATING_RULES).toContain(STATE_UPDATE_TOOL_NAME);
 	});
 
 	test("a direct execute applies a valid patch: commits and sends the core+scratch asides", async () => {
 		const omp = fakeOmp([procedure]);
 		const s = omp.session("s1");
 		await s.invoke("procedure");
-		const def = omp.tool("state_update")!;
+		const def = omp.tool(STATE_UPDATE_TOOL_NAME)!;
 
 		const result = await def.execute("t1", { patch: { goal: "x" } }, undefined, undefined, s.ctx());
 
@@ -915,7 +915,7 @@ describe("omp-skill-state state_update registration", () => {
 		const omp = fakeOmp([procedure]);
 		const s = omp.session("s1");
 		await s.invoke("procedure");
-		const def = omp.tool("state_update")!;
+		const def = omp.tool(STATE_UPDATE_TOOL_NAME)!;
 
 		const result = await def.execute("t1", { patch: { goal: 42 } }, undefined, undefined, s.ctx());
 
@@ -928,7 +928,7 @@ describe("omp-skill-state state_update registration", () => {
 		const s = omp.session("s1");
 		await s.invoke("procedure");
 		await s.clear();
-		const def = omp.tool("state_update")!;
+		const def = omp.tool(STATE_UPDATE_TOOL_NAME)!;
 
 		const result = await def.execute("t1", { patch: { goal: "x" } }, undefined, undefined, s.ctx());
 

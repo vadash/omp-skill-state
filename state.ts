@@ -77,7 +77,10 @@ export async function loadStateSchema(skillName: string, skills: readonly Skill[
 	try {
 		const schemaPath = await InternalUrlRouter.instance().locate(`skill://${skillName}/state.schema.json`, { skills });
 		if (schemaPath === null) return { ok: false, error: `no state.schema.json for skill "${skillName}"` };
-		return parseStateSchema(JSON.parse(await readFile(schemaPath, "utf8")));
+		const loaded = parseStateSchema(JSON.parse(await readFile(schemaPath, "utf8")));
+		// The pure seam cannot know the skill; the I/O wrapper names the file.
+		if (!loaded.ok) return { ok: false, error: `state.schema.json for "${skillName}": ${loaded.error}` };
+		return loaded;
 	} catch (error) {
 		return { ok: false, error: error instanceof Error ? error.message : String(error) };
 	}
@@ -116,9 +119,34 @@ function validateObject(obj: Record<string, unknown>, schema: JsonSchema, path: 
 		if (sub === undefined) {
 			// additionalProperties defaults to open, so only an explicit false rejects.
 			if (schema.additionalProperties === false) return `unknown state key "${path ? `${path}.${key}` : key}"`;
+			// An undeclared value's subtree is walked by no schema, so the
+			// hazard ban is enforced here directly.
+			const error = checkHazards(obj[key], path ? `${path}.${key}` : key);
+			if (error !== null) return error;
 			continue;
 		}
 		const error = validateValue(obj[key], sub, path ? `${path}.${key}` : key);
+		if (error !== null) return error;
+	}
+	return null;
+}
+
+// Rejects prototype-hazard keys at every depth of a value no schema walks:
+// objects recursively, arrays element-wise, everything else is safe.
+function checkHazards(value: unknown, path: string): string | null {
+	if (Array.isArray(value)) {
+		for (let i = 0; i < value.length; i++) {
+			const error = checkHazards(value[i], `${path}[${i}]`);
+			if (error !== null) return error;
+		}
+		return null;
+	}
+	if (!isPlainObject(value)) return null;
+	for (const key of Object.keys(value)) {
+		if (key === "__proto__" || key === "constructor" || key === "prototype") {
+			return `invalid state key "${path}.${key}"`;
+		}
+		const error = checkHazards(value[key], `${path}.${key}`);
 		if (error !== null) return error;
 	}
 	return null;
@@ -130,9 +158,10 @@ function validateValue(value: unknown, schema: JsonSchema, path: string): string
 	// and the consolidation nudge both instruct exactly this).
 	if (value === null) return null;
 	switch (schema.type) {
-		// A subschema with no type constrains nothing.
+		// A subschema with no type constrains nothing but still bans the
+		// prototype-hazard keys inside the value it admits unchecked.
 		case undefined:
-			return null;
+			return checkHazards(value, path);
 		case "string":
 			return typeof value === "string" ? null : `state key "${path}" must be a string`;
 		case "number":
@@ -166,6 +195,9 @@ function validateValue(value: unknown, schema: JsonSchema, path: string): string
 			return null;
 		}
 		case "object":
+			// The plan scopes $append to array fields; an object key cannot
+			// take the operator, and the merge must never see it here.
+			if (isAppendOp(value)) return `state key "${path}" does not accept $append`;
 			if (!isPlainObject(value)) return `state key "${path}" must be an object`;
 			return validateObject(value, schema, path);
 		// Anything else — an array-typed `type`, a bogus value in hand-written

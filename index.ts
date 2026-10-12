@@ -190,7 +190,7 @@ export default function (pi: ExtensionAPI): void {
 		let patch: unknown;
 		let hasPatch = false;
 		for (const block of content) {
-			if (block.type === "toolCall" && block.name === "state_update") {
+			if (block.type === "toolCall" && block.name === STATE_UPDATE_TOOL_NAME) {
 				patch = (block.arguments as { patch?: unknown } | undefined)?.patch;
 				hasPatch = true;
 				break;

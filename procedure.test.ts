@@ -278,12 +278,12 @@ describe("pendingNudges", () => {
 		expect(pendingNudges(p)).toEqual([]);
 
 		recordReply(p, empty());
-		const warned = pendingNudges(p);
-		expect(warned).toHaveLength(1);
-		const [warn] = warned;
-		if (warn === undefined || !("content" in warn) || typeof warn.content !== "string") throw new Error("nudge without text content");
-		expect(warn.role).toBe("developer");
-		expect(warn.content).toContain("unchanged for 2 consecutive steps");
+		const nudged = pendingNudges(p);
+		expect(nudged).toHaveLength(1);
+		const [nudge] = nudged;
+		if (nudge === undefined || !("content" in nudge) || typeof nudge.content !== "string") throw new Error("nudge without text content");
+		expect(nudge.role).toBe("developer");
+		expect(nudge.content).toContain("unchanged for 2 consecutive steps");
 
 		recordReply(p, step({ goal: "x" }));
 		expect(pendingNudges(p)).toEqual([]);

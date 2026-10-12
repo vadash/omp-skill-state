@@ -83,7 +83,7 @@ skills/<name>/
 
 `state.schema.json` is a JSON Schema subset:
 
-```json
+```
 {
   "type": "object",
   "properties": {
@@ -102,7 +102,7 @@ Rules:
 - `additionalProperties` defaults to `true`, so a procedure can carry keys the schema does not name.
 - Optional `x-state` block for runtime parameters:
 
-```json
+```
 {
   "x-state": {
     "observationBytes": 32768,
@@ -136,7 +136,7 @@ Validation, on every patch, before merge:
 
 Persistence: after each accepted patch the runtime sends the state as a custom message of type `sh.omp.skill-state.state`, delivered as an aside so it lands at the next step boundary, before the next provider call. The message is stored in the transcript like any other, which is what lets the projection reuse it byte-for-byte (section 7). On `session_start`, `session_switch`, `session_branch` and `session_tree` the runtime re-derives engagement from the latest invocation on the branch and the procedure-spec and state messages that follow it, so `/resume`, rewinds and tree navigation keep it.
 
-The final step is the exception. Its reply carries no tool call, so the run is ending and an aside that outlives a run wakes a turn of its own. Its state is instead sent as a next-turn message (`deliverAs: "nextTurn"`) once the session is idle after `agent_end`: the harness then appends it to context and history at once, with no turn started. Sent any earlier, while the harness is still inside the loop, a next-turn message is only held in memory until the next prompt, and `/resume`, `/new` or quitting before that prompt loses it. The runtime polls `ctx.isIdle()` every 20 ms for up to 2 s; a queued follow-up prompt keeps the session busy past that, in which case the message is sent anyway and the harness holds it for that prompt. The waiting state is dropped if a patch is accepted in the meantime (it is stale) or if the engagement ends in that window (a session switch or `/clear`: a message sent after it would land in the wrong context).
+The run's final state is the live state at `agent_end`. The runtime polls `ctx.isIdle()` every 20 ms for up to 2 s and then sends it as a next-turn message (`deliverAs: "nextTurn"`): the harness then appends it to context and history at once, with no turn started. Sent any earlier, while the harness is still inside the loop, a next-turn message is only held in memory until the next prompt, and `/resume`, `/new` or quitting before that prompt loses it. A queued follow-up prompt keeps the session busy past the budget, in which case the message is sent anyway and the harness holds it for that prompt. The waiting copy is dropped if a patch is accepted in the meantime (it is stale) or if the engagement ends in that window (a session switch or `/clear`: a message sent after it would land in the wrong context).
 
 ## 7. The projection
 
@@ -144,7 +144,7 @@ On every `context` event while engaged, the runtime returns a replacement messag
 
 1. The runtime's operating rules, a custom message passed through unchanged.
 2. `P`, the skill body as rendered for the invocation, a custom message passed through unchanged. The rendered skill prompt is used rather than the raw file so the user's invocation arguments stay in every step.
-3. `t`, the current state as labelled plain JSON (no fence, see section 10), the latest stored state message passed through unchanged. Changes only when a patch is accepted.
+3. `t`, the current state as labelled plain JSON — plain text by design, so the elide pass described in section 10 never targets it — the latest stored state message passed through unchanged. Changes only when a patch is accepted.
 
 Items 1 to 3 are the head: stored transcript messages, not synthesised text. The projection returns the stored objects themselves. That is what makes them count as stable for caching (below). The head is sent at engage and again after every compaction while engaged (`session_compact`), because the harness's cut can land after the original copies; each copy is byte-equal to the first, and the projection takes the last stored message of each type.
 4. `O_t`, the current step's observations, as the original observation messages with their roles preserved.
@@ -159,26 +159,30 @@ Caching. Prompt caching is positional: a breakpoint caches every byte before it,
 
 ## 8. Producing and validating the patch
 
-The model emits the patch as a fenced `json` block in its assistant text, labelled with a fixed marker, alongside its tool calls.
+The patch travels as a `state_update` extension tool (ADR 0002), registered through the harness's public `registerTool` inside every engage. Registration from inside a handler flushes before the handler completes, so the definition exists from the very first step, and the operating rules in the head describe the channel from that step on; no procedure spec has to carry the calling convention itself. The definition is built once in the extension factory, and replace-by-name makes re-registering it on every engage idempotent. Registration is permanent for the session: no unregister exists, and after a disengage a late call meets a graceful `no active procedure` error result instead of a crash. Ordinary sessions that never engage a procedure never see the definition.
 
-Because the first step runs before the engage asides land (section 11), the operating rules are absent from the model's first prompt: the marker reaches the model only through `P`. A procedure spec that does not state the fence itself loses its bootstrap patch silently — `parsePatch` finds no block, the step is a legal empty patch, and nothing blocks or notifies. The bundled `zstate` skill therefore carries the fence format in its own text.
+The definition carries `strict: true` and a single wrapper argument `patch`, an unconstrained JSON object holding the whole Δt. The harness preserves `strict: true` on tool definitions and sends it to both the Anthropic and OpenAI families, with automatic fallback when a provider rejects it. The state schema is enforced at apply time rather than in the tool's parameter schema, so one schema source stays authoritative.
 
-Ordering, and why it works:
+Approval is zero-cost by decision: the definition declares `{ tier: "read", policy: "allow" }`, so even always-ask approval modes never prompt for a state write. A per-tool user deny still wins, because the harness's approval resolver is consulted first.
 
-1. `assistant_message` fires once per finalized assistant message, before the message reaches agent context, persistence, `message_end`, or tool dispatch.
-2. The handler parses the fenced block. On success it validates and merges, then clears the step's pending-failure flag.
-3. On failure it sets a pending-failure flag for this step and increments the retry counter.
-4. `tool_call` fires next, at argument-prep time. While the flag is set, the handler blocks every call in the batch and returns the validation error as the reason.
+Ordering, and why all-or-nothing survives the channel change:
+
+1. `assistant_message` fires once per finalized assistant message, before the message reaches agent context, persistence, `message_end`, or tool dispatch. The handler scans the reply's tool-call blocks for the first `state_update` call and validates its `patch` against the state schema.
+2. On failure it sets a pending-failure flag for this step and increments the retry counter.
+3. `tool_call` fires next, at argument-prep time, for every call of the batch — the `state_update` call included. While the flag is set, the handler blocks every call and returns the validation error as the reason. Because the `state_update` call itself is blocked, no tool of the step has executed by the time the batch is refused.
+4. When the patch is valid, the `state_update` execute runs with the rest of the batch: it re-validates defensively (an impossible failure would come back as the exact error in a failed tool result), merges the patch, commits the state, and an aside lands the new state at the next step boundary, before the next provider call.
 5. The model receives the block reason and re-emits. A blocked call does not execute and emits no result hook.
 
-A step with no patch block is legal and means an empty patch. Only an *invalid* patch blocks.
+A step with no `state_update` call is legal and means an empty patch. A patch that leaves the state byte-identical commits nothing and sends nothing. Only an *invalid* patch blocks.
 
 Retry and degrade:
 
 - Up to `retries` (default 3) consecutive invalid patches: block and re-prompt.
 - On the `retries`-th failure the runtime disengages, notifies the user, and leaves the transcript to speak for itself. From then on the session is ordinary.
 
-Strict schemas: the harness preserves `strict: true` on tool definitions and sends it to both Anthropic and OpenAI families, with automatic fallback when a provider rejects it. A `state_update` tool with a strict schema is the stronger option for small models, which the paper measures failing on JSON syntax 12% of the time. It is not in v1; the patch-block path ships first, and the tool is added only if a measured failure rate justifies it.
+The finish protocol is unchanged: a reply with no tool call still ends the run. Skills teach one final consolidating `state_update` in the step before it; because that patch arrives as a tool call, its aside is already stored during the run, and the run's final state is simply the live state at `agent_end`, settled as a next-turn message once the session is idle (section 6).
+
+No JSON repair exists on this channel. Tool arguments are protocol-level JSON, so the freehand block's malformed-JSON failure class (the paper's measured ~12% on small models) does not exist here, and silent repair could produce different state than the model meant, where the block-retry-degrade path reports exact errors.
 
 ## 9. Observation cap
 
@@ -204,7 +208,7 @@ While engaged, the runtime owns compaction. See ADR 0001.
 
 Because auto-compaction floors on the stored transcript, it still fires while engaged whenever the transcript crosses the threshold; the handler is what makes that firing cheap and lossless.
 
-The cut is computed rather than taken from `preparation` because of what the harness does after a compaction. The harness proposes a turn-sized kept tail, and a procedure is one user turn, so its proposal keeps most of the run: entries the projection never sends but the harness still counts. When the kept tail is still over the harness's recovery band (0.8 × threshold) the harness treats the compaction as a dead end and "rescues" it with `shake("elide")`: it rewrites the kept entries in place, persisted to disk, replacing every tool result and every fenced or XML block of 400 or more tokens with a recovery placeholder. Custom messages are eligible, so that pass rewrote the stored state messages and the current step's observation in the integration run (`docs/verification.md`), and the projection then sent the model a placeholder as `t`. Cutting at the current step leaves nothing for the rescue to do. The state is rendered without a fence for the same reason: the remaining shake paths (a manual `/shake`, the request-body-timeout and overflow retries) are not reachable through the extension API, and plain JSON under a label is never a shake region. The procedure spec `P` stays exposed to those paths if the skill body holds a fenced or XML block of 400 or more tokens.
+The cut is computed rather than taken from `preparation` because of what the harness does after a compaction. The harness proposes a turn-sized kept tail, and a procedure is one user turn, so its proposal keeps most of the run: entries the projection never sends but the harness still counts. When the kept tail is still over the harness's recovery band (0.8 × threshold) the harness treats the compaction as a dead end and "rescues" it with `shake("elide")`: it rewrites the kept entries in place, persisted to disk, replacing every tool result and every code or XML block of 400 or more tokens with a recovery placeholder. Custom messages are eligible, so that pass rewrote the stored state messages and the current step's observation in the integration run (`docs/verification.md`), and the projection then sent the model a placeholder as `t`. Cutting at the current step leaves nothing for the rescue to do. The state is rendered as plain labelled JSON for the same reason: the remaining shake paths (a manual `/shake`, the request-body-timeout and overflow retries) are not reachable through the extension API, and plain JSON under a label is never a shake region. The procedure spec `P` stays exposed to those paths if the skill body holds a code or XML block of 400 or more tokens.
 
 ## 11. Disengaging
 
@@ -261,9 +265,10 @@ Every mechanism above is public extension API. Nothing else is touched.
 | per-step rewrite | `context` event; receives `AgentMessage[]` before `convertToLlm`, so `customType` is still visible, and its replacement never rewrites stored history |
 | validate before tools run | `assistant_message`, awaited before tool dispatch |
 | block a batch | `tool_call`, may block with a reason |
+| offer the state-write channel | `registerTool` with the strict, zero-approval `state_update` definition, registered inside every engage (section 8) |
 | pin `P` and the rules | `before_agent_start` returning a `systemPrompt`, plus `developer` messages |
 | persist `t`, `P`, rules | `sendMessage` with `deliverAs: "aside"`, plus `ctx.sessionManager.getBranch()` to rebuild |
-| persist the final step's `t` | `agent_end`, then `sendMessage` with `deliverAs: "nextTurn"` once `ctx.isIdle()` (section 6) |
+| persist the run's final `t` | `agent_end`, then `sendMessage` with `deliverAs: "nextTurn"` once `ctx.isIdle()` (section 6) |
 | re-send the head after a compaction | `session_compact`, then `sendMessage` with `deliverAs: "aside"` during a run or `"nextTurn"` when `ctx.isIdle()` (section 7) |
 | keep the head cacheable | return stored custom messages unchanged, so the provider anchors a breakpoint on `t` |
 | own compaction | `session_before_compact`, lazily registered |
@@ -307,9 +312,9 @@ Unit, no harness needed:
 - schema validation: each type, unknown keys under both `additionalProperties` values, non-object top level.
 - projection assembly: exact message order and roles; each dropped block type; the pinned tail pair; the byte cap and its marker.
 - branch reads: the re-derive scan (latest invocation wins, an incomplete head is inert) and the compaction cut.
-- step policy: each reply outcome (none, store as aside or final, block, ended by degrade or idle), the counters and their resets, the head and the compaction result.
+- step policy: each reply outcome (none, store, block, ended by degrade or idle), the counters and their resets, the head and the compaction result.
 
-`index.test.ts` drives the factory through a fake omp session (`fake-session.ts`): one factory with N sessions keyed by id, each owning its branch, sends, notices and idle flag. The fake auto-dispatches the harness event order inside one verb, assembles the context of each provider call from its branch, and models delivery timing: messages sent while busy flush at the end of the current step (so the first step after engage carries no head), messages sent while idle are appended at once, and a reply with no tool call ends the run. The delivery model is the fake interface contract; `docs/verification.md` remains the real-session ground truth.
+`index.test.ts` drives the factory through a fake omp session (`fake-session.ts`): one factory with N sessions keyed by id, each owning its branch, sends, notices and idle flag. The fake auto-dispatches the harness event order inside one verb, assembles the context of each provider call from its branch, captures `registerTool` definitions, and models delivery timing: messages sent while busy flush at the end of the current step (so the first step after engage carries no head), messages sent while idle are appended at once, a reply with no tool call ends the run, and a call whose name has a captured definition runs that definition inside the step, recording its own result. The delivery model is the fake interface contract; `docs/verification.md` remains the real-session ground truth.
 
 Against a real session (`docs/verification.md` records the outcome of each item; the invalid-patch and degrade items did not occur in the run and rest on the unit tests):
 
@@ -324,6 +329,5 @@ Against a real session (`docs/verification.md` records the outcome of each item;
 ## 19. Out of scope for v1
 
 - Multi-agent procedures with concurrent state writes and conflict resolution.
-- Grammar-constrained patch output via a strict tool.
 - Automatic schema discovery for skills that do not declare one.
 - Any change under the harness source tree.

@@ -1,7 +1,6 @@
 import type { CustomMessagePayload, SessionBeforeCompactEvent, SessionBeforeCompactResult } from "@oh-my-pi/pi-coding-agent";
 import { currentStepCut } from "./branch";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, renderStateContent, stateMessage } from "./messages";
-import { OPERATING_RULES, parsePatch } from "./patch";
+import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, renderStateContent, stateMessage } from "./messages";
 import { applyPatch } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
 
@@ -24,10 +23,6 @@ export interface Procedure {
 	// before the engage asides land, and the step after a compaction can too;
 	// the model has not seen the rules in such a step, so it cannot be idle.
 	projected: boolean;
-	// A state accepted from a message with no tool call: the run is ending, and
-	// an aside that outlives a run wakes a turn of its own, so this one goes out
-	// as a next-turn message once the session is idle after agent_end instead.
-	finalState?: ExecutionState;
 }
 
 // Every procedure starts with fresh counters, from a new invocation and from a
@@ -36,39 +31,37 @@ export function newProcedure(name: string, spec: string, schema: StateSchema, pa
 	return { name, spec, schema, params, state, invalidPatches: 0, idle: 0, projected: false };
 }
 
-// What one reply did to the procedure. The factory acts on it: a stored state
-// is sent (an aside mid-run; the final one waits for agent_end), an ended
+// What one reply did to the procedure. The factory acts on it: a stored patch
+// is committed by the state_update execute later in the same step, an ended
 // procedure is dropped and announced, and the other two need nothing from it.
 export type StepOutcome =
 	| { kind: "none" }
-	| { kind: "store"; state: ExecutionState; delivery: "aside" | "final" }
+	| { kind: "store"; state: ExecutionState }
 	| { kind: "block" }
 	| { kind: "ended"; cause: "degrade" | "idle" };
 
-// The step policy: parse the patch, validate and merge it, and decide what the
-// reply means for the counters. A reply with no patch, or with a patch that
-// leaves the state as it was, is an idle step; an invalid patch blocks the step
-// and counts toward degrade; a patch of any kind, valid or not, breaks an idle run.
-export function recordReply(procedure: Procedure, reply: { text: string; hasToolCall: boolean }): StepOutcome {
-	const patch = parsePatch(reply.text);
-	if (patch.kind === "error") return invalidPatch(procedure, patch.error);
-	if (patch.kind === "none") {
+// The step policy: validate and merge the reply's state_update patch, and
+// decide what the reply means for the counters. The merged state rides on the
+// store outcome; the tool's execute commits it, so the record's own state is
+// untouched here. A reply with no state_update call, or with a patch that
+// leaves the state as it was, is an idle step; an invalid patch blocks the
+// step and counts toward degrade; a patch of any kind, valid or not, breaks an
+// idle run.
+export function recordReply(procedure: Procedure, reply: { patch?: unknown; hasPatch: boolean }): StepOutcome {
+	if (!reply.hasPatch) {
 		procedure.pendingError = undefined;
 		procedure.invalidPatches = 0;
 		return idleStep(procedure);
 	}
-	const applied = applyPatch(procedure.state, patch.value, procedure.schema);
+	const applied = applyPatch(procedure.state, reply.patch, procedure.schema);
 	if (!applied.ok) return invalidPatch(procedure, applied.error);
 	procedure.pendingError = undefined;
 	procedure.invalidPatches = 0;
 	// A patch that leaves the state as it was is an empty patch: there is
 	// nothing to store, and the model did not edit its state this step.
 	if (renderStateContent(applied.state) === renderStateContent(procedure.state)) return idleStep(procedure);
-	procedure.state = applied.state;
 	procedure.idle = 0;
-	if (reply.hasToolCall) return { kind: "store", state: procedure.state, delivery: "aside" };
-	procedure.finalState = procedure.state;
-	return { kind: "store", state: procedure.state, delivery: "final" };
+	return { kind: "store", state: applied.state };
 }
 
 // A step the model spent without editing its state. A step whose prompt
@@ -89,15 +82,6 @@ function invalidPatch(procedure: Procedure, error: string): StepOutcome {
 	procedure.idle = 0;
 	if (procedure.invalidPatches >= procedure.params.retries) return { kind: "ended", cause: "degrade" };
 	return { kind: "block" };
-}
-
-// The final state, once: agent_end takes it, and the settle poll owns it from
-// there. A patch accepted in the meantime makes the taken state stale, so the
-// caller compares it against the live state before storing.
-export function takeFinalState(procedure: Procedure): ExecutionState | undefined {
-	const state = procedure.finalState;
-	procedure.finalState = undefined;
-	return state;
 }
 
 export function noteProjected(procedure: Procedure, projected: boolean): void {

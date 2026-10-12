@@ -1,11 +1,11 @@
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Text } from "@oh-my-pi/pi-coding-agent";
 import { SKILL_PROMPT_MESSAGE_TYPE, contentText, scanBranch } from "./branch";
-import { STATE_MESSAGE_TYPE, stateMessage } from "./messages";
-import { compactionFor, headMessages, newProcedure, noteProjected, recordReply, takeFinalState } from "./procedure";
+import { STATE_MESSAGE_TYPE, renderStateContent, stateMessage } from "./messages";
+import { compactionFor, headMessages, newProcedure, noteProjected, recordReply } from "./procedure";
 import type { Procedure } from "./procedure";
 import { project } from "./projection";
-import { isPlainObject, loadStateSchema } from "./state";
+import { applyPatch, isPlainObject, loadStateSchema } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
 
 // The final state waits for the session to go idle before it is stored; the
@@ -45,9 +45,46 @@ export default function (pi: ExtensionAPI): void {
 		end(ctx, procedure, `disengaged (${trigger})`);
 	}
 
+	// The state-write channel (ADR 0002): a strict, zero-approval tool built
+	// once and registered inside every engage, where replace-by-name is
+	// idempotent. Registration from inside a handler flushes before the handler
+	// completes, so the definition exists from the first step.
+	const z = pi.zod;
+	const stateUpdate = {
+		name: "state_update",
+		label: "state update",
+		description:
+			"Apply a patch to the running procedure's execution state. Call it once per step alongside your other tool calls. The patch is a JSON object merged into the state: a non-null value sets its key, null deletes its key, keys you omit are left untouched.",
+		parameters: z.object({ patch: z.record(z.unknown()) }),
+		strict: true,
+		approval: { tier: "read", policy: "allow" } as const,
+		async execute(_toolCallId: string, params: { patch: Record<string, unknown> }, _signal: AbortSignal | undefined, _onUpdate: undefined, ctx: ExtensionContext): Promise<AgentToolResult> {
+			const procedure = current(ctx);
+			// The definition stays registered after disengage (no unregister
+			// exists), so a late call meets a graceful error, not a crash.
+			if (procedure === undefined) return { content: [{ type: "text", text: "no active procedure" }], isError: true };
+			// Validation already ran in assistant_message and blocked this call
+			// when the patch was invalid; this repeat is defensive only.
+			const applied = applyPatch(procedure.state, params.patch, procedure.schema);
+			if (!applied.ok) return { content: [{ type: "text", text: applied.error }], isError: true };
+			// A patch that leaves the state as it was is an empty patch: no
+			// commit, no send.
+			if (renderStateContent(applied.state) === renderStateContent(procedure.state)) {
+				return { content: [{ type: "text", text: "no change to the execution state" }] };
+			}
+			procedure.state = applied.state;
+			procedure.idle = 0;
+			// Aside delivery lands the state at the next step boundary, before
+			// the next provider call, without interrupting the in-flight batch.
+			pi.sendMessage(stateMessage(applied.state), { deliverAs: "aside" });
+			return { content: [{ type: "text", text: "execution state updated" }] };
+		},
+	};
+
 	// Every procedure starts here with fresh counters, from a new invocation and
 	// from a re-derive alike. Both notices are UI-only and never enter model context.
 	function engage(ctx: ExtensionContext, sessionId: string, name: string, spec: string, loaded: { schema: StateSchema; params: StateParams }, state: ExecutionState): Procedure {
+		pi.registerTool(stateUpdate);
 		// Registering a session_before_compact handler disables speculative
 		// compaction for the session and pi.on has no counterpart, so the handler
 		// can never be removed (ADR 0001): it is registered lazily, on the first
@@ -109,16 +146,24 @@ export default function (pi: ExtensionAPI): void {
 		const procedure = current(ctx);
 		if (procedure === undefined) return undefined;
 		const content = event.message.content;
-		const outcome = recordReply(procedure, {
-			text: content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n"),
-			hasToolCall: content.some((block) => block.type === "toolCall"),
-		});
+		// The first state_update call of the reply carries the step's patch. It
+		// is validated here, before any tool executes, so an invalid patch
+		// blocks the whole batch, the state_update call itself included.
+		let patch: unknown;
+		let hasPatch = false;
+		for (const block of content) {
+			if (block.type === "toolCall" && block.name === "state_update") {
+				patch = (block.arguments as { patch?: unknown } | undefined)?.patch;
+				hasPatch = true;
+				break;
+			}
+		}
+		const outcome = recordReply(procedure, { patch, hasPatch });
 		switch (outcome.kind) {
 			case "store":
-				// Aside delivery lands the message at the next step boundary, so the
-				// state is stored before the next provider call without interrupting
-				// the in-flight tool batch. The final state instead waits for agent_end.
-				if (outcome.delivery === "aside") pi.sendMessage(stateMessage(outcome.state), { deliverAs: "aside" });
+				// Nothing to do here: the commit and the aside send live in the
+				// state_update execute, which runs after this handler; this
+				// outcome only clears the step's counters and arms the block.
 				break;
 			case "ended":
 				if (outcome.cause === "degrade") end(ctx, procedure, `degraded after ${procedure.params.retries} invalid patches; running ordinarily`, "warning");
@@ -131,17 +176,17 @@ export default function (pi: ExtensionAPI): void {
 		return undefined;
 	});
 
-	// The final step's state goes out once the run has settled, as a next-turn
-	// message. agent_end fires inside the loop, where the harness only holds a
-	// next-turn message in memory until the next prompt, and a /resume, /new or
-	// quit before that prompt loses it. Once the session is idle the harness
-	// appends it to context and history at once, so the send waits for idle. A
-	// patch accepted meanwhile makes this state stale, and it is dropped.
+	// The run's final state goes out once the session has settled, as a
+	// next-turn message. agent_end fires inside the loop, where the harness only
+	// holds a next-turn message in memory until the next prompt, and a /resume,
+	// /new or quit before that prompt loses it. Once the session is idle the
+	// harness appends it to context and history at once, so the send waits for
+	// idle. The snapshot is the live state at agent_end; a patch accepted
+	// meanwhile moves procedure.state, and the identity compare drops the stale copy.
 	pi.on("agent_end", (_event, ctx) => {
 		const procedure = current(ctx);
 		if (procedure === undefined) return;
-		const state = takeFinalState(procedure);
-		if (state === undefined) return;
+		const state = procedure.state;
 		const sessionId = ctx.sessionManager.getSessionId();
 		const settle = (attempts: number): void => {
 			if (procedures.get(sessionId) !== procedure || procedure.state !== state) return;

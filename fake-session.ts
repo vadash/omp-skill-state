@@ -1,4 +1,5 @@
-import type { ExtensionAPI, ExtensionContext, SessionEntry, Skill } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, SessionEntry, Skill, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
+import { zod } from "@oh-my-pi/pi-coding-agent";
 import extension from "./index";
 import { PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent } from "./messages";
 import { isPlainObject } from "./state";
@@ -21,6 +22,9 @@ import type { ExecutionState } from "./state";
 //   start a turn in the real harness and "nextTurn" is appended without one,
 //   which is what the settle poll and the idle compaction rely on.
 // - A reply with no tool call ends the run: agent_end fires.
+// - A tool call whose name has a captured registerTool definition runs that
+//   definition's execute inside the step, and the recorded result is its own
+//   (content and isError); calls without a captured definition get a fake "ok".
 // - A blocked tool call is recorded and produces no result, as the harness
 //   emits no result hook for a call that never ran.
 // - compact() makes no summarizer call and stores no summary entry; when the
@@ -47,6 +51,8 @@ export interface CompactionOutput {
 interface Internals {
 	handlers: Map<string, Handler>;
 	renderers: Map<string, unknown>;
+	// The definitions registerTool captured, keyed by name.
+	tools: Map<string, ToolDefinition>;
 	// The session whose event is dispatching; sendMessage has no session of its
 	// own, so the fake attributes sends to it.
 	current?: FakeSession;
@@ -59,10 +65,13 @@ export interface FakeOmp {
 	session(id: string, opts?: { kind?: "main" | "sub"; branch?: SessionEntry[] }): FakeSession;
 	renderers: Map<string, unknown>;
 	registered(event: string): boolean;
+	// The definition registerTool captured for a tool name, undefined before
+	// the first engage captured one.
+	tool(name: string): ToolDefinition | undefined;
 }
 
 export function fakeOmp(skills: Skill[]): FakeOmp {
-	const internals: Internals = { handlers: new Map(), renderers: new Map() };
+	const internals: Internals = { handlers: new Map(), renderers: new Map(), tools: new Map() };
 	const pi = {
 		on(event: string, handler: Handler) {
 			internals.handlers.set(event, handler);
@@ -73,6 +82,12 @@ export function fakeOmp(skills: Skill[]): FakeOmp {
 		registerMessageRenderer(type: string, renderer: unknown) {
 			internals.renderers.set(type, renderer);
 		},
+		registerTool(definition: ToolDefinition) {
+			internals.tools.set(definition.name, definition);
+		},
+		// The injected schema builder, as the real harness provides it: the
+		// factory builds state_update's parameters with it at load.
+		zod,
 		pi: { getActiveSkills: () => skills },
 	} as unknown as ExtensionAPI;
 	extension(pi);
@@ -80,6 +95,7 @@ export function fakeOmp(skills: Skill[]): FakeOmp {
 	return {
 		renderers: internals.renderers,
 		registered: (event: string) => internals.handlers.has(event),
+		tool: (name: string) => internals.tools.get(name),
 		session(id, opts = {}) {
 			let session = sessions.get(id);
 			if (session === undefined) {
@@ -176,13 +192,13 @@ export class FakeSession {
 
 	// One step: context, reply, tool calls, storage, flush. A reply with no
 	// tool call ends the run. Returns the projection result of the context call.
-	async step(text: string, opts: { tools?: string[]; results?: string[] } = {}): Promise<unknown[] | undefined> {
+	async step(text: string, opts: { tools?: string[]; results?: string[]; arguments?: unknown[] } = {}): Promise<unknown[] | undefined> {
 		const tools = opts.tools ?? ["read"];
 		const prompt = await this.context();
-		const calls = tools.map((name) => ({ name, id: `call-${++this.seq}` }));
+		const calls = tools.map((name, i) => ({ name, id: `call-${++this.seq}`, args: opts.arguments?.[i] ?? {} }));
 		const message: Record<string, unknown> = {
 			role: "assistant",
-			content: [{ type: "text", text }, ...calls.map((call) => ({ type: "toolCall", id: call.id, name: call.name, arguments: {} }))],
+			content: [{ type: "text", text }, ...calls.map((call) => ({ type: "toolCall", id: call.id, name: call.name, arguments: call.args }))],
 			api: "anthropic-messages",
 			provider: "anthropic",
 			model: "m",
@@ -200,13 +216,17 @@ export class FakeSession {
 				this.blocked.push({ toolName: call.name, toolCallId: call.id, reason: out.reason ?? "" });
 				continue;
 			}
+			// A captured definition runs for real, right after the tool_call
+			// dispatch, and its own result is what the branch records.
+			const definition = this.internals.tools.get(call.name);
+			const result = definition === undefined ? undefined : await definition.execute(call.id, call.args, undefined, undefined, this.ctx());
 			stored.push(
 				this.messageEntry({
 					role: "toolResult",
 					toolCallId: call.id,
 					toolName: call.name,
-					content: [{ type: "text", text: opts.results?.[i] ?? "ok" }],
-					isError: false,
+					content: result?.content ?? [{ type: "text", text: opts.results?.[i] ?? "ok" }],
+					isError: result?.isError ?? false,
 					timestamp: Date.now(),
 				}),
 			);
@@ -307,7 +327,9 @@ export class FakeSession {
 		}
 	}
 
-	private ctx(): ExtensionContext {
+	// The harness context of this session, public so tests can drive a
+	// captured definition's execute directly.
+	ctx(): ExtensionContext {
 		return {
 			agent: { kind: this.kind },
 			ui: { notify: (message: string, type?: string) => this.notices.push({ message, type }) },

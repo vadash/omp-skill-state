@@ -4,13 +4,19 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { SessionEntry, Skill } from "@oh-my-pi/pi-coding-agent";
 import { fakeOmp, invocationEntry, procedureBranch, specEntry, stateEntry } from "./fake-session";
-import { RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent, stateMessage } from "./messages";
-import { OPERATING_RULES } from "./patch";
+import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent, stateMessage } from "./messages";
 import type { ExecutionState } from "./state";
 import { makeSkill } from "./skill-fixtures";
 
 // Engage sends exactly these three asides; the patch loop must add nothing else.
 const engageAsideTypes = [RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE];
+
+// The step options for a reply whose batch calls state_update with a patch,
+// optionally alongside extra tools.
+const patchStep = (patch: unknown, extraTools: string[] = []) => ({
+	tools: ["state_update", ...extraTools],
+	arguments: [{ patch }, ...extraTools.map(() => ({}))],
+});
 
 const engageNotices = (name: string) => [
 	{ message: `skill-state: procedure "${name}" engaged`, type: "info" },
@@ -57,8 +63,6 @@ afterAll(async () => {
 });
 
 describe("omp-skill-state engage/disengage lifecycle", () => {
-	const patch = (json: string) => `\`\`\`json state\n${json}\n\`\`\``;
-
 	// A session that has invoked the procedure skill: engaged, head asides
 	// pending until the first step boundary.
 	async function engaged(skills: Skill[] = [procedure], id = "s1") {
@@ -184,15 +188,15 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 
 		expect(s.notices).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "branch")]);
 		expect(fresh.notices).toEqual([]);
-		expect(await fresh.step(patch('{"goal":"x"}'))).toBeUndefined();
+		expect(await fresh.step("recording", patchStep({ goal: "x" }))).toBeUndefined();
 		expect(fresh.sends).toEqual([]);
 		expect(fresh.storedStates).toEqual([]);
 	});
 
 	test("a rewind to after the invocation re-engages with the state as of that point", async () => {
 		const { omp, s } = await engaged();
-		await s.step(patch('{"goal":"x"}'));
-		await s.step(patch('{"goal":"y"}'));
+		await s.step("recording", patchStep({ goal: "x" }));
+		await s.step("recording", patchStep({ goal: "y" }));
 		expect(s.sends.map((sent) => sent.payload.customType)).toEqual([...engageAsideTypes, STATE_MESSAGE_TYPE, STATE_MESSAGE_TYPE]);
 
 		// The new session carries the rewound branch: invocation, head, goal:x.
@@ -204,7 +208,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		// The re-derive re-sent nothing: the head is already on the branch.
 		expect(rewound.sends).toEqual([]);
 
-		await rewound.step(patch('{"extra":1}'));
+		await rewound.step("recording", patchStep({ extra: 1 }));
 		expect(rewound.sends.at(-1)?.payload.details).toEqual({ state: { goal: "x", extra: 1 } });
 	});
 
@@ -215,7 +219,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 
 		expect(s.notices).toEqual(engageNotices("procedure"));
 		expect(s.sends).toEqual([]);
-		await s.step(patch('{"extra":1}'));
+		await s.step("recording", patchStep({ extra: 1 }));
 		expect(s.sends.at(-1)?.payload.details).toEqual({ state: { goal: "x", extra: 1 } });
 	});
 
@@ -228,7 +232,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		expect(s.notices).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/resume")]);
 		expect(target.notices).toEqual(engageNotices("procedure"));
 		expect(target.sends).toEqual([]);
-		await target.step(patch('{"extra":1}'));
+		await target.step("recording", patchStep({ extra: 1 }));
 		expect(target.sends.at(-1)?.payload.details).toEqual({ state: { goal: "x", extra: 1 } });
 	});
 
@@ -240,7 +244,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 
 		expect(s.notices).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/new")]);
 		expect(fresh.notices).toEqual([]);
-		expect(await fresh.step(patch('{"goal":"x"}'))).toBeUndefined();
+		expect(await fresh.step("recording", patchStep({ goal: "x" }))).toBeUndefined();
 		expect(fresh.sends).toEqual([]);
 	});
 
@@ -251,7 +255,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 
 		expect(s.notices).toEqual(engageNotices("procedure"));
 		expect(s.sends).toEqual([]);
-		await s.step(patch('{"extra":1}'));
+		await s.step("recording", patchStep({ extra: 1 }));
 		expect(s.sends.at(-1)?.payload.details).toEqual({ state: { goal: "x", extra: 1 } });
 	});
 
@@ -259,7 +263,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		const empty = fakeOmp([procedure]).session("s1");
 		await empty.start();
 		expect(empty.notices).toEqual([]);
-		expect(await empty.step(patch('{"goal":"x"}'))).toBeUndefined();
+		expect(await empty.step("recording", patchStep({ goal: "x" }))).toBeUndefined();
 
 		const agent = fakeOmp([procedure]).session("s1", {
 			branch: [invocationEntry("procedure", "agent"), specEntry("procedure"), stateEntry({ goal: "x" })],
@@ -270,7 +274,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		const schemaless = fakeOmp([plain]).session("s1", { branch: procedureBranch("plain", { goal: "x" }) });
 		await schemaless.start();
 		expect(schemaless.notices).toEqual([]);
-		expect(await schemaless.step(patch('{"goal":"x"}'))).toBeUndefined();
+		expect(await schemaless.step("recording", patchStep({ goal: "x" }))).toBeUndefined();
 
 		const sub = fakeOmp([procedure]).session("s1", { kind: "sub", branch: procedureBranch("procedure", { goal: "x" }) });
 		await sub.start();
@@ -290,7 +294,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		await s.start();
 
 		expect(s.notices).toEqual(engageNotices("smallcap"));
-		await s.step(patch('{"extra":1}'));
+		await s.step("recording", patchStep({ extra: 1 }));
 		expect(s.sends.at(-1)?.payload.details).toEqual({ state: { goal: "new", extra: 1 } });
 	});
 
@@ -302,7 +306,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		await s.start();
 
 		expect(s.notices).toEqual([]);
-		expect(await s.step(patch('{"goal":"x"}'))).toBeUndefined();
+		expect(await s.step("recording", patchStep({ goal: "x" }))).toBeUndefined();
 	});
 
 	test("a fork re-derives like any switch", async () => {
@@ -417,8 +421,6 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 });
 
 describe("omp-skill-state patch loop", () => {
-	const patch = (json: string) => `\`\`\`json state\n${json}\n\`\`\``;
-
 	// A state message send as the fake records it.
 	const stateSend = (state: ExecutionState, deliverAs: "aside" | "nextTurn") => ({ payload: stateMessage(state) as Record<string, unknown>, options: { deliverAs } });
 
@@ -448,7 +450,7 @@ describe("omp-skill-state patch loop", () => {
 		expect(expanded).toContain('"goal": "g"');
 	});
 
-	test("no patch block is an empty patch: nothing sent, tool calls run", async () => {
+	test("no state_update call is an empty patch: nothing sent, tool calls run", async () => {
 		const { s } = await engaged();
 
 		await s.step("Prose only, calling a tool.");
@@ -457,10 +459,10 @@ describe("omp-skill-state patch loop", () => {
 		expect(s.blocked).toEqual([]);
 	});
 
-	test("a valid patch is merged and sent as a state message, aside", async () => {
+	test("a valid state_update call commits the patch and the aside lands at the step boundary", async () => {
 		const { s } = await engaged();
 
-		await s.step(patch('{"goal":"x"}'));
+		await s.step("recording", patchStep({ goal: "x" }));
 
 		expect(s.sends).toHaveLength(4);
 		expect(s.sends[3]).toEqual(stateSend({ goal: "x" }, "aside"));
@@ -472,108 +474,40 @@ describe("omp-skill-state patch loop", () => {
 	test("a second valid patch merges into the first instead of replacing it", async () => {
 		const { s } = await engaged();
 
-		await s.step(patch('{"goal":"x"}'));
-		await s.step(patch('{"extra": 1}'));
+		await s.step("recording", patchStep({ goal: "x" }));
+		await s.step("recording", patchStep({ extra: 1 }));
 
 		expect(s.sends).toHaveLength(5);
 		expect(s.sends[4]!.payload.details).toEqual({ state: { goal: "x", extra: 1 } });
 		expect(s.storedStates.at(-1)).toEqual({ goal: "x", extra: 1 });
 	});
 
-	test("a patch in a step with no tool call is stored as a next-turn message once the session is idle after agent_end", async () => {
-		const { s } = await engaged();
-		jest.useFakeTimers();
-		try {
-			await s.step(patch('{"goal":"x"}'), { tools: [] });
-			// agent_end fired inside the run: nothing is sent yet, because the
-			// harness would only hold the message until the next prompt.
-			expect(s.sends).toHaveLength(3);
-			jest.advanceTimersByTime(100);
-			expect(s.sends).toHaveLength(3);
-
-			s.setIdle(true);
-			jest.advanceTimersByTime(20);
-			expect(s.sends).toHaveLength(4);
-			expect(s.sends[3]).toEqual(stateSend({ goal: "x" }, "nextTurn"));
-			// Idle delivery lands on the branch at once, without a turn.
-			expect(s.storedStates.at(-1)).toEqual({ goal: "x" });
-
-			// Stored once: a later run end has nothing pending.
-			await s.step("done", { tools: [] });
-			jest.advanceTimersByTime(100);
-			expect(s.sends).toHaveLength(4);
-
-			// The live state advanced at the patch, not at the store.
-			await s.step(patch('{"extra":1}'));
-			expect(s.sends).toHaveLength(5);
-			expect(s.sends[4]).toEqual(stateSend({ goal: "x", extra: 1 }, "aside"));
-		} finally {
-			jest.useRealTimers();
-		}
-	});
-
-	test("a final state superseded by a later patch before the session is idle is dropped, not stored stale", async () => {
-		const { s } = await engaged();
-		jest.useFakeTimers();
-		try {
-			await s.step(patch('{"goal":"x"}'), { tools: [] });
-			// A queued prompt ran another step before the session went idle.
-			await s.step(patch('{"goal":"y"}'));
-			expect(s.sends).toHaveLength(4);
-			expect(s.sends[3]!.payload.details).toEqual({ state: { goal: "y" } });
-
-			s.setIdle(true);
-			jest.advanceTimersByTime(5000);
-			expect(s.sends).toHaveLength(4);
-		} finally {
-			jest.useRealTimers();
-		}
-	});
-
-	test("a session that never goes idle still gets the final state after the poll budget, held by the harness for the next prompt", async () => {
-		const { s } = await engaged();
-		jest.useFakeTimers();
-		try {
-			await s.step(patch('{"goal":"x"}'), { tools: [] });
-			jest.advanceTimersByTime(1900);
-			expect(s.sends).toHaveLength(3);
-			jest.advanceTimersByTime(200);
-			expect(s.sends).toHaveLength(4);
-			expect(s.sends[3]!.options).toEqual({ deliverAs: "nextTurn" });
-			// Sent while busy: held to the next step boundary, not on the branch yet.
-			expect(s.storedStates).toEqual([{}]);
-		} finally {
-			jest.useRealTimers();
-		}
-	});
-
-	test("an invalid patch blocks every tool call with the validation error and sends nothing", async () => {
+	test("an invalid patch blocks every call of the batch, the state_update call included, with the exact validation error", async () => {
 		const { s } = await engaged();
 
-		await s.step(patch('{"goal": 42}'), { tools: ["read", "bash"] });
+		await s.step("recording", patchStep({ goal: 42 }, ["read", "bash"]));
 
 		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
-		expect(s.blocked.map((call) => call.toolName)).toEqual(["read", "bash"]);
-		for (const call of s.blocked) expect(call.reason).toContain("goal");
+		expect(s.blocked.map((call) => call.toolName)).toEqual(["state_update", "read", "bash"]);
+		for (const call of s.blocked) expect(call.reason).toBe('state key "goal" must be a string');
 	});
 
-	test("malformed JSON blocks with the parse error", async () => {
+	test("a state_update call without a patch argument blocks with the shape error", async () => {
 		const { s } = await engaged();
 
-		await s.step("```json state\n{ nope\n```");
+		await s.step("recording", { tools: ["state_update"] });
 
-		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
-		expect(s.blocked).toHaveLength(1);
-		expect(s.blocked[0]!.reason).toContain("valid JSON");
+		expect(s.blocked.map((call) => call.toolName)).toEqual(["state_update"]);
+		expect(s.blocked[0]!.reason).toBe("state patch must be a JSON object");
 	});
 
 	test("a valid retry recovers and the session stays engaged", async () => {
 		const { omp, s } = await engaged();
 
-		await s.step(patch('{"goal": 42}'));
-		await s.step(patch('{"goal":"x"}'));
+		await s.step("recording", patchStep({ goal: 42 }));
+		await s.step("recording", patchStep({ goal: "x" }));
 
-		// Only the failed step's call was blocked; the retry's call ran.
+		// Only the failed step's calls were blocked; the retry's call ran.
 		expect(s.blocked).toHaveLength(1);
 		expect(s.sends).toHaveLength(4); // engage asides plus the recovered state message
 
@@ -584,7 +518,7 @@ describe("omp-skill-state patch loop", () => {
 	test("the third consecutive invalid patch degrades and the session runs ordinarily", async () => {
 		const { omp, s } = await engaged();
 
-		for (let i = 0; i < 3; i++) await s.step(patch('{"goal": 42}'));
+		for (let i = 0; i < 3; i++) await s.step("recording", patchStep({ goal: 42 }));
 
 		expect(s.notices).toEqual([
 			...engageNotices("procedure"),
@@ -594,9 +528,12 @@ describe("omp-skill-state patch loop", () => {
 		// first two steps were blocked.
 		expect(s.blocked).toHaveLength(2);
 
-		await s.step(patch('{"goal": 42}'));
+		await s.step("recording", patchStep({ goal: 42 }));
 		expect(s.blocked).toHaveLength(2);
+		// Disengaged: the state_update call is not blocked, but its execute
+		// meets no procedure and stores nothing.
 		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
+		expect(s.storedStates).toEqual([{}]);
 
 		await s.switchTo(omp.session("s2"), "new");
 		expect(s.notices).toEqual([
@@ -608,10 +545,10 @@ describe("omp-skill-state patch loop", () => {
 	test("the degrade threshold honours x-state retries", async () => {
 		const { s } = await engaged(retryProcedure);
 
-		await s.step(patch('{"goal": 42}'));
+		await s.step("recording", patchStep({ goal: 42 }));
 		expect(s.notices).toEqual(engageNotices("retryproc"));
 
-		await s.step(patch('{"goal": 42}'));
+		await s.step("recording", patchStep({ goal: 42 }));
 		expect(s.notices).toEqual([
 			...engageNotices("retryproc"),
 			{ message: 'skill-state: procedure "retryproc" degraded after 2 invalid patches; running ordinarily', type: "warning" },
@@ -621,37 +558,175 @@ describe("omp-skill-state patch loop", () => {
 	test("a valid patch between failures resets the consecutive counter", async () => {
 		const { omp, s } = await engaged();
 
-		await s.step(patch('{"goal": 42}'));
-		await s.step(patch('{"goal": 42}'));
-		await s.step(patch('{"goal":"x"}'));
-		await s.step(patch('{"goal": 42}'));
-		await s.step(patch('{"goal": 42}'));
+		await s.step("recording", patchStep({ goal: 42 }));
+		await s.step("recording", patchStep({ goal: 42 }));
+		await s.step("recording", patchStep({ goal: "x" }));
+		await s.step("recording", patchStep({ goal: 42 }));
+		await s.step("recording", patchStep({ goal: 42 }));
 		expect(s.notices).toEqual(engageNotices("procedure"));
 
 		await s.switchTo(omp.session("s2"), "new");
 		expect(s.notices).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/new")]);
 	});
 
+	test("agent_end settles the live state as a next-turn message once the session is idle", async () => {
+		const { s } = await engaged();
+		jest.useFakeTimers();
+		try {
+			await s.step("recording", patchStep({ goal: "x" }));
+			// The run ends with a tool-free reply. Nothing is sent yet, because
+			// the harness would only hold the message until the next prompt.
+			await s.step("done", { tools: [] });
+			expect(s.sends).toHaveLength(4);
+			jest.advanceTimersByTime(100);
+			expect(s.sends).toHaveLength(4);
+
+			s.setIdle(true);
+			jest.advanceTimersByTime(20);
+			expect(s.sends).toHaveLength(5);
+			expect(s.sends[4]).toEqual(stateSend({ goal: "x" }, "nextTurn"));
+			// Idle delivery lands on the branch at once, without a turn.
+			expect(s.storedStates.at(-1)).toEqual({ goal: "x" });
+
+			// A later run end settles the live state again: agent_end always
+			// snapshots procedure.state.
+			await s.step("again", { tools: [] });
+			expect(s.sends[5]).toEqual(stateSend({ goal: "x" }, "nextTurn"));
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
+	test("a settle superseded by a later patch before the session is idle is dropped, not stored stale", async () => {
+		const { s } = await engaged();
+		jest.useFakeTimers();
+		try {
+			await s.step("done", { tools: [] });
+			// A queued prompt ran another step before the session went idle.
+			await s.step("recording", patchStep({ goal: "y" }));
+			expect(s.sends).toHaveLength(4);
+			expect(s.sends[3]!.payload.details).toEqual({ state: { goal: "y" } });
+
+			s.setIdle(true);
+			jest.advanceTimersByTime(5000);
+			// The poll's snapshot predates the patch that moved the state, so
+			// the stale copy is dropped and only the patch's aside went out.
+			expect(s.sends).toHaveLength(4);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
+	test("a session that never goes idle still gets the live state after the poll budget, held by the harness for the next prompt", async () => {
+		const { s } = await engaged();
+		jest.useFakeTimers();
+		try {
+			await s.step("recording", patchStep({ goal: "x" }));
+			await s.step("done", { tools: [] });
+			jest.advanceTimersByTime(1900);
+			expect(s.sends).toHaveLength(4);
+			jest.advanceTimersByTime(200);
+			expect(s.sends).toHaveLength(5);
+			expect(s.sends[4]!.options).toEqual({ deliverAs: "nextTurn" });
+			// Sent while busy: held to the next step boundary, not on the branch yet.
+			expect(s.storedStates).toEqual([{}, { goal: "x" }]);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
 	test("assistant_message and tool_call are inert when not engaged and in a subagent", async () => {
 		const omp = fakeOmp([procedure]);
 
 		const main = omp.session("s1");
-		await main.step(patch('{"goal":"x"}'));
+		await main.step("recording", patchStep({ goal: "x" }));
 		expect(main.sends).toEqual([]);
 		expect(main.blocked).toEqual([]);
 		expect(main.notices).toEqual([]);
 
 		const sub = omp.session("s2", { kind: "sub" });
-		await sub.step(patch('{"goal":"x"}'));
+		await sub.step("recording", patchStep({ goal: "x" }));
 		expect(sub.sends).toEqual([]);
 		expect(sub.blocked).toEqual([]);
 		expect(sub.notices).toEqual([]);
 	});
 });
 
-describe("omp-skill-state idle disengage", () => {
-	const patch = (json: string) => `\`\`\`json state\n${json}\n\`\`\``;
+describe("omp-skill-state state_update registration", () => {
+	test("registers on the first engage, never at load, with the pinned definition", async () => {
+		const omp = fakeOmp([procedure]);
+		expect(omp.tool("state_update")).toBeUndefined();
 
+		await omp.session("s1").invoke("procedure");
+		const def = omp.tool("state_update")!;
+		expect(def.name).toBe("state_update");
+		expect(def.strict).toBe(true);
+		// Zero approval: read tier with an explicit allow, so always-ask modes
+		// never prompt for a state write.
+		expect(def.approval).toEqual({ tier: "read", policy: "allow" });
+		// The wrapper: exactly one patch argument, whose contents stay
+		// unconstrained here (the state schema validates them in execute).
+		const parameters = def.parameters as { parse(value: unknown): unknown };
+		expect(parameters.parse({ patch: { goal: "x" } })).toEqual({ patch: { goal: "x" } });
+		expect(() => parameters.parse({})).toThrow();
+		expect(() => parameters.parse({ patch: "goal" })).toThrow();
+
+		// A second engage replaces by name instead of failing.
+		await omp.session("s2").invoke("procedure");
+		expect(omp.tool("state_update")).toBe(def);
+	});
+
+	test("the operating rules name the tool the definition registers", async () => {
+		const omp = fakeOmp([procedure]);
+		await omp.session("s1").invoke("procedure");
+
+		expect(omp.tool("state_update")!.name).toBe("state_update");
+		expect(OPERATING_RULES).toContain("state_update");
+	});
+
+	test("a direct execute applies a valid patch: commits and sends the aside", async () => {
+		const omp = fakeOmp([procedure]);
+		const s = omp.session("s1");
+		await s.invoke("procedure");
+		const def = omp.tool("state_update")!;
+
+		const result = await def.execute("t1", { patch: { goal: "x" } }, undefined, undefined, s.ctx());
+
+		expect(result.isError).toBeUndefined();
+		// The aside flushed at the next step boundary.
+		await s.step("flush");
+		expect(s.sends[3]).toEqual({ payload: stateMessage({ goal: "x" }) as Record<string, unknown>, options: { deliverAs: "aside" } });
+		expect(s.storedStates).toEqual([{}, { goal: "x" }]);
+	});
+
+	test("a direct execute with an invalid patch returns the exact error and stores nothing", async () => {
+		const omp = fakeOmp([procedure]);
+		const s = omp.session("s1");
+		await s.invoke("procedure");
+		const def = omp.tool("state_update")!;
+
+		const result = await def.execute("t1", { patch: { goal: 42 } }, undefined, undefined, s.ctx());
+
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([{ type: "text", text: 'state key "goal" must be a string' }]);
+	});
+
+	test("a direct execute after disengage returns the graceful no-active-procedure error", async () => {
+		const omp = fakeOmp([procedure]);
+		const s = omp.session("s1");
+		await s.invoke("procedure");
+		await s.clear();
+		const def = omp.tool("state_update")!;
+
+		const result = await def.execute("t1", { patch: { goal: "x" } }, undefined, undefined, s.ctx());
+
+		expect(result).toEqual({ content: [{ type: "text", text: "no active procedure" }], isError: true });
+		await s.step("ordinary");
+		expect(s.storedStates).toEqual([{}]);
+	});
+});
+
+describe("omp-skill-state idle disengage", () => {
 	// The first step after engage runs before the head asides land, so its
 	// prompt is not projected and it never counts as idle (spec section 11.4).
 	// Every step after it carries the head.
@@ -701,14 +776,14 @@ describe("omp-skill-state idle disengage", () => {
 	test("a patch that leaves the state unchanged is an empty patch: nothing stored, and the step is idle", async () => {
 		const { s } = await projecting(idleProcedure);
 
-		await s.step(patch('{"goal":"x"}'));
+		await s.step("recording", patchStep({ goal: "x" }));
 		expect(s.sends).toHaveLength(4);
 
-		await s.step(patch('{"goal":"x"}'));
+		await s.step("recording", patchStep({ goal: "x" }));
 		expect(s.sends).toHaveLength(4);
 		expect(s.notices).toEqual(engageNotices("idleproc"));
 
-		await s.step(patch('{"goal":"x"}'));
+		await s.step("recording", patchStep({ goal: "x" }));
 		expect(s.sends).toHaveLength(4);
 		expect(s.storedStates).toEqual([{}, { goal: "x" }]);
 		expect(s.notices).toEqual([...engageNotices("idleproc"), ...disengageNotices("idleproc", "idle for 2 steps")]);
@@ -719,7 +794,7 @@ describe("omp-skill-state idle disengage", () => {
 
 		await s.step("no patch");
 		await s.step("no patch");
-		await s.step(patch('{"goal":"x"}'));
+		await s.step("recording", patchStep({ goal: "x" }));
 		await s.step("no patch");
 		await s.step("no patch");
 
@@ -731,7 +806,7 @@ describe("omp-skill-state idle disengage", () => {
 
 		await s.step("no patch");
 		await s.step("no patch");
-		await s.step(patch('{"goal": 42}'));
+		await s.step("recording", patchStep({ goal: 42 }));
 		await s.step("no patch");
 		await s.step("no patch");
 
@@ -746,15 +821,13 @@ describe("omp-skill-state idle disengage", () => {
 		await s.step("step 2");
 		expect(s.notices).toEqual([...engageNotices("idleproc"), ...disengageNotices("idleproc", "idle for 2 steps")]);
 
-		await s.step(patch('{"goal":"x"}'));
+		await s.step("recording", patchStep({ goal: "x" }));
 		expect(s.blocked).toEqual([]);
 		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
 	});
 });
 
 describe("omp-skill-state compaction ownership", () => {
-	const patch = (json: string) => `\`\`\`json state\n${json}\n\`\`\``;
-
 	test("registers session_before_compact lazily on the first engage, never at load", async () => {
 		const omp = fakeOmp([procedure]);
 		expect(omp.registered("session_before_compact")).toBe(false);
@@ -775,7 +848,7 @@ describe("omp-skill-state compaction ownership", () => {
 		] as unknown as SessionEntry[];
 		const s = omp.session("s1", { branch: earlier });
 		await s.invoke("procedure");
-		await s.step(patch('{"goal":"g"}'));
+		await s.step("recording", patchStep({ goal: "g" }));
 
 		const pinned = s.branch.filter((entry) => entry.type === "message" && entry.message?.role === "assistant").at(-1)!;
 		const result = await s.compact({ firstKeptEntryId: "h1", tokensBefore: 4321 });
@@ -808,10 +881,10 @@ describe("omp-skill-state compaction ownership", () => {
 		const omp = fakeOmp([procedure]);
 		const s = omp.session("s1");
 		await s.invoke("procedure");
-		await s.step(patch('{"goal":"g"}'));
+		await s.step("recording", patchStep({ goal: "g" }));
 
 		const first = await s.compact({ firstKeptEntryId: "e7", tokensBefore: 4321 });
-		await s.step(patch('{"step":2}'));
+		await s.step("recording", patchStep({ step: 2 }));
 		const second = await s.compact({ firstKeptEntryId: "e9", tokensBefore: 5000, previousPreserveData: first?.compaction?.preserveData });
 
 		expect(first?.compaction?.preserveData).toEqual({ state: { goal: "g" } });
@@ -823,7 +896,7 @@ describe("omp-skill-state compaction ownership", () => {
 		const omp = fakeOmp([procedure]);
 		const s = omp.session("s1");
 		await s.invoke("procedure");
-		await s.step(patch('{"goal":"g"}'));
+		await s.step("recording", patchStep({ goal: "g" }));
 
 		await s.compact();
 

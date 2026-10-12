@@ -31,6 +31,7 @@ _Avoid_: memory, scratchpad, context, blackboard
 **State patch**:
 The model's proposed change to the execution state, `Δt`. It is a JSON object merged into the state, never a replacement of it.
 _Avoid_: update, diff, mutation
+The fixed tool name `state_update` (ADR 0002) is exempt from the avoid-list: it is the channel's registered name, not a glossary synonym.
 
 **State core**:
 The part of the execution state expected to hold for many steps, sent as its own stored message so the cached prompt prefix reaches into the state.

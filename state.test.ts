@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Skill } from "@oh-my-pi/pi-coding-agent";
-import { applyPatch, loadStateSchema, mergeState, splitState, validatePatch, volatileKeys } from "./state";
+import { applyPatch, loadStateSchema, mergeState, splitState, stateEquals, validatePatch, volatileKeys } from "./state";
 import type { ExecutionState, JsonSchema, StateSchema } from "./state";
 import { makeSkill } from "./skill-fixtures";
 
@@ -288,11 +288,85 @@ describe("mergeState", () => {
 	});
 });
 
+describe("validatePatch null deletion", () => {
+	const schema: StateSchema = {
+		type: "object",
+		properties: {
+			goal: { type: "string" },
+			tags: { type: "array", items: { type: "string" } },
+			meta: { type: "object", properties: { depth: { type: "number" } } },
+		},
+	};
+
+	test("null passes validation against every declared type, because it deletes", () => {
+		expect(validatePatch({ goal: null }, schema)).toBeNull();
+		expect(validatePatch({ tags: null }, schema)).toBeNull();
+		expect(validatePatch({ meta: null }, schema)).toBeNull();
+		expect(validatePatch({ meta: { depth: null } }, schema)).toBeNull();
+	});
+
+	test("applying a null patch deletes the declared key", () => {
+		const applied = applyPatch({ goal: "old", tags: ["a"] }, { goal: null }, schema);
+		expect(applied.ok).toBe(true);
+		if (applied.ok) expect(applied.state).toEqual({ tags: ["a"] });
+	});
+
+	test("applying a nested null deletes only the nested key", () => {
+		const nested: StateSchema = { type: "object", properties: { meta: { type: "object", properties: { depth: { type: "number" } } } } };
+		const applied = applyPatch({ meta: { depth: 3, kept: true } }, { meta: { depth: null } }, nested);
+		expect(applied.ok).toBe(true);
+		if (applied.ok) expect(applied.state).toEqual({ meta: { kept: true } });
+	});
+});
+
+describe("validatePatch $append", () => {
+	const schema: StateSchema = { type: "object", properties: { findings: { type: "array", items: { type: "string" } } } };
+
+	test("an $append op validates against the array schema and its items", () => {
+		expect(validatePatch({ findings: { $append: ["a"] } }, schema)).toBeNull();
+		const error = validatePatch({ findings: { $append: [1] } }, schema);
+		expect(error).toContain("findings");
+		expect(error).toContain("$append[0]");
+	});
+
+	test("a non-array $append payload is rejected", () => {
+		const error = validatePatch({ findings: { $append: "a" } }, schema);
+		expect(error).toContain("findings");
+		expect(error).toContain("$append");
+	});
+
+	test("$append merges onto the current array instead of replacing it", () => {
+		expect(mergeState({ findings: ["x"], goal: "g" }, { findings: { $append: ["a", "b"] } } as ExecutionState)).toEqual({
+			findings: ["x", "a", "b"],
+			goal: "g",
+		});
+	});
+
+	test("$append to a missing key initializes the array", () => {
+		const applied = applyPatch({}, { findings: { $append: ["val"] } }, schema);
+		expect(applied.ok).toBe(true);
+		if (applied.ok) expect(applied.state).toEqual({ findings: ["val"] });
+	});
+
+	test("$append of an empty array to an existing key changes nothing", () => {
+		expect(mergeState({ findings: ["x"] }, { findings: { $append: [] } })).toEqual({ findings: ["x"] });
+	});
+
+	test("$append never recurses into an object-keyed merge", () => {
+		expect(mergeState({ meta: { a: 1 } }, { meta: { $append: ["x"] } } as ExecutionState)).toEqual({ meta: ["x"] });
+	});
+});
+
 describe("applyPatch", () => {
 	const schema: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
 
-	test("merges a valid patch", () => {
-		expect(applyPatch({ goal: "old" }, { goal: "new" }, schema)).toEqual({ ok: true, state: { goal: "new" } });
+	test("merges a valid patch and reports the change", () => {
+		expect(applyPatch({ goal: "old" }, { goal: "new" }, schema)).toEqual({ ok: true, state: { goal: "new" }, changed: true });
+	});
+
+	test("a patch that leaves the state as it was reports changed false", () => {
+		expect(applyPatch({ goal: "x" }, { goal: "x" }, schema)).toEqual({ ok: true, state: { goal: "x" }, changed: false });
+		expect(applyPatch({ goal: "x" }, { gone: null }, schema)).toEqual({ ok: true, state: { goal: "x" }, changed: false });
 	});
 
 	test("rejects an invalid patch and leaves the state untouched", () => {
@@ -303,6 +377,22 @@ describe("applyPatch", () => {
 		if (result.ok) return;
 		expect(result.error).toContain("goal");
 		expect(t).toEqual({ goal: "keep" });
+	});
+});
+
+describe("stateEquals", () => {
+	test("equal states compare equal regardless of key order", () => {
+		expect(stateEquals({ a: 1, b: 2 }, { b: 2, a: 1 })).toBe(true);
+		expect(stateEquals({ meta: { a: 1, b: [1, { c: 2 }] } }, { meta: { b: [1, { c: 2 }], a: 1 } })).toBe(true);
+	});
+
+	test("differences in keys, values or nesting compare unequal", () => {
+		expect(stateEquals({ a: 1 }, { a: 1, b: 2 })).toBe(false);
+		expect(stateEquals({ a: 1 }, { a: 2 })).toBe(false);
+		expect(stateEquals({ a: [1, 2] }, { a: [2, 1] })).toBe(false);
+		expect(stateEquals({ a: { b: 1 } }, { a: { b: 1, c: 2 } })).toBe(false);
+		expect(stateEquals({ a: 1 }, {})).toBe(false);
+		expect(stateEquals({}, { a: 1 })).toBe(false);
 	});
 });
 

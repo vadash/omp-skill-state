@@ -14,11 +14,17 @@ export const PROCEDURE_SPEC_MESSAGE_TYPE = "sh.omp.skill-state.procedure-spec";
 export const OPERATING_RULES = `\
 While a procedure runs, past conversation is hidden from you: the execution state is the only record of what happened.
 
-To change the state, call the state_update tool with a single patch object holding the change:
+To change the state, call the state_update tool directly with a single patch object holding the change:
 
 {"patch": {"key": "value", "obsolete": null}}
 
-Merge semantics: a non-null value sets its key, null deletes its key, keys absent from the object are left untouched. Arrays are set whole, never merged: to add one item, send the complete array with the item added. Send only the keys that change.
+Call it as a native tool call; do not redirect writes through xd:// devices or any other channel.
+
+Merge semantics: a non-null value sets its key, null deletes its key, keys absent from the object are left untouched. Arrays accept the complete array (set whole) or an append operator that adds items without resending the rest:
+
+{"patch": {"findings": {"$append": ["one new item"]}}}
+
+Send only the keys that change.
 
 A step with no state_update call is an empty patch and is fine.
 
@@ -26,6 +32,12 @@ Each reply is one step: the state_update call recording only what the last obser
 
 An invalid patch blocks every tool call of the step, and the error comes back as the tool result; fix the patch and call state_update again.
 `;
+
+// The patch channel's fixed name and description (ADR 0002), one source for
+// the registration in index.ts and the adapter tests, so they cannot drift.
+export const STATE_UPDATE_TOOL_NAME = "state_update";
+export const STATE_UPDATE_DESCRIPTION =
+	"Apply a patch to the running procedure's execution state. Call it once per step alongside your other tool calls. The patch is a JSON object merged into the state: a non-null value sets its key, null deletes its key, keys you omit are left untouched. Arrays accept the complete array or an {\"$append\": [items]} operator that adds items without resending the rest.";
 
 // One rules message, the same object shape everywhere the rules are delivered:
 // the first-step copy from before_agent_start and the stored head asides are

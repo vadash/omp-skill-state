@@ -1,8 +1,8 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Text } from "@oh-my-pi/pi-coding-agent";
 import { SKILL_PROMPT_MESSAGE_TYPE, contentText, scanBranch } from "./branch";
-import { STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, announcedSkillNames, renderStateContent, rulesMessage } from "./messages";
-import { compactionFor, headMessages, newProcedure, noteProjected, pendingNudges, recordReply, stateMessages } from "./procedure";
+import { STATE_UPDATE_TOOL_NAME, STATE_UPDATE_DESCRIPTION, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, announcedSkillNames, rulesMessage } from "./messages";
+import { commitPatch, compactionFor, headMessages, newProcedure, noteProjected, pendingNudges, recordReply, stateMessages } from "./procedure";
 import type { Procedure } from "./procedure";
 import { project } from "./projection";
 import { applyPatch, isPlainObject, loadStateSchema } from "./state";
@@ -46,12 +46,13 @@ export default function (pi: ExtensionAPI): void {
 	}
 
 	// The state-write channel (ADR 0002): a strict, zero-approval tool built
-	// once and registered inside every engage, where replace-by-name is
-	// idempotent. Registration from inside a handler flushes before the handler
-	// completes, so the definition exists from the first step.
+	// and registered once at factory load, so the definition sits in every
+	// session's tool declarations from turn 0 and its presence never depends
+	// on engage ordering. Registration is permanent (no unregister exists), so
+	// a call outside an active procedure meets the graceful error below.
 	const z = pi.zod;
 	const stateUpdate = {
-		name: "state_update",
+		name: STATE_UPDATE_TOOL_NAME,
 		label: "state update",
 		// Top-level even under tools.xdev: a discoverable tool mounts as an
 		// xd:// device, and the patch would then travel as freehand write
@@ -59,8 +60,7 @@ export default function (pi: ExtensionAPI): void {
 		// to exclude (ADR 0002). "essential" keeps state_update a real tool
 		// whose arguments are protocol-level JSON.
 		loadMode: "essential" as const,
-		description:
-			"Apply a patch to the running procedure's execution state. Call it once per step alongside your other tool calls. The patch is a JSON object merged into the state: a non-null value sets its key, null deletes its key, keys you omit are left untouched.",
+		description: STATE_UPDATE_DESCRIPTION,
 		parameters: z.object({ patch: z.record(z.unknown()) }),
 		strict: true,
 		approval: { tier: "read", policy: "allow" } as const,
@@ -75,11 +75,10 @@ export default function (pi: ExtensionAPI): void {
 			if (!applied.ok) return { content: [{ type: "text", text: applied.error }], isError: true };
 			// A patch that leaves the state as it was is an empty patch: no
 			// commit, no send.
-			if (renderStateContent(applied.state) === renderStateContent(procedure.state)) {
+			if (!applied.changed) {
 				return { content: [{ type: "text", text: "no change to the execution state" }] };
 			}
-			procedure.state = applied.state;
-			procedure.idle = 0;
+			commitPatch(procedure, applied.state);
 			// Aside delivery lands the state at the next step boundary, before
 			// the next provider call, without interrupting the in-flight batch.
 			// A commit stores both partitions, state core first.
@@ -87,11 +86,11 @@ export default function (pi: ExtensionAPI): void {
 			return { content: [{ type: "text", text: "execution state updated" }] };
 		},
 	};
+	pi.registerTool(stateUpdate);
 
 	// Every procedure starts here with fresh counters, from a new invocation and
 	// from a re-derive alike. Both notices are UI-only and never enter model context.
 	function engage(ctx: ExtensionContext, sessionId: string, name: string, spec: string, loaded: { schema: StateSchema; params: StateParams }, state: ExecutionState): Procedure {
-		pi.registerTool(stateUpdate);
 		// Registering a session_before_compact handler disables speculative
 		// compaction for the session and pi.on has no counterpart, so the handler
 		// can never be removed (ADR 0001): it is registered lazily, on the first

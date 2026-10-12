@@ -24,6 +24,13 @@ export interface Procedure {
 	// episode. pendingNudges latches it when it hands the nudge out; a commit
 	// that lands the state back under the cap re-arms it there.
 	capNudged: boolean;
+	// One up-counter of replies seen: each recordReply is one step.
+	step: number;
+	// The step the nudge memo was computed for, and the set it returned, so
+	// repeated pendingNudges calls inside one step re-serve the same answer
+	// instead of re-evaluating or duplicating nudges.
+	nudgedAt: number;
+	nudgesMemo: AgentMessage[];
 	// Whether the latest provider call carried the stored head. A step without
 	// the stored head does not count as idle. The first step runs before the
 	// engage asides land but has seen the rules through the before_agent_start
@@ -35,7 +42,7 @@ export interface Procedure {
 // Every procedure starts with fresh counters, from a new invocation and from a
 // re-derive alike.
 export function newProcedure(name: string, spec: string, schema: StateSchema, params: StateParams, state: ExecutionState): Procedure {
-	return { name, spec, schema, params, state, invalidPatches: 0, idle: 0, capNudged: false, projected: false };
+	return { name, spec, schema, params, state, invalidPatches: 0, idle: 0, capNudged: false, projected: false, step: 0, nudgedAt: -1, nudgesMemo: [] };
 }
 
 // What one reply did to the procedure. The factory acts on it: a stored patch
@@ -55,6 +62,8 @@ export type StepOutcome =
 // step and counts toward degrade; a patch of any kind, valid or not, breaks an
 // idle run.
 export function recordReply(procedure: Procedure, reply: { patch?: unknown; hasPatch: boolean }): StepOutcome {
+	// One reply is one step; the nudge memo is keyed to this counter.
+	procedure.step += 1;
 	if (!reply.hasPatch) {
 		procedure.pendingError = undefined;
 		procedure.invalidPatches = 0;
@@ -66,7 +75,7 @@ export function recordReply(procedure: Procedure, reply: { patch?: unknown; hasP
 	procedure.invalidPatches = 0;
 	// A patch that leaves the state as it was is an empty patch: there is
 	// nothing to store, and the model did not edit its state this step.
-	if (renderStateContent(applied.state) === renderStateContent(procedure.state)) return idleStep(procedure);
+	if (!applied.changed) return idleStep(procedure);
 	procedure.idle = 0;
 	return { kind: "store", state: applied.state };
 }
@@ -95,12 +104,12 @@ export function noteProjected(procedure: Procedure, projected: boolean): void {
 	procedure.projected = projected;
 }
 
-// Whether the next provider call is the warned one: the context handler asks
-// before the reply, so the nudge rides on the per-call prompt of the step that
-// would disengage. idle > 0 keeps a skill that sets idleSteps to 1 from
-// nudging on every single step, where no quiet step could ever precede the cutoff.
-export function nudgePending(procedure: Procedure): boolean {
-	return procedure.projected && procedure.idle > 0 && procedure.idle === procedure.params.idleSteps - 1;
+// The one write path for a merged state: the tool execute commits through
+// this, and so do the tests, so the state/idle reset policy has a single home
+// and can never diverge between call sites.
+export function commitPatch(procedure: Procedure, state: ExecutionState): void {
+	procedure.state = state;
+	procedure.idle = 0;
 }
 
 // Over the soft state cap, the consolidation ask rides once per episode:
@@ -117,8 +126,11 @@ function overCap(procedure: Procedure): boolean {
 
 // The turn-scoped nudges the next provider call should carry, in delivery
 // order: the consolidation ask first, the idle cutoff last. Only for a call
-// whose prompt carries the stored head — same precondition as nudgePending.
+// whose prompt carries the stored head. Idempotent within a step: repeated
+// calls before the next reply re-serve the memo, so a re-run context handler
+// cannot duplicate nudges or re-latch the cap ask.
 export function pendingNudges(procedure: Procedure): AgentMessage[] {
+	if (procedure.nudgedAt === procedure.step) return procedure.nudgesMemo;
 	const nudges: AgentMessage[] = [];
 	if (procedure.projected && overCap(procedure)) {
 		if (!procedure.capNudged) {
@@ -128,7 +140,14 @@ export function pendingNudges(procedure: Procedure): AgentMessage[] {
 	} else {
 		procedure.capNudged = false;
 	}
-	if (nudgePending(procedure)) nudges.push(nudgeMessage(procedure.idle));
+	// The idle cutoff rides at threshold minus one; idle > 0 keeps a skill
+	// that sets idleSteps to 1 from nudging on every single step, where no
+	// quiet step could ever precede the cutoff.
+	if (procedure.projected && procedure.idle > 0 && procedure.idle === procedure.params.idleSteps - 1) {
+		nudges.push(nudgeMessage(procedure.idle));
+	}
+	procedure.nudgedAt = procedure.step;
+	procedure.nudgesMemo = nudges;
 	return nudges;
 }
 

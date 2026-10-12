@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { SessionEntry, Skill } from "@oh-my-pi/pi-coding-agent";
 import { fakeOmp, coreStateEntry, invocationEntry, procedureBranch, scratchStateEntry, specEntry, stateEntries } from "./fake-session";
-import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, coreMessage, scratchMessage } from "./messages";
+import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_UPDATE_TOOL_NAME, STATE_UPDATE_DESCRIPTION, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, coreMessage, scratchMessage } from "./messages";
 import type { ExecutionState, StateSchema } from "./state";
 import { splitState, volatileKeys } from "./state";
 import { makeSkill } from "./skill-fixtures";
@@ -837,13 +837,11 @@ describe("omp-skill-state patch loop", () => {
 });
 
 describe("omp-skill-state state_update registration", () => {
-	test("registers on the first engage, never at load, with the pinned definition", async () => {
+	test("registers the pinned definition at factory load, before any engage", async () => {
 		const omp = fakeOmp([procedure]);
-		expect(omp.tool("state_update")).toBeUndefined();
-
-		await omp.session("s1").invoke("procedure");
-		const def = omp.tool("state_update")!;
-		expect(def.name).toBe("state_update");
+		const def = omp.tool(STATE_UPDATE_TOOL_NAME)!;
+		expect(def.name).toBe(STATE_UPDATE_TOOL_NAME);
+		expect(def.description).toBe(STATE_UPDATE_DESCRIPTION);
 		expect(def.strict).toBe(true);
 		// Zero approval: read tier with an explicit allow, so always-ask modes
 		// never prompt for a state write.
@@ -855,9 +853,11 @@ describe("omp-skill-state state_update registration", () => {
 		expect(() => parameters.parse({})).toThrow();
 		expect(() => parameters.parse({ patch: "goal" })).toThrow();
 
-		// A second engage replaces by name instead of failing.
+		// The definition outlives engage and disengage alike: registration is
+		// permanent for the session, and an engage adds nothing new.
+		await omp.session("s1").invoke("procedure");
 		await omp.session("s2").invoke("procedure");
-		expect(omp.tool("state_update")).toBe(def);
+		expect(omp.tool(STATE_UPDATE_TOOL_NAME)).toBe(def);
 	});
 
 	test("the definition requests top-level presentation: under tools.xdev a discoverable tool mounts as an xd:// device, where the patch would travel as freehand write content instead of protocol-level JSON (ADR 0002)", async () => {

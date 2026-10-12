@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, scratchMessage } from "./messages";
-import { compactionFor, headMessages, newProcedure, noteProjected, nudgePending, pendingNudges, recordReply } from "./procedure";
+import { commitPatch, compactionFor, headMessages, newProcedure, noteProjected, pendingNudges, recordReply } from "./procedure";
 import type { Procedure, StepOutcome } from "./procedure";
 import { DEFAULT_PARAMS } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
@@ -29,7 +29,7 @@ const empty = () => ({ hasPatch: false });
 // Commits a store outcome the way the state_update execute does, for tests
 // that read the record's state after the reply.
 function commit(procedure: Procedure, outcome: StepOutcome): void {
-	if (outcome.kind === "store") procedure.state = outcome.state;
+	if (outcome.kind === "store") commitPatch(procedure, outcome.state);
 }
 
 function assistantEntry(id: string): SessionEntry {
@@ -63,6 +63,9 @@ describe("newProcedure", () => {
 			idle: 0,
 			capNudged: false,
 			projected: false,
+			step: 0,
+			nudgedAt: -1,
+			nudgesMemo: [],
 		});
 	});
 });
@@ -98,6 +101,17 @@ describe("recordReply with a patch", () => {
 
 		expect(recordReply(p, empty())).toEqual({ kind: "none" });
 		expect(p.state).toEqual({});
+	});
+
+	test("a null patch on an existing declared key clears it without blocking", () => {
+		const p = procedure({}, { goal: "obsolete", kept: "yes" });
+
+		const outcome = recordReply(p, step({ goal: null }));
+
+		expect(outcome).toEqual({ kind: "store", state: { kept: "yes" } });
+		expect(p.pendingError).toBeUndefined();
+		commit(p, outcome);
+		expect(p.state).toEqual({ kept: "yes" });
 	});
 
 	test("an invalid patch blocks the step and leaves the state untouched", () => {
@@ -207,54 +221,17 @@ describe("recordReply and idle steps", () => {
 	});
 });
 
-describe("nudgePending", () => {
-	test("is false for the first three idle steps and true at the fourth, with the default threshold", () => {
+describe("commitPatch", () => {
+	test("moves the state and resets the idle counter", () => {
 		const p = projected();
 		recordReply(p, empty());
 		recordReply(p, empty());
-		recordReply(p, empty());
-		expect(nudgePending(p)).toBe(false);
-
-		recordReply(p, empty());
-		expect(nudgePending(p)).toBe(true);
-	});
-
-	test("an explicit idleSteps of 2 warns after one idle step", () => {
-		const p = projected({ idleSteps: 2 });
-		recordReply(p, empty());
-		expect(nudgePending(p)).toBe(true);
-	});
-
-	test("a state-changing patch resets the count, so the nudge fires only at the threshold minus one", () => {
-		const p = projected({ idleSteps: 3 });
-		recordReply(p, empty());
-		recordReply(p, empty());
-		expect(nudgePending(p)).toBe(true);
-
-		recordReply(p, step({ goal: "x" }));
-		expect(nudgePending(p)).toBe(false);
-	});
-
-	test("an invalid patch also resets the count and blocks instead of warning", () => {
-		const p = projected({ idleSteps: 3 });
-		recordReply(p, empty());
-		recordReply(p, empty());
-		expect(nudgePending(p)).toBe(true);
-
-		expect(recordReply(p, step({ goal: 42 }))).toEqual({ kind: "block" });
-		expect(nudgePending(p)).toBe(false);
-	});
-
-	test("a prompt that carried no head neither counts nor warns", () => {
-		const p = projected({ idleSteps: 3 });
-		recordReply(p, empty());
-		recordReply(p, empty());
-		expect(nudgePending(p)).toBe(true);
-
-		noteProjected(p, false);
-		recordReply(p, empty());
 		expect(p.idle).toBe(2);
-		expect(nudgePending(p)).toBe(false);
+
+		commitPatch(p, { goal: "x" });
+
+		expect(p.state).toEqual({ goal: "x" });
+		expect(p.idle).toBe(0);
 	});
 });
 
@@ -266,12 +243,17 @@ describe("pendingNudges", () => {
 		expect(p.capNudged).toBe(false);
 	});
 
-	test("hands the consolidation nudge out once while over cap, then latches", () => {
+	test("hands the consolidation nudge out once per over-cap episode and is idempotent within the step", () => {
 		const p = projected({ stateBytes: 100 }, { blob: "x".repeat(200) });
 
 		const nudges = pendingNudges(p);
 		expect(nudges).toEqual([consolidationNudgeMessage()]);
 		expect(p.capNudged).toBe(true);
+		// A repeated call in the same step re-serves the same set, never a duplicate.
+		expect(pendingNudges(p)).toEqual(nudges);
+
+		// The next step re-evaluates: the latch holds, so nothing rides again.
+		recordReply(p, empty());
 		expect(pendingNudges(p)).toEqual([]);
 	});
 
@@ -279,12 +261,32 @@ describe("pendingNudges", () => {
 		const p = projected({ stateBytes: 200 }, { blob: "x".repeat(200) });
 		expect(pendingNudges(p)).toHaveLength(1);
 
-		p.state = {};
+		// The commit lands in a later step, the way the tool execute does it.
+		commitPatch(p, {});
+		recordReply(p, empty());
 		expect(pendingNudges(p)).toEqual([]);
 		expect(p.capNudged).toBe(false);
 
-		p.state = { blob: "x".repeat(200) };
+		commitPatch(p, { blob: "x".repeat(200) });
+		recordReply(p, empty());
 		expect(pendingNudges(p)).toEqual([consolidationNudgeMessage()]);
+	});
+
+	test("the idle warning rides exactly at threshold minus one and resets with a patch", () => {
+		const p = projected({ idleSteps: 3 });
+		recordReply(p, empty());
+		expect(pendingNudges(p)).toEqual([]);
+
+		recordReply(p, empty());
+		const warned = pendingNudges(p);
+		expect(warned).toHaveLength(1);
+		const [warn] = warned;
+		if (warn === undefined || !("content" in warn) || typeof warn.content !== "string") throw new Error("nudge without text content");
+		expect(warn.role).toBe("developer");
+		expect(warn.content).toContain("unchanged for 2 consecutive steps");
+
+		recordReply(p, step({ goal: "x" }));
+		expect(pendingNudges(p)).toEqual([]);
 	});
 
 	test("a cap nudge and the idle warning ride on the same step, consolidation first", () => {
@@ -314,6 +316,8 @@ describe("pendingNudges", () => {
 		expect(pendingNudges(p)).toEqual([]);
 		expect(p.capNudged).toBe(false);
 
+		// From the next step, with the head back, the ask rides.
+		recordReply(p, empty());
 		noteProjected(p, true);
 		expect(pendingNudges(p)).toEqual([consolidationNudgeMessage()]);
 	});
@@ -331,7 +335,9 @@ describe("pendingNudges", () => {
 
 		expect(pendingNudges(p)).toEqual([consolidationNudgeMessage()]);
 
-		p.state = { goal: "x".repeat(100) };
+		// Dropping the scratch key lands in a later step, the way a commit does.
+		commitPatch(p, { goal: "x".repeat(100) });
+		recordReply(p, empty());
 		expect(pendingNudges(p)).toEqual([]);
 	});
 });

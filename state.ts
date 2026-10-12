@@ -33,8 +33,34 @@ export type SchemaLoad =
 	| { ok: false; error: string };
 
 export type PatchApply =
-	| { ok: true; state: ExecutionState }
+	| { ok: true; state: ExecutionState; changed: boolean }
 	| { ok: false; error: string };
+
+// Structural equality of two execution states, key order independent. The one
+// test for whether a patch changed anything: the step policy and the tool
+// execute consult the same answer through PatchApply, so they can never
+// classify the same step differently.
+export function stateEquals(a: ExecutionState, b: ExecutionState): boolean {
+	const aKeys = Object.keys(a);
+	if (aKeys.length !== Object.keys(b).length) return false;
+	for (const key of aKeys) {
+		if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
+		if (!jsonEquals(a[key], b[key])) return false;
+	}
+	return true;
+}
+
+// Order-insensitive deep equality over JSON values; scalars by identity.
+function jsonEquals(a: JsonValue | undefined, b: JsonValue | undefined): boolean {
+	if (a === b) return true;
+	if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((item, i) => jsonEquals(item, b[i]));
+	if (isPlainObject(a) && isPlainObject(b)) {
+		const aKeys = Object.keys(a);
+		if (aKeys.length !== Object.keys(b).length) return false;
+		return aKeys.every((key) => Object.prototype.hasOwnProperty.call(b, key) && jsonEquals(a[key], b[key]));
+	}
+	return false;
+}
 
 // A missing or malformed schema is a returned failure, not a throw: a skill
 // without a usable state.schema.json is an ordinary skill and must stay silent.
@@ -88,6 +114,10 @@ function validateObject(obj: Record<string, unknown>, schema: JsonSchema, path: 
 }
 
 function validateValue(value: unknown, schema: JsonSchema, path: string): string | null {
+	// Null is a typeless deletion operator across every schema type: the merge
+	// removes the key, so no declared type can reject it (the operating rules
+	// and the consolidation nudge both instruct exactly this).
+	if (value === null) return null;
 	switch (schema.type) {
 		// A subschema with no type constrains nothing.
 		case undefined:
@@ -101,7 +131,21 @@ function validateValue(value: unknown, schema: JsonSchema, path: string): string
 		case "null":
 			return value === null ? null : `state key "${path}" must be null`;
 		case "array": {
-			if (!Array.isArray(value)) return `state key "${path}" must be an array`;
+			// The $append operator mutates an array semantically: only the
+			// appended items are validated, against the items schema.
+			if (isAppendOp(value)) {
+				if (schema.items !== undefined) {
+					for (let i = 0; i < value.$append.length; i++) {
+						const error = validateValue(value.$append[i], schema.items, `${path}.$append[${i}]`);
+						if (error !== null) return error;
+					}
+				}
+				return null;
+			}
+			if (!Array.isArray(value)) {
+				if (isPlainObject(value) && "$append" in value) return `state key "${path}.$append" must be an array of items`;
+				return `state key "${path}" must be an array`;
+			}
 			if (schema.items !== undefined) {
 				for (let i = 0; i < value.length; i++) {
 					const error = validateValue(value[i], schema.items, `${path}[${i}]`);
@@ -116,6 +160,13 @@ function validateValue(value: unknown, schema: JsonSchema, path: string): string
 	}
 }
 
+// The $append patch operator: appends items to an array key instead of
+// setting the array whole. Only the $append member is meaningful; a payload
+// that is not an array of values is not an append op.
+function isAppendOp(value: unknown): value is { $append: unknown[] } {
+	return isPlainObject(value) && "$append" in value && Array.isArray(value.$append);
+}
+
 // Pure: never mutates t or patch. Untouched nested objects stay shared with t,
 // which is safe because nothing downstream mutates state in place.
 export function mergeState(t: ExecutionState, patch: ExecutionState): ExecutionState {
@@ -124,6 +175,14 @@ export function mergeState(t: ExecutionState, patch: ExecutionState): ExecutionS
 		const value = patch[key];
 		if (value === null) {
 			delete merged[key];
+		} else if (isAppendOp(value)) {
+			// A missing or non-array current value starts from empty, so $append
+			// initializes the key; an empty append changes nothing.
+			const current: JsonValue[] = Array.isArray(t[key]) ? t[key] : [];
+			// Items were validated against the schema's items in validateValue,
+			// and a patch only ever arrives as JSON, so each item is a JsonValue.
+			const appended = value.$append as JsonValue[];
+			merged[key] = [...current, ...appended];
 		} else if (isPlainObject(value) && isPlainObject(t[key])) {
 			merged[key] = mergeState(t[key] as ExecutionState, value as ExecutionState);
 		} else {
@@ -133,11 +192,13 @@ export function mergeState(t: ExecutionState, patch: ExecutionState): ExecutionS
 	return merged;
 }
 
-// Atomic apply: on rejection the caller's own t is left untouched.
+// Atomic apply: on rejection the caller's own t is left untouched. changed is
+// the structural-difference verdict, shared by every consumer.
 export function applyPatch(t: ExecutionState, patch: unknown, schema: StateSchema): PatchApply {
 	const error = validatePatch(patch, schema);
 	if (error !== null) return { ok: false, error };
-	return { ok: true, state: mergeState(t, patch as ExecutionState) };
+	const state = mergeState(t, patch as ExecutionState);
+	return { ok: true, state, changed: !stateEquals(state, t) };
 }
 
 // The schema's x-state.volatile list: the declared keys that change on most

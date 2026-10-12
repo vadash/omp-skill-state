@@ -420,6 +420,97 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 	});
 });
 
+describe("omp-skill-state first-step rules", () => {
+	// A session that has invoked the procedure skill: engaged, head asides
+	// pending until the first step boundary.
+	async function engaged(skills: Skill[] = [procedure], id = "s1") {
+		const omp = fakeOmp(skills);
+		const s = omp.session(id);
+		await s.invoke("procedure");
+		return { omp, s };
+	}
+
+	test("delivers the rules message on the engage batch, byte-equal to the stored head copy", async () => {
+		const { s } = await engaged();
+
+		expect(s.injected).toEqual([{ customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false }]);
+		expect(s.injected[0]).toEqual(s.sends[0].payload);
+	});
+
+	test("the injected copy sits in the branch before the boundary-flushed head asides", async () => {
+		const { s } = await engaged();
+		expect(s.branch.filter((entry) => entry.type === "custom_message").map((entry) => entry.customType)).toEqual(["skill-prompt", RULES_MESSAGE_TYPE]);
+
+		await s.step("first");
+		expect(s.branch.filter((entry) => entry.type === "custom_message").map((entry) => entry.customType)).toEqual([
+			"skill-prompt",
+			RULES_MESSAGE_TYPE,
+			RULES_MESSAGE_TYPE,
+			PROCEDURE_SPEC_MESSAGE_TYPE,
+			STATE_MESSAGE_TYPE,
+		]);
+	});
+
+	test("step 1 sees the rules on ordinary context, before any projected head exists", async () => {
+		const { s } = await engaged();
+
+		expect(await s.step("first")).toBeUndefined();
+		const rules = s.lastContextMessages?.find(
+			(message): message is Record<string, unknown> =>
+				typeof message === "object" && message !== null && "customType" in message && message.customType === RULES_MESSAGE_TYPE,
+		);
+		expect(rules).toEqual({ role: "custom", customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false, details: undefined, timestamp: expect.any(Number) });
+	});
+
+	test("step 2 projects from the stored head: the last rules copy wins", async () => {
+		const { s } = await engaged();
+		await s.step("first");
+		await s.step("second");
+
+		const head = s.prompts.at(-1)?.[0];
+		if (typeof head !== "object" || head === null || !("customType" in head) || !("content" in head)) throw new Error("step 2 ran without a projected head");
+		expect(head.customType).toBe(RULES_MESSAGE_TYPE);
+		expect(head.content).toBe(OPERATING_RULES);
+	});
+
+	test("no delivery for a skill without a state schema", async () => {
+		const s = fakeOmp([plain]).session("s1");
+		await s.invoke("plain");
+
+		expect(s.injected).toEqual([]);
+	});
+
+	test("no delivery for a plain prompt", async () => {
+		const s = fakeOmp([procedure]).session("s1");
+
+		expect(await s.prompt("hello")).toBeUndefined();
+		expect(s.injected).toEqual([]);
+	});
+
+	test("no delivery for an agent-attributed invocation", async () => {
+		const s = fakeOmp([procedure]).session("s1");
+		await s.invoke("procedure", { attribution: "agent" });
+
+		expect(s.injected).toEqual([]);
+	});
+
+	test("no delivery in a subagent session", async () => {
+		const s = fakeOmp([procedure]).session("sub", { kind: "sub" });
+		await s.invoke("procedure");
+
+		expect(s.injected).toEqual([]);
+		expect(s.notices).toEqual([]);
+	});
+
+	test("no delivery for a mid-procedure steer prompt", async () => {
+		const { s } = await engaged();
+		await s.step("first");
+
+		expect(await s.prompt("steer: also check x")).toBeUndefined();
+		expect(s.injected).toHaveLength(1);
+	});
+});
+
 describe("omp-skill-state patch loop", () => {
 	// A state message send as the fake records it.
 	const stateSend = (state: ExecutionState, deliverAs: "aside" | "nextTurn") => ({ payload: stateMessage(state) as Record<string, unknown>, options: { deliverAs } });
@@ -992,13 +1083,15 @@ describe("omp-skill-state projection (context seam)", () => {
 
 		expect(prompt).toHaveLength(5);
 		// The head and the pinned call are the stored objects themselves: byte
-		// equality with history is what anchors the provider cache prefix.
-		expect(prompt?.[0]).toBe(input[3]);
-		expect(prompt?.[1]).toBe(input[4]);
-		expect(prompt?.[2]).toBe(input[5]);
-		expect(prompt?.[3]).toBe(input[6]);
+		// equality with history is what anchors the provider cache prefix. The
+		// injected first-step rules copy sits at input[1], so the head asides
+		// start one entry later than the skill prompt alone would put them.
+		expect(prompt?.[0]).toBe(input[4]);
+		expect(prompt?.[1]).toBe(input[5]);
+		expect(prompt?.[2]).toBe(input[6]);
+		expect(prompt?.[3]).toBe(input[7]);
 		const capped = prompt?.[4] as { content: Array<{ type: string; text?: string }>; toolCallId: string };
-		expect(capped.toolCallId).toBe((input[7] as { toolCallId: string }).toolCallId);
+		expect(capped.toolCallId).toBe((input[8] as { toolCallId: string }).toolCallId);
 		const total = capped.content.reduce(
 			(sum, block) => sum + (block.type === "text" ? Buffer.byteLength(block.text ?? "") : 0),
 			0,
@@ -1016,7 +1109,7 @@ describe("omp-skill-state projection (context seam)", () => {
 		const prompt = await s.userTurn("go on");
 
 		expect(prompt).toHaveLength(4);
-		expect(prompt?.[0]).toBe(s.lastContextMessages?.[3]);
+		expect(prompt?.[0]).toBe(s.lastContextMessages?.[4]);
 		expect(prompt?.[3]).toBe(s.lastContextMessages?.at(-1));
 	});
 

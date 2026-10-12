@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, SessionEntry, Skill, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { zod } from "@oh-my-pi/pi-coding-agent";
 import extension from "./index";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent } from "./messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent, skillAnnouncement } from "./messages";
 import { isPlainObject } from "./state";
 import type { ExecutionState } from "./state";
 
@@ -14,6 +14,11 @@ import type { ExecutionState } from "./state";
 // - step() dispatches context, then assistant_message, then tool_call per
 //   call, then stores the reply and its results on the branch, then flushes
 //   pending messages.
+// - invoke() and prompt() dispatch before_agent_start first (the batch's
+//   dequeue precedes the input append), then persist the batch input; any
+//   message a before_agent_start handler returns is recorded on `injected`
+//   and stored on the branch in batch order, before the boundary-flushed
+//   asides.
 // - A message sent while busy flushes at the end of the current step, so the
 //   first step after engage carries no head: the engage asides land at the
 //   first step boundary (spec section 11.4), and the step after a compaction
@@ -123,6 +128,9 @@ export class FakeSession {
 	branch: SessionEntry[];
 	// Every sendMessage as the factory made it, in order.
 	sends: Sent[] = [];
+	// Every payload a before_agent_start handler returned for this session, in
+	// order: the rules copy that reaches the model on the invocation batch.
+	injected: Record<string, unknown>[] = [];
 	notices: Array<{ message: string; type?: string }> = [];
 	blocked: BlockedCall[] = [];
 	// The projection result of each provider call, in order; undefined when the
@@ -155,21 +163,23 @@ export class FakeSession {
 		return states;
 	}
 
-	// The projection result of the latest provider call.
-	get prompt(): unknown[] | undefined {
-		return this.prompts.at(-1);
-	}
-
 	setIdle(value: boolean): void {
 		this.idle = value;
 	}
 
-	// A user skill invocation: the harness stores the skill-prompt message and
-	// fires message_end; a schema-bearing skill engages.
+	// A user or agent skill invocation: the harness dequeues the batch
+	// (before_agent_start first, with the announcement only on a user
+	// attribution), stores the skill-prompt message and fires message_end; a
+	// schema-bearing skill engages. Input messages persist in batch order, so
+	// any returned payload lands on the branch at once, before the
+	// boundary-flushed asides.
 	async invoke(name: string, opts: { attribution?: "user" | "agent"; details?: unknown } = {}): Promise<void> {
 		const content = `Running skill ${name}`;
 		const details = opts.details ?? { name };
 		const attribution = opts.attribution ?? "user";
+		// The real user-invocation template announces the skill; the autoload
+		// and agent template has no announcement.
+		const injected = await this.startBatch(attribution === "user" ? `${skillAnnouncement(name)}\n\n${content}` : content);
 		const message = { role: "custom", customType: "skill-prompt", content, display: true, timestamp: Date.now(), details, attribution };
 		this.branch.push({
 			type: "custom_message",
@@ -183,6 +193,14 @@ export class FakeSession {
 			attribution,
 		} as SessionEntry);
 		await this.dispatch("message_end", { type: "message_end", message });
+		if (injected !== undefined) this.recordInjection(injected);
+	}
+
+	// A plain user batch: no skill announcement, just the prompt text.
+	async prompt(text: string): Promise<Record<string, unknown> | undefined> {
+		const injected = await this.startBatch(text);
+		if (injected !== undefined) this.recordInjection(injected);
+		return injected;
 	}
 
 	// A message_end for anything else: a model skill read, a foreign message.
@@ -312,6 +330,24 @@ export class FakeSession {
 		const prompt = out?.messages;
 		this.prompts.push(prompt);
 		return prompt;
+	}
+
+	// One dequeued batch: before_agent_start fires at the dequeue, before any
+	// input lands on the branch.
+	private async startBatch(prompt: string): Promise<Record<string, unknown> | undefined> {
+		const result = await this.dispatch("before_agent_start", { type: "before_agent_start", prompt, systemPrompt: [] });
+		if (result === null || typeof result !== "object" || !("message" in result)) return undefined;
+		if (result.message === null || typeof result.message !== "object") return undefined;
+		// The handler built this payload; the fake stores it verbatim.
+		return result.message as Record<string, unknown>;
+	}
+
+	// A returned payload is the batch input's tail: recorded and stored at
+	// once, after the entries the batch itself appends, before the
+	// boundary-flushed asides.
+	private recordInjection(payload: Record<string, unknown>): void {
+		this.injected.push(payload);
+		this.appendToBranch(payload);
 	}
 
 	private async dispatch(event: string, payload: Record<string, unknown>): Promise<unknown> {

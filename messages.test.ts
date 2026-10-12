@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { OPERATING_RULES, STATE_MESSAGE_TYPE, renderStateContent, stateMessage } from "./messages";
+import { announcedSkillNames, OPERATING_RULES, RULES_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent, skillAnnouncement, stateMessage } from "./messages";
 
 describe("OPERATING_RULES", () => {
 	test("names the state_update tool and carries no fence, so the stored rules message is never an elide target", () => {
@@ -24,5 +24,21 @@ describe("stateMessage", () => {
 			display: true,
 			details: { state: { goal: "x" } },
 		});
+	});
+});
+
+describe("skillAnnouncement / announcedSkillNames", () => {
+	test("round-trips the harness announcement line", () => {
+		expect(skillAnnouncement("zstate")).toBe('[IMPORTANT: User invoked the "zstate" skill; follow its instructions. Full skill below.]');
+		expect(announcedSkillNames(skillAnnouncement("zstate") + "\n\nbody")).toEqual(["zstate"]);
+	});
+
+	test("finds no name without an announcement", () => {
+		expect(announcedSkillNames("ordinary prompt text")).toEqual([]);
+	});
+
+	test("finds every announced name in a joined batch, in order", () => {
+		const prompt = `${skillAnnouncement("alpha")}\n\n${skillAnnouncement("beta")}\nbody`;
+		expect(announcedSkillNames(prompt)).toEqual(["alpha", "beta"]);
 	});
 });

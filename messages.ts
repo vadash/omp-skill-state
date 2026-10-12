@@ -25,6 +25,29 @@ Each reply is one step: the state_update call recording only what the last obser
 An invalid patch blocks every tool call of the step, and the error comes back as the tool result; fix the patch and call state_update again.
 `;
 
+// One rules message, the same object shape everywhere the rules are delivered:
+// the first-step copy from before_agent_start and the stored head asides are
+// built here so they are byte-equal by construction and the provider's cache
+// prefix never sees a difference between them.
+export function rulesMessage(): CustomMessagePayload {
+	return { customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false };
+}
+
+// The announcement line the harness prepends to the prompt of a user-invoked
+// skill, and the extraction of every name announced in a prompt (a joined
+// batch can carry several). Coupled to the harness template
+// prompts/skills/user-invocation.md, first line, in the pinned
+// @oh-my-pi/pi-coding-agent 18.8.7: if the template changes, detection
+// silently degrades to the pre-#15 behavior (engage at message_end only, no
+// first-step delivery).
+export function skillAnnouncement(name: string): string {
+	return `[IMPORTANT: User invoked the "${name}" skill; follow its instructions. Full skill below.]`;
+}
+
+export function announcedSkillNames(prompt: string): string[] {
+	return [...prompt.matchAll(/\[IMPORTANT: User invoked the "([^"]+)" skill;/g)].map((match) => match[1]);
+}
+
 // The stored state carries no fence and no XML: the harness's shake ("elide")
 // pass rewrites any stored message in place when it holds a fenced or XML
 // block of 400+ tokens, custom messages included, and a placeholder in its

@@ -1,6 +1,6 @@
 import type { CustomMessagePayload, SessionBeforeCompactEvent, SessionBeforeCompactResult } from "@oh-my-pi/pi-coding-agent";
 import { currentStepCut } from "./branch";
-import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, renderStateContent, stateMessage } from "./messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, renderStateContent, rulesMessage, stateMessage } from "./messages";
 import { applyPatch } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
 
@@ -19,9 +19,11 @@ export interface Procedure {
 	pendingError?: string;
 	invalidPatches: number;
 	idle: number;
-	// Whether the latest provider call carried the head. The first step runs
-	// before the engage asides land, and the step after a compaction can too;
-	// the model has not seen the rules in such a step, so it cannot be idle.
+	// Whether the latest provider call carried the stored head. A step without
+	// the stored head does not count as idle. The first step runs before the
+	// engage asides land but has seen the rules through the before_agent_start
+	// delivery; the step after a compaction can run before the re-sent head
+	// lands, and there the model truly has not seen the rules.
 	projected: boolean;
 }
 
@@ -65,7 +67,7 @@ export function recordReply(procedure: Procedure, reply: { patch?: unknown; hasP
 }
 
 // A step the model spent without editing its state. A step whose prompt
-// carried no head does not count: the model never saw the rules in it.
+// carried no stored head does not count: the rules were not in its prompt.
 function idleStep(procedure: Procedure): StepOutcome {
 	if (!procedure.projected) return { kind: "none" };
 	procedure.idle += 1;
@@ -94,7 +96,7 @@ export function noteProjected(procedure: Procedure, projected: boolean): void {
 // compaction keep the provider's cache prefix.
 export function headMessages(procedure: Procedure): CustomMessagePayload[] {
 	return [
-		{ customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false },
+		rulesMessage(),
 		{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: procedure.spec, display: false, details: { name: procedure.name } },
 		stateMessage(procedure.state),
 	];

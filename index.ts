@@ -1,7 +1,7 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Text } from "@oh-my-pi/pi-coding-agent";
 import { SKILL_PROMPT_MESSAGE_TYPE, contentText, scanBranch } from "./branch";
-import { STATE_MESSAGE_TYPE, renderStateContent, stateMessage } from "./messages";
+import { STATE_MESSAGE_TYPE, announcedSkillNames, renderStateContent, rulesMessage, stateMessage } from "./messages";
 import { compactionFor, headMessages, newProcedure, noteProjected, recordReply } from "./procedure";
 import type { Procedure } from "./procedure";
 import { project } from "./projection";
@@ -142,6 +142,25 @@ export default function (pi: ExtensionAPI): void {
 		return new Text(lines.join("\n"), 0, 0);
 	});
 
+	// The first step's rules ride in with the invocation batch itself. The hook
+	// fires at the batch's dequeue, before the skill prompt's message_end can
+	// engage, so engagement state cannot be consulted; detection comes from the
+	// announcement line, which names the invoked skill, and the schema check
+	// filters every non-procedure skill, so ordinary prompts match nothing.
+	// Re-entry retries recompute the same answer from the same prompt, so the
+	// stateless gate is re-entry-safe. The returned copy is byte-equal to the
+	// head's rules, which the projection keeps taking from step 2 on, so the
+	// provider's cache prefix is unchanged.
+	pi.on("before_agent_start", async (event, ctx) => {
+		if (ctx.agent.kind !== "main") return undefined;
+		for (const name of announcedSkillNames(event.prompt)) {
+			if ((await loadStateSchema(name, pi.pi.getActiveSkills())).ok) {
+				return { message: rulesMessage() };
+			}
+		}
+		return undefined;
+	});
+
 	pi.on("assistant_message", (event, ctx) => {
 		const procedure = current(ctx);
 		if (procedure === undefined) return undefined;
@@ -226,8 +245,9 @@ export default function (pi: ExtensionAPI): void {
 		// invocation; it keeps the user's invocation args in every step and needs
 		// no second file read.
 		const procedure = engage(ctx, sessionId, name, contentText(message.content), loaded, {});
-		// The projected prompt's head is pinned here at engage so it exists from
-		// the first step.
+		// The asides pin the stored head the projection takes from step 2 on;
+		// the first step's rules already went out with the invocation batch,
+		// through before_agent_start.
 		sendHead(procedure, { deliverAs: "aside" });
 	});
 

@@ -22,11 +22,11 @@ Loop:
 4. Record the outcome: facts into `findings`, new requirements into `constraints`, what you still do not know into `open_questions`, and the remaining actions into `plan`. One string per item, phrased to stand alone.
 5. Return to step 1.
 
-The patch merges into the state: a non-null value sets its key, `null` deletes it, a key you omit is kept. Arrays are set whole, never merged: to add one item, resend the complete array, so resend an array only when it changed. Drop findings that later facts supersede: the state holds what is true now, not a log of what you did.
+Drop findings that later facts supersede: the state holds what is true now, not a log of what you did.
 
-Finish when the task is done: send one last `state_update` call that consolidates everything the result needs, then reply with no tool call and give the result from the state alone. If a fact is not in the state, you do not know it.
+Set `next_step` to the action this step performs, even on a step that only reads.
 
-Every reply carries a `state_update` call, even a step that only reads: set `next_step` to the action this step performs. Steps that leave the state unchanged count as idle, and an idle run disengages the runtime and returns the session to ordinary execution.
+Finish when the task is done: make one last patch that consolidates everything the result needs, then end; give the result from the state alone. If a fact is not in the state, you do not know it.
 
 Field meanings:
 

@@ -66,7 +66,7 @@ describe("loadStateSchema", () => {
 
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
-		expect(loaded.params).toEqual({ observationBytes: 32768, idleSteps: 3, retries: 3 });
+		expect(loaded.params).toEqual({ observationBytes: 32768, idleSteps: 5, retries: 3 });
 	});
 
 	test("ignores non-numeric x-state fields", async () => {

@@ -18,6 +18,17 @@ const patchStep = (patch: unknown, extraTools: string[] = []) => ({
 	arguments: [{ patch }, ...extraTools.map(() => ({}))],
 });
 
+// The developer messages a returned prompt carries; the idle nudge is the only one.
+function nudgeIn(prompt: unknown[] | undefined): { role: unknown; content: unknown }[] {
+	const nudges: { role: unknown; content: unknown }[] = [];
+	for (const message of prompt ?? []) {
+		if (typeof message === "object" && message !== null && "role" in message && "content" in message && message.role === "developer") {
+			nudges.push(message);
+		}
+	}
+	return nudges;
+}
+
 const engageNotices = (name: string) => [
 	{ message: `skill-state: procedure "${name}" engaged`, type: "info" },
 	{ message: "skill-state: history is hidden from the model while engaged; finish with /new", type: "info" },
@@ -34,6 +45,7 @@ let brokenArray: Skill;
 let brokenJson: Skill;
 let smallProcedure: Skill;
 let idleProcedure: Skill;
+let warnProcedure: Skill;
 
 beforeAll(async () => {
 	root = await mkdtemp(path.join(tmpdir(), "omp-skill-state-"));
@@ -52,6 +64,11 @@ beforeAll(async () => {
 		root,
 		"idleproc",
 		JSON.stringify({ type: "object", properties: { goal: { type: "string" } }, "x-state": { idleSteps: 2 } }),
+	);
+	warnProcedure = await makeSkill(
+		root,
+		"warnproc",
+		JSON.stringify({ type: "object", properties: { goal: { type: "string" } }, "x-state": { idleSteps: 3 } }),
 	);
 	plain = await makeSkill(root, "plain");
 	brokenArray = await makeSkill(root, "brokenarray", "[]");
@@ -829,15 +846,88 @@ describe("omp-skill-state idle disengage", () => {
 		return { omp, s };
 	}
 
-	test("three consecutive no-patch steps disengage; two stay engaged", async () => {
+	test("five consecutive no-patch steps disengage; four stay engaged", async () => {
 		const { s } = await projecting();
 
 		expect(await s.step("step 1")).toBeDefined();
 		await s.step("step 2");
+		await s.step("step 3");
 		expect(s.notices).toEqual(engageNotices("procedure"));
 
+		const quiet = await s.step("step 4");
+		expect(nudgeIn(quiet)).toEqual([]);
+
+		const prompt = await s.step("step 5");
+		const nudge = nudgeIn(prompt);
+		expect(nudge).toHaveLength(1);
+		expect(nudge[0].content).toContain("unchanged for 4 consecutive steps");
+		expect(prompt?.at(-1)).toBe(nudge[0]);
+		expect(s.notices).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "idle for 5 steps")]);
+	});
+
+	test("the nudge rides on the prompt exactly once, at threshold minus one", async () => {
+		const { s } = await projecting(warnProcedure);
+
+		const quiet2 = await s.step("step 2");
+		expect(nudgeIn(quiet2)).toEqual([]);
+
+		const quiet3 = await s.step("step 3");
+		expect(nudgeIn(quiet3)).toEqual([]);
+
+		const prompt = await s.step("step 4");
+		const nudge = nudgeIn(prompt);
+		expect(nudge).toHaveLength(1);
+		expect(nudge[0].role).toBe("developer");
+		expect(nudge[0].content).toContain("unchanged for 2 consecutive steps");
+		expect(nudge[0].content).toContain("disengage");
+		expect(prompt?.at(-1)).toBe(nudge[0]);
+		expect(s.notices).toEqual([...engageNotices("warnproc"), ...disengageNotices("warnproc", "idle for 3 steps")]);
+	});
+
+	test("the nudge is per-call: nothing is stored and nothing is sent", async () => {
+		const { s } = await projecting(warnProcedure);
+
+		await s.step("step 2");
 		await s.step("step 3");
-		expect(s.notices).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "idle for 3 steps")]);
+		const prompt = await s.step("step 4");
+		expect(nudgeIn(prompt)).toHaveLength(1);
+		expect(s.notices).toEqual([...engageNotices("warnproc"), ...disengageNotices("warnproc", "idle for 3 steps")]);
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
+		expect(s.storedStates).toEqual([{}]);
+	});
+
+	test("a patch before the threshold resets the count and no nudge fires", async () => {
+		const { s } = await projecting(warnProcedure);
+
+		const quiet2 = await s.step("step 2");
+		expect(nudgeIn(quiet2)).toEqual([]);
+
+		const patched = await s.step("recording", patchStep({ goal: "x" }));
+		expect(nudgeIn(patched)).toEqual([]);
+
+		const quiet4 = await s.step("step 4");
+		expect(nudgeIn(quiet4)).toEqual([]);
+
+		const quiet5 = await s.step("step 5");
+		expect(nudgeIn(quiet5)).toEqual([]);
+
+		const prompt = await s.step("step 6");
+		const nudge = nudgeIn(prompt);
+		expect(nudge).toHaveLength(1);
+		expect(nudge[0].content).toContain("unchanged for 2 consecutive steps");
+		expect(s.notices).toEqual([...engageNotices("warnproc"), ...disengageNotices("warnproc", "idle for 3 steps")]);
+	});
+
+	test("a prompt that carries no head is never nudged", async () => {
+		const s = fakeOmp([warnProcedure]).session("s1");
+		await s.invoke("warnproc");
+
+		// The engage asides land at the first step boundary; that step never saw
+		// the rules, so the model cannot be idle in it.
+		expect(await s.step("step 1")).toBeUndefined();
+		const prompt = await s.step("step 2");
+		expect(nudgeIn(prompt)).toEqual([]);
+		expect(s.notices).toEqual(engageNotices("warnproc"));
 	});
 
 	test("the idle threshold honours x-state idleSteps", async () => {

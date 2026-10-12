@@ -24,7 +24,7 @@ export interface StateParams {
 	retries: number;
 }
 
-export const DEFAULT_PARAMS: StateParams = { observationBytes: 32768, idleSteps: 3, retries: 3 };
+export const DEFAULT_PARAMS: StateParams = { observationBytes: 32768, idleSteps: 5, retries: 3 };
 
 export type SchemaLoad =
 	| { ok: true; schema: StateSchema; params: StateParams }

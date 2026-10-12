@@ -1,8 +1,8 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Text } from "@oh-my-pi/pi-coding-agent";
 import { SKILL_PROMPT_MESSAGE_TYPE, contentText, scanBranch } from "./branch";
-import { STATE_MESSAGE_TYPE, announcedSkillNames, renderStateContent, rulesMessage, stateMessage } from "./messages";
-import { compactionFor, headMessages, newProcedure, noteProjected, recordReply } from "./procedure";
+import { STATE_MESSAGE_TYPE, announcedSkillNames, nudgeMessage, renderStateContent, rulesMessage, stateMessage } from "./messages";
+import { compactionFor, headMessages, newProcedure, noteProjected, nudgePending, recordReply } from "./procedure";
 import type { Procedure } from "./procedure";
 import { project } from "./projection";
 import { applyPatch, isPlainObject, loadStateSchema } from "./state";
@@ -273,7 +273,12 @@ export default function (pi: ExtensionAPI): void {
 		if (procedure === undefined) return undefined;
 		const messages = project(event.messages, procedure.params.observationBytes);
 		noteProjected(procedure, messages !== undefined);
-		return messages === undefined ? undefined : { messages };
+		if (messages === undefined) return undefined;
+		// The nudge rides on the per-call prompt only: never stored, never
+		// re-sent from history. A step whose prompt carries no head returned
+		// undefined above, so it neither counts nor warns.
+		if (nudgePending(procedure)) return { messages: [...messages, nudgeMessage(procedure.idle)] };
+		return { messages };
 	});
 
 	// A switch, rewind or fork lands in a different session id, so the outgoing

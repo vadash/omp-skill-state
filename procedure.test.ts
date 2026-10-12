@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, stateMessage } from "./messages";
-import { compactionFor, headMessages, newProcedure, noteProjected, recordReply } from "./procedure";
+import { compactionFor, headMessages, newProcedure, noteProjected, nudgePending, recordReply } from "./procedure";
 import type { Procedure, StepOutcome } from "./procedure";
 import { DEFAULT_PARAMS } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
@@ -156,6 +156,8 @@ describe("recordReply and idle steps", () => {
 		noteProjected(p, true);
 		expect(recordReply(p, empty())).toEqual({ kind: "none" });
 		expect(recordReply(p, empty())).toEqual({ kind: "none" });
+		expect(recordReply(p, empty())).toEqual({ kind: "none" });
+		expect(recordReply(p, empty())).toEqual({ kind: "none" });
 		expect(recordReply(p, empty())).toEqual({ kind: "ended", cause: "idle" });
 	});
 
@@ -198,7 +200,60 @@ describe("recordReply and idle steps", () => {
 
 		noteProjected(p, true);
 		recordReply(p, empty());
+		recordReply(p, empty());
+		recordReply(p, empty());
 		expect(recordReply(p, empty())).toEqual({ kind: "ended", cause: "idle" });
+	});
+});
+
+describe("nudgePending", () => {
+	test("is false for the first three idle steps and true at the fourth, with the default threshold", () => {
+		const p = projected();
+		recordReply(p, empty());
+		recordReply(p, empty());
+		recordReply(p, empty());
+		expect(nudgePending(p)).toBe(false);
+
+		recordReply(p, empty());
+		expect(nudgePending(p)).toBe(true);
+	});
+
+	test("an explicit idleSteps of 2 warns after one idle step", () => {
+		const p = projected({ idleSteps: 2 });
+		recordReply(p, empty());
+		expect(nudgePending(p)).toBe(true);
+	});
+
+	test("a state-changing patch resets the count, so the nudge fires only at the threshold minus one", () => {
+		const p = projected({ idleSteps: 3 });
+		recordReply(p, empty());
+		recordReply(p, empty());
+		expect(nudgePending(p)).toBe(true);
+
+		recordReply(p, step({ goal: "x" }));
+		expect(nudgePending(p)).toBe(false);
+	});
+
+	test("an invalid patch also resets the count and blocks instead of warning", () => {
+		const p = projected({ idleSteps: 3 });
+		recordReply(p, empty());
+		recordReply(p, empty());
+		expect(nudgePending(p)).toBe(true);
+
+		expect(recordReply(p, step({ goal: 42 }))).toEqual({ kind: "block" });
+		expect(nudgePending(p)).toBe(false);
+	});
+
+	test("a prompt that carried no head neither counts nor warns", () => {
+		const p = projected({ idleSteps: 3 });
+		recordReply(p, empty());
+		recordReply(p, empty());
+		expect(nudgePending(p)).toBe(true);
+
+		noteProjected(p, false);
+		recordReply(p, empty());
+		expect(p.idle).toBe(2);
+		expect(nudgePending(p)).toBe(false);
 	});
 });
 

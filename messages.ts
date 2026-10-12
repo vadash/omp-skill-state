@@ -1,5 +1,6 @@
 import type { CustomMessagePayload } from "@oh-my-pi/pi-coding-agent";
 import type { ExecutionState } from "./state";
+import type { AgentMessage } from "./projection";
 
 export const STATE_MESSAGE_TYPE = "sh.omp.skill-state.state";
 export const RULES_MESSAGE_TYPE = "sh.omp.skill-state.rules";
@@ -62,4 +63,16 @@ export function renderStateContent(state: ExecutionState): string {
 // re-parsing the content.
 export function stateMessage(state: ExecutionState): CustomMessagePayload {
 	return { customType: STATE_MESSAGE_TYPE, content: renderStateContent(state), display: true, details: { state } };
+}
+
+// The idle warning the model sees one step before the cutoff. Per-call by
+// construction: the context handler appends it to the projected prompt only,
+// so it has no stored counterpart, never anchors the cache breakpoint and is
+// never re-sent from history.
+export function nudgeMessage(idle: number): AgentMessage {
+	return {
+		role: "developer",
+		content: `The execution state has been unchanged for ${idle} consecutive steps. One more step without a state_update patch that changes the state disengages this procedure and returns the session to ordinary history-based execution. If there is anything worth keeping, record it in the state now with a state_update patch.`,
+		timestamp: Date.now(),
+	};
 }

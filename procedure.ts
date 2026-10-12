@@ -90,6 +90,14 @@ export function noteProjected(procedure: Procedure, projected: boolean): void {
 	procedure.projected = projected;
 }
 
+// Whether the next provider call is the warned one: the context handler asks
+// before the reply, so the nudge rides on the per-call prompt of the step that
+// would disengage. idle > 0 keeps a skill that sets idleSteps to 1 from
+// nudging on every single step, where no quiet step could ever precede the cutoff.
+export function nudgePending(procedure: Procedure): boolean {
+	return procedure.projected && procedure.idle > 0 && procedure.idle === procedure.params.idleSteps - 1;
+}
+
 // The head: the operating rules, P and the current state, one message each so
 // the projection can take the last stored copy of every type. Byte-equal for
 // the same state on every call, which is what lets a head re-sent after a

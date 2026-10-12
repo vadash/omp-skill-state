@@ -46,7 +46,7 @@ Consequence: the prompt is `O(1)` in the number of steps; cumulative prompt cost
    |                     |
    |                     +-- invalid patch x3 ----> degrade (self-disable, notify)
    |                     |
-   |                     +-- idle x3 --------------> disengage
+   |                     +-- idle x5 --------------> disengage
    |                     |
    |                     +-- /new, /clear, session change -> disengage
    v
@@ -219,7 +219,7 @@ Four triggers, all leading to the same reset (clear `t`, clear engaged flag, sto
 1. **New session.** `/new` starts one, firing `session_before_switch` and then `session_switch` with reason `new`; `session_start` fires only on a cold load. This is the intended ending, and the runtime tells the user so (section 12). On every `session_start` and `session_switch` the runtime re-derives engagement from the branch rather than resetting blindly: an empty branch is inert; a branch holding a user skill invocation for a procedure skill followed by its procedure-spec message and a state message re-engages with that state (the spec is read back from the branch so no file is re-read). That is what makes `/resume` restore `t` while `/new` starts clean.
 2. **Context reset.** `/clear` keeps the session and drops messages in place, and emits nothing to extensions. The `input` event runs before command interpretation and does see the raw text, so the runtime disengages on `/clear` directly.
 3. **Session change.** A switch, a rewind or a fork all land in a different session id, so `session_before_switch` and `session_before_branch` end the outgoing engagement with the usual disengage notice. `session_switch`, `session_branch` and `session_tree` then re-derive engagement from the branch now loaded: a rewind that lands after the invocation re-engages with that branch's state, one that lands before it stays inert, and a fork re-derives like any other branch.
-4. **Idleness.** `idleSteps` consecutive steps with no patch or with a patch that leaves the state unchanged. The model has stopped editing its state; the runtime stands down. A step whose provider call carried no stored head still does not count: the first step carries the rules through the `before_agent_start` delivery (section 7) but runs before the engage asides land, and the step after a compaction can run before the re-sent head lands, so the rules are missing from its prompt in that case. The integration run (`docs/verification.md`, finding 7) showed the rule firing on a legitimate preamble of reads before the first fact; it is kept as specified.
+4. **Idleness.** `idleSteps` consecutive steps with no patch or with a patch that leaves the state unchanged. At `idleSteps` − 1 consecutive idle steps — never at zero: a skill that sets `idleSteps` to 1 disengages on its first idle step unwarned — the next step's prompt carries a per-call developer nudge naming the count and the imminent disengage, so the model can record a meaningful fact before the cutoff; the nudge is never stored and never re-sent from history. The model has stopped editing its state; the runtime stands down. A step whose provider call carried no stored head still does not count: the first step carries the rules through the `before_agent_start` delivery (section 7) but runs before the engage asides land, and the step after a compaction can run before the re-sent head lands, so the rules are missing from its prompt in that case — no head means no count and no nudge. The integration run (`docs/verification.md`, finding 7) showed the rule firing on a legitimate preamble of reads before the first fact; it is kept as specified.
 
 The remaining exit is **degrade**, from section 8, which is a failure path rather than a normal ending.
 
@@ -253,7 +253,7 @@ Degrade is terminal for the session. The user gets ordinary history-based execut
 | Parameter | Default | Source |
 | --- | --- | --- |
 | `observationBytes` | 32768 | schema `x-state`, else runtime default |
-| `idleSteps` | 3 | schema `x-state` |
+| `idleSteps` | 5 | schema `x-state` |
 | `retries` | 3 | schema `x-state` |
 | pinned tail | last tool pair | fixed in v1 |
 | dropped blocks | all live-state blocks | fixed in v1 |

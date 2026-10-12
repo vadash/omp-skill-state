@@ -107,21 +107,28 @@ export function validatePatch(patch: unknown, schema: StateSchema): string | nul
 	return validateObject(patch, schema, "");
 }
 
+// The keys whose assignment would reach the object's prototype machinery
+// instead of its own properties. Banned from the state at every depth.
+function isHazardKey(key: string): boolean {
+	return key === "__proto__" || key === "constructor" || key === "prototype";
+}
+
 function validateObject(obj: Record<string, unknown>, schema: JsonSchema, path: string): string | null {
 	const properties = isPlainObject(schema.properties) ? schema.properties : {};
 	for (const key of Object.keys(obj)) {
-		// Prototype-hazard keys never enter the state: a later assignment of
-		// them would reach the object's prototype machinery, not its properties.
-		if (key === "__proto__" || key === "constructor" || key === "prototype") {
+		if (isHazardKey(key)) {
 			return `invalid state key "${path ? `${path}.${key}` : key}"`;
 		}
+		// Null deletes the key whatever its declared type: a deletion is
+		// typeless, so there is nothing to validate.
+		if (obj[key] === null) continue;
 		const sub = properties[key];
 		if (sub === undefined) {
 			// additionalProperties defaults to open, so only an explicit false rejects.
 			if (schema.additionalProperties === false) return `unknown state key "${path ? `${path}.${key}` : key}"`;
 			// An undeclared value's subtree is walked by no schema, so the
-			// hazard ban is enforced here directly.
-			const error = checkHazards(obj[key], path ? `${path}.${key}` : key);
+			// banned shapes are enforced here directly.
+			const error = checkDeepPatch(obj[key], path ? `${path}.${key}` : key);
 			if (error !== null) return error;
 			continue;
 		}
@@ -131,37 +138,39 @@ function validateObject(obj: Record<string, unknown>, schema: JsonSchema, path: 
 	return null;
 }
 
-// Rejects prototype-hazard keys at every depth of a value no schema walks:
-// objects recursively, arrays element-wise, everything else is safe.
-function checkHazards(value: unknown, path: string): string | null {
+// Rejects, at every depth of a value no schema walks: prototype-hazard keys,
+// and $append objects whose payload is not an array (the operator is only
+// legal against array keys, and a malformed one must never merge literally).
+// Objects recursively, arrays element-wise, everything else is safe.
+function checkDeepPatch(value: unknown, path: string): string | null {
 	if (Array.isArray(value)) {
 		for (let i = 0; i < value.length; i++) {
-			const error = checkHazards(value[i], `${path}[${i}]`);
+			const error = checkDeepPatch(value[i], `${path}[${i}]`);
 			if (error !== null) return error;
 		}
 		return null;
 	}
 	if (!isPlainObject(value)) return null;
+	if ("$append" in value && !Array.isArray(value.$append)) return `state key "${path}.$append" must be an array of items`;
 	for (const key of Object.keys(value)) {
-		if (key === "__proto__" || key === "constructor" || key === "prototype") {
+		if (isHazardKey(key)) {
 			return `invalid state key "${path}.${key}"`;
 		}
-		const error = checkHazards(value[key], `${path}.${key}`);
+		const error = checkDeepPatch(value[key], `${path}.${key}`);
 		if (error !== null) return error;
 	}
 	return null;
 }
 
 function validateValue(value: unknown, schema: JsonSchema, path: string): string | null {
-	// Null is a typeless deletion operator across every schema type: the merge
-	// removes the key, so no declared type can reject it (the operating rules
-	// and the consolidation nudge both instruct exactly this).
-	if (value === null) return null;
 	switch (schema.type) {
 		// A subschema with no type constrains nothing but still bans the
-		// prototype-hazard keys inside the value it admits unchecked.
+		// shapes no schema would catch inside the value it admits unchecked.
+		// Key-level nulls never reach here: validateObject resolves them as
+		// deletions, so inside this function null is only ever a value — an
+		// array element's null must satisfy the items schema like any other.
 		case undefined:
-			return checkHazards(value, path);
+			return checkDeepPatch(value, path);
 		case "string":
 			return typeof value === "string" ? null : `state key "${path}" must be a string`;
 		case "number":
@@ -174,11 +183,17 @@ function validateValue(value: unknown, schema: JsonSchema, path: string): string
 			// The $append operator mutates an array semantically: only the
 			// appended items are validated, against the items schema.
 			if (isAppendOp(value)) {
+				// Extra members riding the op would be silently dropped by the
+				// merge, so the op object must carry nothing but $append.
+				if (Object.keys(value).length !== 1) return `state key "${path}" must be an array or an object carrying only $append`;
 				if (schema.items !== undefined) {
 					for (let i = 0; i < value.$append.length; i++) {
 						const error = validateValue(value.$append[i], schema.items, `${path}.$append[${i}]`);
 						if (error !== null) return error;
 					}
+				} else {
+					const error = checkDeepPatch(value.$append, `${path}.$append`);
+					if (error !== null) return error;
 				}
 				return null;
 			}
@@ -191,12 +206,15 @@ function validateValue(value: unknown, schema: JsonSchema, path: string): string
 					const error = validateValue(value[i], schema.items, `${path}[${i}]`);
 					if (error !== null) return error;
 				}
+			} else {
+				const error = checkDeepPatch(value, path);
+				if (error !== null) return error;
 			}
 			return null;
 		}
 		case "object":
-			// The plan scopes $append to array fields; an object key cannot
-			// take the operator, and the merge must never see it here.
+			// $append is an array operator: only array keys can take it, so an
+			// object key rejects it here and the merge never sees this shape.
 			if (isAppendOp(value)) return `state key "${path}" does not accept $append`;
 			if (!isPlainObject(value)) return `state key "${path}" must be an object`;
 			return validateObject(value, schema, path);
@@ -225,14 +243,20 @@ export function mergeState(t: ExecutionState, patch: ExecutionState): ExecutionS
 			delete merged[key];
 		} else if (isAppendOp(value)) {
 			// A missing or non-array current value starts from empty, so $append
-			// initializes the key; an empty append changes nothing.
+			// initializes the key; an empty append on a key with no array to
+			// grow is a no-op — it must not materialize an empty array.
 			const current: JsonValue[] = Array.isArray(t[key]) ? t[key] : [];
 			// Items were validated against the schema's items in validateValue,
 			// and a patch only ever arrives as JSON, so each item is a JsonValue.
 			const appended = value.$append as JsonValue[];
-			merged[key] = [...current, ...appended];
-		} else if (isPlainObject(value) && isPlainObject(t[key])) {
-			merged[key] = mergeState(t[key] as ExecutionState, value as ExecutionState);
+			if (appended.length > 0 || current.length > 0) merged[key] = [...current, ...appended];
+		} else if (isPlainObject(value)) {
+			// Nested objects merge key-wise, and a key absent from t merges
+			// against empty so a nested null under an absent parent deletes
+			// into nothing instead of creating an object that holds nulls.
+			const base = isPlainObject(t[key]) ? (t[key] as ExecutionState) : null;
+			const nested = mergeState(base ?? {}, value as ExecutionState);
+			if (base !== null || Object.keys(nested).length > 0) merged[key] = nested;
 		} else {
 			merged[key] = value;
 		}

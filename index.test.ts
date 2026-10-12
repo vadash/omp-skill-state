@@ -692,7 +692,7 @@ describe("omp-skill-state patch loop", () => {
 		await s.step("recording", patchStep({ goal: 42 }, ["read", "bash"]));
 
 		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
-		expect(s.blocked.map((call) => call.toolName)).toEqual([STATE_UPDATE_TOOL_NAME, "read", "bash"]);;
+		expect(s.blocked.map((call) => call.toolName)).toEqual([STATE_UPDATE_TOOL_NAME, "read", "bash"]);
 		for (const call of s.blocked) expect(call.reason).toBe('state key "goal" must be a string');
 	});
 
@@ -701,7 +701,7 @@ describe("omp-skill-state patch loop", () => {
 
 		await s.step("recording", { tools: [STATE_UPDATE_TOOL_NAME] });
 
-		expect(s.blocked.map((call) => call.toolName)).toEqual([STATE_UPDATE_TOOL_NAME]);;
+		expect(s.blocked.map((call) => call.toolName)).toEqual([STATE_UPDATE_TOOL_NAME]);
 		expect(s.blocked[0]!.reason).toBe("state patch must be a JSON object");
 	});
 

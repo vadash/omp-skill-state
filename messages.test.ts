@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { announcedSkillNames, consolidationNudgeMessage, extractStatePayload, isStateCoreMessage, isStateScratchMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage } from "./messages";
+import { announcedSkillNames, consolidationNudgeMessage, extractStatePayload, isStateCoreMessage, isStateScratchMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, STATE_UPDATE_TOOL_NAME, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage } from "./messages";
 
 describe("consolidationNudgeMessage", () => {
 	test("is a developer message asking for a state_update consolidation, with no fence, so it never becomes an elide target", () => {
@@ -10,14 +10,14 @@ describe("consolidationNudgeMessage", () => {
 			timestamp: expect.any(Number),
 		});
 		if (!("content" in nudge) || typeof nudge.content !== "string") throw new Error("developer message without text content");
-		expect(nudge.content).toContain("state_update");
+		expect(nudge.content).toContain(STATE_UPDATE_TOOL_NAME);
 		expect(nudge.content.split("\n").some((line) => line.trimStart().startsWith("```"))).toBe(false);
 	});
 });
 
 describe("OPERATING_RULES", () => {
 	test("names the state_update tool and carries no fence, so the stored rules message is never an elide target", () => {
-		expect(OPERATING_RULES).toContain("state_update");
+		expect(OPERATING_RULES).toContain(STATE_UPDATE_TOOL_NAME);
 		expect(OPERATING_RULES.split("\n").some((line) => line.trimStart().startsWith("```"))).toBe(false);
 	});
 });

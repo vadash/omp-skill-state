@@ -295,6 +295,14 @@ describe("validatePatch prototype keys", () => {
 		const hidden = JSON.parse('{"free": {"prototype": {}}}') as ExecutionState;
 		expect(validatePatch(hidden, untyped)).toBe('invalid state key "free.prototype"');
 	});
+
+	test("hazardous keys are rejected inside declared arrays whose items schema is absent", () => {
+		const schema: StateSchema = { type: "object", properties: { tags: { type: "array" } } };
+		const wired = JSON.parse('{"tags": [{"__proto__": {}}]}') as ExecutionState;
+		expect(validatePatch(wired, schema)).toBe('invalid state key "tags[0].__proto__"');
+		const appended = JSON.parse('{"tags": {"$append": [{"__proto__": {}}]}}') as ExecutionState;
+		expect(validatePatch(appended, schema)).toBe('invalid state key "tags.$append[0].__proto__"');
+	});
 });
 
 describe("validatePatch $append scope", () => {
@@ -359,6 +367,24 @@ describe("validatePatch $append", () => {
 		expect(error).toContain("$append");
 	});
 
+	test("a null element is a value, not a deletion, and must satisfy the items schema", () => {
+		const error = validatePatch({ findings: ["a", null] }, schema);
+		expect(error).toContain('findings[1]" must be a string');
+		const appended = validatePatch({ findings: { $append: [null] } }, schema);
+		expect(appended).toContain('findings.$append[0]" must be a string');
+	});
+
+	test("members riding an $append op are rejected, so the merge drops nothing silently", () => {
+		const error = validatePatch({ findings: { $append: ["a"], note: "x" } }, schema);
+		expect(error).toContain('state key "findings" must be an array or an object carrying only $append');
+	});
+
+	test("a malformed $append on an undeclared key is rejected instead of merging literally", () => {
+		const open: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
+		const malformed = JSON.parse('{"extra": {"$append": "x"}}') as ExecutionState;
+		expect(validatePatch(malformed, open)).toBe('state key "extra.$append" must be an array of items');
+	});
+
 	test("$append merges onto the current array instead of replacing it", () => {
 		expect(mergeState({ findings: ["x"], goal: "g" }, { findings: { $append: ["a", "b"] } } as ExecutionState)).toEqual({
 			findings: ["x", "a", "b"],
@@ -376,8 +402,17 @@ describe("validatePatch $append", () => {
 		expect(mergeState({ findings: ["x"] }, { findings: { $append: [] } })).toEqual({ findings: ["x"] });
 	});
 
+	test("$append of an empty array to a missing key does not materialize an empty array", () => {
+		expect(mergeState({}, { findings: { $append: [] } } as ExecutionState)).toEqual({});
+	});
+
 	test("$append never recurses into an object-keyed merge", () => {
 		expect(mergeState({ meta: { a: 1 } }, { meta: { $append: ["x"] } } as ExecutionState)).toEqual({ meta: ["x"] });
+	});
+
+	test("a nested null under an absent parent is a no-op, not an object holding nulls", () => {
+		expect(mergeState({}, { meta: { depth: null } } as ExecutionState)).toEqual({});
+		expect(mergeState({}, { meta: { depth: 3 } } as ExecutionState)).toEqual({ meta: { depth: 3 } });
 	});
 });
 

@@ -129,16 +129,17 @@ Merge operator `⊕`, applied to each accepted patch:
 - A key in `Δt` with value `null` deletes that key from `t`, whatever its declared type: null is the typeless deletion operator, never a value.
 - Keys absent from `Δt` are untouched.
 - Merge is shallow and recursive only for objects: an object value merges key-wise, an array or scalar replaces.
-- An array key may instead carry the append operator `{"$append": [items]}`, which appends the items to the current array instead of setting it whole; a missing key starts from an empty array, and a key that holds a non-array value is replaced by the appended list (a declared non-array key rejects the operator before the merge). It exists so a growing list does not have to be re-emitted in full on every step.
+- An array key may instead carry the append operator `{"$append": [items]}`, which appends the items to the current array instead of setting it whole; a missing key starts from an empty array, a key that holds a non-array value is replaced by the appended list, and an empty append on a key with no array to grow changes nothing — it does not materialize an empty array. It exists so a growing list does not have to be re-emitted in full on every step.
+- A nested null under a key absent from `t` deletes into nothing: no object holding nulls is created.
 
 This is the paper's dictionary merge with null-deletion semantics, and it is what makes the model's most common failure mode — omitting a key it meant to keep — harmless.
 
 Validation, on every patch, before merge:
 
 - Valid JSON object, or the patch is rejected.
-- Every key present in the schema validates against its declared type — null excepted, per the deletion rule above — or the patch is rejected. An `$append` payload validates item-wise against the array's `items` schema.
-- The `$append` operator is legal only against array-typed keys; an object-typed key rejects it.
-- Unknown keys are accepted when `additionalProperties` is true; their values are not type-checked, but the prototype-key ban below still holds inside them.
+- Every key present in the schema validates against its declared type — null excepted, per the deletion rule above — or the patch is rejected. Null is a deletion only at the key level: an array element's null is a value and must satisfy the `items` schema like any other element. An `$append` payload validates item-wise against the array's `items` schema.
+- The `$append` operator is legal only against array-typed keys; an object-typed key rejects it. An op object carries nothing but `$append` — members riding it would be dropped by the merge, so they reject — and its payload is an array, at every depth, declared or not: a malformed op under an unknown key rejects instead of merging literally.
+- Unknown keys are accepted when `additionalProperties` is true; their values are not type-checked, but the banned shapes below still hold inside them.
 - The keys `__proto__`, `constructor` and `prototype` are rejected outright, at every depth — declared or not.
 - A schema type this runtime does not read (for example an array-valued `type`, or a bogus value in hand-written JSON) rejects the patch with an unsupported-type error rather than passing silently.
 - A rejected patch changes nothing. The runtime does not partially apply.

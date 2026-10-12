@@ -53,6 +53,12 @@ export default function (pi: ExtensionAPI): void {
 	const stateUpdate = {
 		name: "state_update",
 		label: "state update",
+		// Top-level even under tools.xdev: a discoverable tool mounts as an
+		// xd:// device, and the patch would then travel as freehand write
+		// content — the malformed-input failure class this tool channel exists
+		// to exclude (ADR 0002). "essential" keeps state_update a real tool
+		// whose arguments are protocol-level JSON.
+		loadMode: "essential" as const,
 		description:
 			"Apply a patch to the running procedure's execution state. Call it once per step alongside your other tool calls. The patch is a JSON object merged into the state: a non-null value sets its key, null deletes its key, keys you omit are left untouched.",
 		parameters: z.object({ patch: z.record(z.unknown()) }),
@@ -134,23 +140,27 @@ export default function (pi: ExtensionAPI): void {
 	// Renderer registration is a load-time call and needs no session state, so
 	// it happens unconditionally at factory load, before any procedure engages.
 	// Both stored state messages (state core, scratch state) render the same
-	// way: collapsed names the keys, expanded shows the pretty JSON. theme is
+	// way: collapsed names the keys, expanded shows the pretty JSON. The label
+	// names the partition: with an empty state the two messages would otherwise
+	// collapse to identical lines and read as a duplicated notice. theme is
 	// structural because the harness's renderer type is not part of the root
 	// export; the real Theme satisfies it.
 	type StateTheme = { fg(role: string, text: string): string };
-	function renderStateMessage(message: { details?: { state?: ExecutionState } }, { expanded }: { expanded: boolean }, theme: StateTheme) {
-		const state = message.details?.state;
-		if (!isPlainObject(state)) return undefined;
-		const keys = Object.keys(state);
-		const list = keys.length > 6 ? `${keys.slice(0, 6).join(", ")} …` : keys.join(", ");
-		const label = theme.fg("customMessageLabel", "skill-state");
-		const lines = expanded
-			? [label, theme.fg("text", JSON.stringify(state, null, 2))]
-			: [label + theme.fg("muted", ` state · ${keys.length} keys${keys.length > 0 ? `: ${list}` : ""}`)];
-		return new Text(lines.join("\n"), 0, 0);
+	function renderStateMessageFor(partition: string) {
+		return function (message: { details?: { state?: ExecutionState } }, { expanded }: { expanded: boolean }, theme: StateTheme) {
+			const state = message.details?.state;
+			if (!isPlainObject(state)) return undefined;
+			const keys = Object.keys(state);
+			const list = keys.length > 6 ? `${keys.slice(0, 6).join(", ")} …` : keys.join(", ");
+			const label = theme.fg("customMessageLabel", "skill-state");
+			const lines = expanded
+				? [`${label} ${partition}`, theme.fg("text", JSON.stringify(state, null, 2))]
+				: [label + theme.fg("muted", ` ${partition} · ${keys.length} keys${keys.length > 0 ? `: ${list}` : ""}`)];
+			return new Text(lines.join("\n"), 0, 0);
+		};
 	}
-	pi.registerMessageRenderer<{ state?: ExecutionState }>(STATE_CORE_MESSAGE_TYPE, renderStateMessage);
-	pi.registerMessageRenderer<{ state?: ExecutionState }>(STATE_SCRATCH_MESSAGE_TYPE, renderStateMessage);
+	pi.registerMessageRenderer<{ state?: ExecutionState }>(STATE_CORE_MESSAGE_TYPE, renderStateMessageFor("core"));
+	pi.registerMessageRenderer<{ state?: ExecutionState }>(STATE_SCRATCH_MESSAGE_TYPE, renderStateMessageFor("scratch"));
 
 	// The first step's rules ride in with the invocation batch itself. The hook
 	// fires at the batch's dequeue, before the skill prompt's message_end can

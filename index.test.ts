@@ -612,6 +612,26 @@ describe("omp-skill-state patch loop", () => {
 		}
 	});
 
+	// With an empty state both partitions collapse to the same text, which read
+	// as one notify printed twice (2026-10-12 zstate run); the label must say
+	// which partition a line carries.
+	test("the collapsed labels name the partition, so core and scratch never render identically", () => {
+		const omp = fakeOmp([procedure]);
+		const theme = { fg: (_color: string, text: string) => text };
+		const render = (type: string, state: ExecutionState) => {
+			const renderer = omp.renderers.get(type) as
+				| ((message: unknown, options: { expanded: boolean }, theme: unknown) => { getText(): string })
+				| undefined;
+			if (renderer === undefined) throw new Error(`no renderer registered for ${type}`);
+			return renderer({ role: "custom", customType: type, content: renderStateContent(state), display: true, details: { state }, timestamp: Date.now() }, { expanded: false }, theme).getText();
+		};
+
+		expect(render(STATE_CORE_MESSAGE_TYPE, { goal: "g" })).toContain("core");
+		expect(render(STATE_SCRATCH_MESSAGE_TYPE, { goal: "g" })).toContain("scratch");
+		// The empty-state case: both partitions are {} yet the lines must differ.
+		expect(render(STATE_CORE_MESSAGE_TYPE, {})).not.toBe(render(STATE_SCRATCH_MESSAGE_TYPE, {}));
+	});
+
 	test("no state_update call is an empty patch: nothing sent, tool calls run", async () => {
 		const { s } = await engaged();
 
@@ -838,6 +858,14 @@ describe("omp-skill-state state_update registration", () => {
 		// A second engage replaces by name instead of failing.
 		await omp.session("s2").invoke("procedure");
 		expect(omp.tool("state_update")).toBe(def);
+	});
+
+	test("the definition requests top-level presentation: under tools.xdev a discoverable tool mounts as an xd:// device, where the patch would travel as freehand write content instead of protocol-level JSON (ADR 0002)", async () => {
+		const omp = fakeOmp([procedure]);
+
+		await omp.session("s1").invoke("procedure");
+
+		expect(omp.tool("state_update")!.loadMode).toBe("essential");
 	});
 
 	test("the operating rules name the tool the definition registers", async () => {

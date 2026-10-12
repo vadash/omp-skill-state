@@ -169,7 +169,7 @@ Caching. Prompt caching is positional: a breakpoint caches every byte before it,
 
 The patch travels as a `state_update` extension tool (ADR 0002), registered through the harness's public `registerTool` inside every engage. Registration from inside a handler flushes before the handler completes, so the definition exists from the very first step, and the operating rules in the head describe the channel from that step on; no procedure spec has to carry the calling convention itself. The rules reach the model from the very first step through the `before_agent_start` delivery (section 7). The definition is built once in the extension factory, and replace-by-name makes re-registering it on every engage idempotent. Registration is permanent for the session: no unregister exists, and after a disengage a late call meets a graceful `no active procedure` error result instead of a crash. Ordinary sessions that never engage a procedure never see the definition.
 
-The definition carries `strict: true` and a single wrapper argument `patch`, an unconstrained JSON object holding the whole Δt. The harness preserves `strict: true` on tool definitions and sends it to both the Anthropic and OpenAI families, with automatic fallback when a provider rejects it. The state schema is enforced at apply time rather than in the tool's parameter schema, so one schema source stays authoritative.
+The definition carries `strict: true` and a single wrapper argument `patch`, an unconstrained JSON object holding the whole Δt. It also sets `loadMode: "essential"`: under `tools.xdev` a discoverable tool mounts as an `xd://` device, and the patch would then travel as freehand `write` content instead of protocol-level JSON — the malformed-input class this channel exists to exclude. The harness preserves `strict: true` on tool definitions and sends it to both the Anthropic and OpenAI families, with automatic fallback when a provider rejects it. The state schema is enforced at apply time rather than in the tool's parameter schema, so one schema source stays authoritative.
 
 Approval is zero-cost by decision: the definition declares `{ tier: "read", policy: "allow" }`, so even always-ask approval modes never prompt for a state write. A per-tool user deny still wins, because the harness's approval resolver is consulted first.
 
@@ -239,7 +239,7 @@ The remaining exit is **degrade**, from section 8, which is a failure path rathe
 
 - On engage: `ctx.ui.notify` naming the procedure, and — because the projection hides history — a second user-facing line that tells the user to finish with `/new`. Both are UI-only and never enter model context.
 - On disengage and on degrade: a notify stating which happened and why.
-- The runtime registers one message renderer per state message type, `sh.omp.skill-state.core` and `sh.omp.skill-state.scratch`, so both partitions are readable in the transcript after the fact: collapsed to a label with a key count, expanded to pretty JSON.
+- The runtime registers one message renderer per state message type, `sh.omp.skill-state.core` and `sh.omp.skill-state.scratch`, so both partitions are readable in the transcript after the fact: collapsed to a label naming the partition with a key count, expanded to pretty JSON under the partition's name.
 - Optional status-line indicator while engaged, naming the procedure.
 
 ## 13. Subagents

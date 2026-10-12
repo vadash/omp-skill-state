@@ -32,9 +32,21 @@ _Avoid_: memory, scratchpad, context, blackboard
 The model's proposed change to the execution state, `Δt`. It is a JSON object merged into the state, never a replacement of it.
 _Avoid_: update, diff, mutation
 
+**State core**:
+The part of the execution state expected to hold for many steps, sent as its own stored message so the cached prompt prefix reaches into the state.
+_Avoid_: stable state, persistent keys, core
+
+**Scratch state**:
+The volatile remainder of the execution state, the keys that change on most steps, sent as its own stored message behind the state core.
+_Avoid_: working set, hot keys, delta
+
 **Observation**:
 The environment output for the current step, `Oₜ`. It is the only past-free material the model receives besides the spec and the state.
 _Avoid_: result, output, feedback
+
+**Observation window**:
+The number of most recent tool pairs the projection pins as the step's observation, under one shared byte cap.
+_Avoid_: history window, result buffer
 
 **Step**:
 One provider call. A step produces at most one state patch, one batch of tool calls, and one set of observations.
@@ -45,8 +57,16 @@ The per-step rewrite that replaces the message list sent to the model with the t
 _Avoid_: compaction, truncation, filtering
 
 **Head**:
-The three stored custom messages the projection pins at the front of every prompt: the operating rules, the procedure spec and the latest state. Sent at engage and again after every compaction, byte-equal, so the provider's prefix cache holds across the cut.
+The stored custom messages the projection pins at the front of every prompt: the operating rules, the procedure spec, the state core and the scratch state. Sent at engage and again after every compaction; the stable messages are byte-equal so the provider's prefix cache holds across the cut.
 _Avoid_: preamble, prefix, context
+
+**Cache ceiling**:
+The prompt prefix two consecutive steps can share. It ends at the first head message the step changed, so it bounds what caching can save regardless of provider.
+_Avoid_: cache hit rate, prefix limit
+
+**Per-call message**:
+The harness's mark for a prompt message that differs from its stored counterpart. A per-call message never anchors the durable cache breakpoint, and its presence moves that breakpoint to the newest stable message before it.
+_Avoid_: synthesized message, ephemeral message
 
 **Cut**:
 The compaction's first kept entry. While engaged it is the current step, the latest assistant message on the branch, not the turn-sized tail the harness proposes.

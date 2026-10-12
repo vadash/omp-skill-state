@@ -117,7 +117,7 @@ Rules:
 
 The schema is authored once per domain, not per task. A skill without `state.schema.json` is an ordinary skill and never engages.
 
-`x-state.volatile` names the declared keys expected to change on most steps. They ride in the scratch state; every other declared key stays in the state core (sections 6 and 7). A missing or malformed list means no volatile keys, so every declared key is core.
+`x-state.volatile` names the declared keys expected to change on most steps. They ride in the scratch state; every other declared key stays in the state core (sections 6 and 7). Non-string entries of the list are dropped. Without an explicit list the runtime applies a heuristic that protects the cache prefix: array-typed declared keys and the planning keys (`plan`, `next_step`, `findings`, `open_questions`, `scratch`) are volatile, and every other declared key is core.
 
 ## 6. Execution state
 
@@ -126,17 +126,19 @@ The state `t` is a JSON object. It starts as `{}` when a procedure engages.
 Merge operator `⊕`, applied to each accepted patch:
 
 - A key in `Δt` with a value other than `null` sets that key in `t`.
-- A key in `Δt` with value `null` deletes that key from `t`.
+- A key in `Δt` with value `null` deletes that key from `t`, whatever its declared type: null is the typeless deletion operator, never a value.
 - Keys absent from `Δt` are untouched.
 - Merge is shallow and recursive only for objects: an object value merges key-wise, an array or scalar replaces.
+- An array key may instead carry the append operator `{"$append": [items]}`, which appends the items to the current array instead of setting it whole; a missing key starts from an empty array. It exists so a growing list does not have to be re-emitted in full on every step.
 
 This is the paper's dictionary merge with null-deletion semantics, and it is what makes the model's most common failure mode — omitting a key it meant to keep — harmless.
 
 Validation, on every patch, before merge:
 
 - Valid JSON object, or the patch is rejected.
-- Every key present in the schema validates against its declared type, or the patch is rejected.
+- Every key present in the schema validates against its declared type — null excepted, per the deletion rule above — or the patch is rejected. An `$append` payload validates item-wise against the array's `items` schema.
 - Unknown keys are accepted when `additionalProperties` is true.
+- The keys `__proto__`, `constructor` and `prototype` are rejected outright, at every depth.
 - A rejected patch changes nothing. The runtime does not partially apply.
 
 Persistence: after each accepted patch the runtime sends the state as two custom messages, the state core (`sh.omp.skill-state.core`) first and the scratch state (`sh.omp.skill-state.scratch`) behind it, each carrying its partition in `details.state` and rendered as labelled plain JSON, delivered as asides so they land at the next step boundary, before the next provider call. The split is schema-driven, by `x-state.volatile` (section 5), and an empty partition is still stored as a `{}` message, so the head's shape never varies. Both messages are stored in the transcript like any other, which is what lets the projection reuse them byte-for-byte (section 7). On `session_start`, `session_switch`, `session_branch` and `session_tree` the runtime re-derives engagement from the latest invocation on the branch and the procedure-spec, state-core and scratch-state messages that follow it, taking the last message of each type and merging `{ ...core, ...scratch }`; either state message missing means inert, so `/resume`, rewinds and tree navigation keep it.
@@ -167,7 +169,7 @@ Caching. Prompt caching is positional: a breakpoint caches every byte before it,
 
 ## 8. Producing and validating the patch
 
-The patch travels as a `state_update` extension tool (ADR 0002), registered through the harness's public `registerTool` inside every engage. Registration from inside a handler flushes before the handler completes, so the definition exists from the very first step, and the operating rules in the head describe the channel from that step on; no procedure spec has to carry the calling convention itself. The rules reach the model from the very first step through the `before_agent_start` delivery (section 7). The definition is built once in the extension factory, and replace-by-name makes re-registering it on every engage idempotent. Registration is permanent for the session: no unregister exists, and after a disengage a late call meets a graceful `no active procedure` error result instead of a crash. Ordinary sessions that never engage a procedure never see the definition.
+The patch travels as a `state_update` extension tool (ADR 0002), registered through the harness's public `registerTool` once at factory load — the harness's own recommended pattern — so the definition sits in the model's tool declarations from turn 0 and its presence never depends on engage ordering. The operating rules in the head describe the channel from the first step on; no procedure spec has to carry the calling convention itself, and the rules reach the model from the very first step through the `before_agent_start` delivery (section 7). Registration is permanent for the session: no unregister exists, and after a disengage a late call meets a graceful `no active procedure` error result instead of a crash. A session that never engages a procedure still carries the definition in its tool list, where a stray call can only ever meet that same graceful error.
 
 The definition carries `strict: true` and a single wrapper argument `patch`, an unconstrained JSON object holding the whole Δt. It also sets `loadMode: "essential"`: under `tools.xdev` a discoverable tool mounts as an `xd://` device, and the patch would then travel as freehand `write` content instead of protocol-level JSON — the malformed-input class this channel exists to exclude. The harness preserves `strict: true` on tool definitions and sends it to both the Anthropic and OpenAI families, with automatic fallback when a provider rejects it. The state schema is enforced at apply time rather than in the tool's parameter schema, so one schema source stays authoritative.
 
@@ -269,7 +271,7 @@ Degrade is terminal for the session. The user gets ordinary history-based execut
 | `retries` | 3 | schema `x-state` |
 | `observationWindow` | 1 | schema `x-state`, else runtime default |
 | `stateBytes` | 0 (disabled) | schema `x-state`, else runtime default |
-| `volatile` | `[]` (no volatile keys) | schema `x-state` |
+| `volatile` | heuristic: array-typed and planning keys | schema `x-state.volatile`, else runtime heuristic |
 | dropped blocks | all live-state blocks | fixed in v1 |
 
 ## 16. Harness surfaces used
@@ -282,7 +284,7 @@ Every mechanism above is public extension API. Nothing else is touched.
 | nudge at the policy thresholds | the `context` handler appending `pendingNudges(procedure)` after the projected messages: the consolidation ask latched once per over-cap episode (`capNudged`, re-armed when a commit lands back under `stateBytes`) and the idle warning one step before the idle disengage, consolidation first, idle last; the nudges ride the event's replacement, are never stored and never re-sent from history (sections 9 and 11) |
 | validate before tools run | `assistant_message`, awaited before tool dispatch |
 | block a batch | `tool_call`, may block with a reason |
-| offer the state-write channel | `registerTool` with the strict, zero-approval `state_update` definition, registered inside every engage (section 8) |
+| offer the state-write channel | `registerTool` with the strict, zero-approval `state_update` definition, registered once at factory load (section 8) |
 | deliver the rules on the first step | `before_agent_start` returning the rules message on the invocation batch; the harness's announcement line names the invoked skill (section 7) |
 | persist the head: the state core, the scratch state, `P`, rules | `sendMessage` with `deliverAs: "aside"`, plus `ctx.sessionManager.getBranch()` to rebuild |
 | persist the run's final `t` | `agent_end`, then `sendMessage` with `deliverAs: "nextTurn"` once `ctx.isIdle()` (section 6) |
@@ -328,8 +330,8 @@ Dependency: `@oh-my-pi/pi-coding-agent` for types, pinned to the installed omp v
 
 Unit, no harness needed:
 
-- merge operator: set, null-delete, nested object merge, array replace, absent-key preservation.
-- the state split: volatile-key parsing (missing or malformed `x-state.volatile` to `[]`) and the disjoint core/scratch partition.
+- merge operator: set, null-delete (any declared type), nested object merge, array replace, `$append` onto existing, missing and non-array keys, absent-key preservation.
+- the state split: explicit `x-state.volatile` parsing (non-string entries dropped), the unannotated-schema heuristic (array-typed and planning keys volatile), and the disjoint core/scratch partition.
 - schema validation: each type, unknown keys under both `additionalProperties` values, non-object top level.
 - projection assembly: exact message order and roles; each dropped block type; the observation window; the byte cap and its marker.
 - branch reads: the re-derive scan (latest invocation wins, an incomplete head is inert) and the compaction cut.
@@ -354,7 +356,7 @@ Against a real session (run G and the nudge probe in `docs/verification.md`; the
 - Automatic schema discovery for skills that do not declare one.
 - Any change under the harness source tree.
 - Multiple concurrent procedures per session; retrieval or summarization of dropped history.
-- Per-key array append modes; the merge stays set-whole.
+- Whole-array append beyond the `$append` operator (no positional splices, no per-index edits).
 - JSON repair in any form; `setActiveTools` registration gymnastics.
 - Hard enforcement of the state cap (the nudge is the only sanction, by decision).
 

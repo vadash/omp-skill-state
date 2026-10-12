@@ -653,6 +653,26 @@ describe("omp-skill-state patch loop", () => {
 		expect(s.storedStates).toEqual([{}, { goal: "x" }]);
 	});
 
+	test("a null patch on a declared key clears it instead of blocking, as the operating rules promise", async () => {
+		const { s } = await engaged();
+
+		await s.step("recording", patchStep({ goal: "x" }));
+		await s.step("dropping", patchStep({ goal: null }));
+
+		expect(s.blocked).toEqual([]);
+		expect(s.storedStates).toEqual([{}, { goal: "x" }, {}]);
+	});
+
+	test("an $append patch grows a declared array key without resending it", async () => {
+		const { s } = await engaged();
+
+		await s.step("recording", patchStep({ findings: ["one"] }));
+		await s.step("recording", patchStep({ findings: { $append: ["two"] } }));
+
+		expect(s.blocked).toEqual([]);
+		expect(s.storedStates.at(-1)).toEqual({ findings: ["one", "two"] });
+	});
+
 	test("a second valid patch merges into the first instead of replacing it", async () => {
 		const { s } = await engaged();
 

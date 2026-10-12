@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Skill } from "@oh-my-pi/pi-coding-agent";
-import { applyPatch, loadStateSchema, mergeState, validatePatch } from "./state";
+import { applyPatch, loadStateSchema, mergeState, splitState, validatePatch, volatileKeys } from "./state";
 import type { ExecutionState, JsonSchema, StateSchema } from "./state";
 import { makeSkill } from "./skill-fixtures";
 
@@ -303,5 +303,60 @@ describe("applyPatch", () => {
 		if (result.ok) return;
 		expect(result.error).toContain("goal");
 		expect(t).toEqual({ goal: "keep" });
+	});
+});
+
+describe("volatileKeys", () => {
+	test("reads the x-state volatile list", () => {
+		expect(volatileKeys({ type: "object", "x-state": { volatile: ["plan", "findings"] } })).toEqual(["plan", "findings"]);
+	});
+
+	test("an empty list is a valid list", () => {
+		expect(volatileKeys({ type: "object", "x-state": { volatile: [] } })).toEqual([]);
+	});
+
+	test("a missing x-state or volatile field is an empty list", () => {
+		expect(volatileKeys({ type: "object" })).toEqual([]);
+		expect(volatileKeys({ type: "object", "x-state": {} })).toEqual([]);
+	});
+
+	test("a non-array volatile field, or one holding a non-string, is invalid and empty", () => {
+		expect(volatileKeys({ type: "object", "x-state": { volatile: "plan" } })).toEqual([]);
+		expect(volatileKeys({ type: "object", "x-state": { volatile: ["plan", 3] } })).toEqual([]);
+		expect(volatileKeys({ type: "object", "x-state": { volatile: null } })).toEqual([]);
+	});
+});
+
+describe("splitState", () => {
+	const schema: StateSchema = {
+		type: "object",
+		properties: { goal: { type: "string" }, plan: { type: "array" } },
+	};
+
+	test("declared non-volatile keys are the state core, volatile and undeclared keys the scratch", () => {
+		const state: ExecutionState = { goal: "x", plan: ["a"], stray: 1 };
+		const { core, scratch } = splitState(state, schema, ["plan"]);
+
+		expect(core).toEqual({ goal: "x" });
+		expect(scratch).toEqual({ plan: ["a"], stray: 1 });
+	});
+
+	test("with an empty volatile list every declared key is core and only undeclared keys are scratch", () => {
+		const { core, scratch } = splitState({ goal: "x", stray: 1 }, schema, []);
+
+		expect(core).toEqual({ goal: "x" });
+		expect(scratch).toEqual({ stray: 1 });
+	});
+
+	test("an empty state splits to two empty partitions", () => {
+		expect(splitState({}, schema, ["plan"])).toEqual({ core: {}, scratch: {} });
+	});
+
+	test("the partitions are disjoint and the input is not mutated", () => {
+		const state: ExecutionState = { goal: "x", plan: ["a"] };
+		const { core, scratch } = splitState(state, schema, ["plan"]);
+
+		expect(Object.keys(core).filter((key) => key in scratch)).toEqual([]);
+		expect(state).toEqual({ goal: "x", plan: ["a"] });
 	});
 });

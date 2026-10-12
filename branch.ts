@@ -1,5 +1,5 @@
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE } from "./messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE } from "./messages";
 import { isPlainObject } from "./state";
 import type { ExecutionState } from "./state";
 
@@ -25,14 +25,18 @@ export interface ProcedureOnBranch {
 	state: ExecutionState;
 }
 
-// The re-derive rule: the latest user invocation of a procedure skill, followed
-// by its procedure-spec message and a state message, is a procedure engaged
-// with that state; anything less is inert. Pure: what to do with the answer
-// (load the schema, engage, disengage) is the caller's.
+// The re-derive rule: the latest user invocation of a procedure skill,
+// followed by its procedure-spec message and both state messages (the state
+// core and the scratch state, each carrying a plain-object details.state), is
+// a procedure engaged with the merged state; anything less is inert. The
+// partitions are disjoint by construction, so the merge is {...core,
+// ...scratch}; scratch wins only if a legacy overlap exists. Pure: what to do
+// with the answer (load the schema, engage, disengage) is the caller's.
 export function scanBranch(entries: readonly SessionEntry[]): ProcedureOnBranch | undefined {
 	let name: string | undefined;
 	let spec: string | undefined;
-	let state: ExecutionState | undefined;
+	let core: ExecutionState | undefined;
+	let scratch: ExecutionState | undefined;
 	for (const entry of entries) {
 		if (entry.type !== "custom_message") continue;
 		if (entry.customType === SKILL_PROMPT_MESSAGE_TYPE && entry.attribution === "user") {
@@ -42,18 +46,22 @@ export function scanBranch(entries: readonly SessionEntry[]): ProcedureOnBranch 
 				// must not be attributed to the earlier one.
 				name = details.name;
 				spec = undefined;
-				state = undefined;
+				core = undefined;
+				scratch = undefined;
 			}
 		} else if (entry.customType === PROCEDURE_SPEC_MESSAGE_TYPE && name !== undefined) {
 			spec = contentText(entry.content);
-		} else if (entry.customType === STATE_MESSAGE_TYPE && name !== undefined) {
+		} else if (entry.customType === STATE_CORE_MESSAGE_TYPE && name !== undefined) {
 			const details = entry.details as { state?: unknown } | undefined;
 			// Only entries this runtime wrote carry a plain-object details.state.
-			if (isPlainObject(details?.state)) state = details.state as ExecutionState;
+			if (isPlainObject(details?.state)) core = details.state as ExecutionState;
+		} else if (entry.customType === STATE_SCRATCH_MESSAGE_TYPE && name !== undefined) {
+			const details = entry.details as { state?: unknown } | undefined;
+			if (isPlainObject(details?.state)) scratch = details.state as ExecutionState;
 		}
 	}
-	if (name === undefined || spec === undefined || state === undefined) return undefined;
-	return { name, spec, state };
+	if (name === undefined || spec === undefined || core === undefined || scratch === undefined) return undefined;
+	return { name, spec, state: { ...core, ...scratch } };
 }
 
 // The compaction cut: the latest assistant message on the branch, i.e. the

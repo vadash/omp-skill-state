@@ -10,5 +10,12 @@
 		"next_step": { "type": "string" }
 	},
 	"additionalProperties": true,
-	"x-state": { "observationBytes": 32768, "observationWindow": 3, "stateBytes": 16384, "idleSteps": 7, "retries": 3 }
+	"x-state": {
+		"observationBytes": 32768,
+		"observationWindow": 3,
+		"stateBytes": 16384,
+		"idleSteps": 7,
+		"retries": 3,
+		"volatile": ["plan", "findings", "open_questions", "next_step"]
+	}
 }

@@ -78,7 +78,7 @@ The compaction's first kept entry. While engaged it is the current step, the lat
 _Avoid_: boundary, checkpoint, kept tail
 
 **Final state**:
-The state accepted from a reply with no tool call, which ends the run. It is stored as a next-turn message once the session is idle, not as an aside.
+The state accepted from a reply with no tool call, which ends the run. It is stored as next-turn messages once the session is idle, not as asides.
 _Avoid_: result, answer, summary
 
 **Branch**:
@@ -86,7 +86,7 @@ The stored entries from the session root to the current leaf, as the harness kee
 _Avoid_: history, log
 
 **Re-derive**:
-Rebuilding engagement from the branch on session start, switch, rewind or tree navigation: no user invocation of a procedure skill followed by its procedure-spec message and a state message means inert; otherwise engaged with that state.
+Rebuilding engagement from the branch on session start, switch, rewind or tree navigation: no user invocation of a procedure skill followed by its procedure-spec message and both state messages means inert; otherwise engaged with their merged state.
 _Avoid_: restore, rehydrate, reload
 
 **Engage**:

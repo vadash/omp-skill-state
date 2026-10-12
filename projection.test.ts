@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE } from "./messages";
+import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE } from "./messages";
 import { project } from "./projection";
+import { isPlainObject } from "./state";
 import type { AgentMessage } from "./projection";
 
 // Live-state blocks the harness injects around the model; all of them must
-// vanish from a projected prompt. The three skill-state types appear too: an
-// older superseded head message must lose to the latest one.
+// vanish from a projected prompt. The skill-state types appear too: an older
+// superseded head message must lose to the latest one, and the legacy single
+// state message must never leak into the projected tail.
 const DROPPED_CUSTOM_TYPES = [
 	"goal-mode-context",
 	"plan-mode-context",
@@ -19,7 +21,9 @@ const DROPPED_CUSTOM_TYPES = [
 	"skill-prompt",
 	RULES_MESSAGE_TYPE,
 	PROCEDURE_SPEC_MESSAGE_TYPE,
-	STATE_MESSAGE_TYPE,
+	STATE_CORE_MESSAGE_TYPE,
+	STATE_SCRATCH_MESSAGE_TYPE,
+	"sh.omp.skill-state.state",
 ];
 
 const ZERO_USAGE = {
@@ -33,13 +37,13 @@ const ZERO_USAGE = {
 
 let seq = 0;
 
-function custom(customType: string, content = "noise"): AgentMessage {
-	return { role: "custom", customType, content, display: false, timestamp: seq++ };
+function custom(customType: string, content = "noise", details?: Record<string, unknown>): AgentMessage {
+	return { role: "custom", customType, content, display: false, ...(details === undefined ? {} : { details }), timestamp: seq++ };
 }
 const rulesMsg = () => custom(RULES_MESSAGE_TYPE, OPERATING_RULES);
 const procedureSpecMsg = () => custom(PROCEDURE_SPEC_MESSAGE_TYPE, "Running skill recon\nBody of recon.");
-const stateMsg = (state: Record<string, unknown> = {}) =>
-	custom(STATE_MESSAGE_TYPE, `\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\``);
+const coreMsg = (state: Record<string, unknown> = {}) => custom(STATE_CORE_MESSAGE_TYPE, JSON.stringify(state, null, 2), { state });
+const scratchMsg = (state: Record<string, unknown> = {}) => custom(STATE_SCRATCH_MESSAGE_TYPE, JSON.stringify(state, null, 2), { state });
 
 function assistant(content: Extract<AgentMessage, { role: "assistant" }>["content"]): AgentMessage {
 	return {
@@ -102,13 +106,22 @@ function textBytes(messages: readonly AgentMessage[]): number {
 	return total;
 }
 
+// The stored head: rules, procedure spec, state core, scratch state. The
+// projection returns the first three by reference and the scratch as a
+// per-call copy, so the expected scratch in an assertion is `perCall(h.scratch)`.
 function head() {
-	const messages = [rulesMsg(), procedureSpecMsg(), stateMsg()];
-	return { rules: messages[0]!, procedureSpec: messages[1]!, state: messages[2]!, all: messages };
+	const messages = [rulesMsg(), procedureSpecMsg(), coreMsg(), scratchMsg()];
+	return { rules: messages[0]!, procedureSpec: messages[1]!, core: messages[2]!, scratch: messages[3]!, all: messages };
+}
+
+function perCall(stored: AgentMessage): AgentMessage {
+	if (stored.role !== "custom") throw new Error("scratch head message is not a custom message");
+	const details = isPlainObject(stored.details) ? stored.details : {};
+	return { ...stored, details: { ...details, perCall: true } };
 }
 
 describe("project assembly", () => {
-	test("tool-result step projects to rules, procedure spec, state, pinned assistant, results in order", () => {
+	test("tool-result step projects to rules, spec, core, scratch copy, pinned assistant, results in order", () => {
 		const h = head();
 		const call = assistant([
 			{ type: "toolCall", id: "t1", name: "read", arguments: {} },
@@ -131,15 +144,16 @@ describe("project assembly", () => {
 		];
 		const out = project(messages, 32768)!;
 
-		expect(out.map((m) => m.role)).toEqual(["custom", "custom", "custom", "assistant", "toolResult", "toolResult"]);
-		expect(out.slice(0, 3).map((m) => (m.role === "custom" ? m.customType : m.role))).toEqual([
+		expect(out.map((m) => m.role)).toEqual(["custom", "custom", "custom", "custom", "assistant", "toolResult", "toolResult"]);
+		expect(out.slice(0, 4).map((m) => (m.role === "custom" ? m.customType : m.role))).toEqual([
 			RULES_MESSAGE_TYPE,
 			PROCEDURE_SPEC_MESSAGE_TYPE,
-			STATE_MESSAGE_TYPE,
+			STATE_CORE_MESSAGE_TYPE,
+			STATE_SCRATCH_MESSAGE_TYPE,
 		]);
-		expect(out[3]).toBe(call);
-		expect(out[4]).toBe(result1);
-		expect(out[5]).toBe(result2);
+		expect(out[4]).toBe(call);
+		expect(out[5]).toBe(result1);
+		expect(out[6]).toBe(result2);
 	});
 
 	test("user step projects head plus trailing user batch, interleaved customs skipped", () => {
@@ -148,9 +162,9 @@ describe("project assembly", () => {
 		const second = userMsg("second");
 		const out = project([...h.all, custom("todo-error-reminder"), first, developerMsg("nudge"), second], 32768)!;
 
-		expect(out).toHaveLength(5);
-		expect(out[3]).toBe(first);
-		expect(out[4]).toBe(second);
+		expect(out).toHaveLength(6);
+		expect(out[4]).toBe(first);
+		expect(out[5]).toBe(second);
 	});
 
 	test("returns the stored head and tail objects themselves when under the cap", () => {
@@ -161,19 +175,65 @@ describe("project assembly", () => {
 
 		expect(out[0]).toBe(h.rules);
 		expect(out[1]).toBe(h.procedureSpec);
-		expect(out[2]).toBe(h.state);
-		expect(out[3]).toBe(call);
-		expect(out[4]).toBe(result);
+		expect(out[2]).toBe(h.core);
+		expect(out[4]).toBe(call);
+		expect(out[5]).toBe(result);
 	});
 
-	test("the latest state message wins and older ones are absent", () => {
+	test("the projected scratch is a per-call copy: unequal to the stored message, same model-visible bytes", () => {
 		const h = head();
-		const older = stateMsg({ step: 1 });
-		const latest = stateMsg({ step: 2 });
-		const out = project([h.rules, older, h.procedureSpec, latest, assistantToolCall("t1"), toolResult("t1", "ok")], 32768)!;
+		const out = project([...h.all, assistantToolCall("t1"), toolResult("t1", "ok")], 32768)!;
+		const copy = out[3]!;
 
-		expect(out).toHaveLength(5);
-		expect(out[2]).toBe(latest);
+		expect(copy).not.toEqual(h.scratch);
+		if (copy.role !== "custom" || h.scratch.role !== "custom") throw new Error("scratch head message is not a custom message");
+		expect(copy.role).toBe(h.scratch.role);
+		expect(copy.customType).toBe(h.scratch.customType);
+		expect(copy.content).toBe(h.scratch.content);
+		// The one distinguishing field lives in details, outside role/content,
+		// so the harness's deep-equality marking catches it and the provider
+		// payload never sees it.
+		const copyDetails = copy.details;
+		expect(copyDetails !== null && typeof copyDetails === "object" && "perCall" in copyDetails && copyDetails.perCall).toBe(true);
+		const storedDetails = h.scratch.details;
+		expect(storedDetails !== null && typeof storedDetails === "object" && "perCall" in storedDetails).toBe(false);
+	});
+
+	test("the projected core is the stored reference: byte-equal across steps unless a core key changed", () => {
+		const first = custom(STATE_CORE_MESSAGE_TYPE, '{"goal":"x"}', { state: { goal: "x" } });
+		const second = custom(STATE_CORE_MESSAGE_TYPE, '{"goal":"x"}', { state: { goal: "x" } });
+		const changed = custom(STATE_CORE_MESSAGE_TYPE, '{"goal":"y"}', { state: { goal: "y" } });
+		const step = [assistantToolCall("t1"), toolResult("t1", "ok")];
+		if (first.role !== "custom" || second.role !== "custom" || changed.role !== "custom") throw new Error("core fixture is not a custom message");
+
+		// Returning the stored object itself is what keeps the bytes identical:
+		// the projected core is the reference, never a re-rendering.
+		const out = project([rulesMsg(), procedureSpecMsg(), first, scratchMsg(), ...step], 32768)!;
+		expect(out[2]).toBe(first);
+
+		const resaved = project([rulesMsg(), procedureSpecMsg(), first, second, scratchMsg(), ...step], 32768)!;
+		expect(resaved[2]).toBe(second);
+		expect(resaved[2]?.role === "custom" ? resaved[2].content : undefined).toBe(first.content);
+
+		const moved = project([rulesMsg(), procedureSpecMsg(), first, changed, scratchMsg(), ...step], 32768)!;
+		expect(moved[2]).toBe(changed);
+		expect(moved[2]?.role === "custom" ? moved[2].content : undefined).not.toBe(first.content);
+	});
+
+	test("last wins per type: two stored scratch or core messages project the later one", () => {
+		const h = head();
+		const olderScratch = scratchMsg({ plan: ["old"] });
+		const latestScratch = scratchMsg({ plan: ["new"] });
+		const out = project([h.rules, olderScratch, h.procedureSpec, latestScratch, h.core, assistantToolCall("t1"), toolResult("t1", "ok")], 32768)!;
+
+		expect(out[3]).toEqual(perCall(latestScratch));
+		expect(out[3]).not.toEqual(perCall(olderScratch));
+
+		const olderCore = coreMsg({ goal: "old" });
+		const latestCore = coreMsg({ goal: "new" });
+		const out2 = project([h.rules, olderCore, latestCore, h.procedureSpec, h.scratch, assistantToolCall("t1"), toolResult("t1", "ok")], 32768)!;
+
+		expect(out2[2]).toBe(latestCore);
 	});
 
 	test("every live-state block, developer message and earlier turn is dropped", () => {
@@ -193,11 +253,15 @@ describe("project assembly", () => {
 				result,
 			];
 			// The latest custom of a head type wins, so an injected older head
-			// message of the same type supersedes the fixture's copy.
+			// message of the same type supersedes the fixture's copy. The
+			// legacy single state message is never a head message: it only
+			// ever vanishes.
+			const lastInjected = messages[10]!;
 			const expected = [
-				type === RULES_MESSAGE_TYPE ? messages[9] : h.rules,
-				type === PROCEDURE_SPEC_MESSAGE_TYPE ? messages[9] : h.procedureSpec,
-				type === STATE_MESSAGE_TYPE ? messages[9] : h.state,
+				type === RULES_MESSAGE_TYPE ? lastInjected : h.rules,
+				type === PROCEDURE_SPEC_MESSAGE_TYPE ? lastInjected : h.procedureSpec,
+				type === STATE_CORE_MESSAGE_TYPE ? lastInjected : h.core,
+				type === STATE_SCRATCH_MESSAGE_TYPE ? perCall(lastInjected) : perCall(h.scratch),
 				call,
 				result,
 			];
@@ -211,17 +275,24 @@ describe("project assembly", () => {
 		const result = toolResult("t1", "ok");
 		const out = project([...h.all, call, developerMsg("interleave"), result], 32768)!;
 
-		expect(out).toHaveLength(5);
-		expect(out[3]).toBe(call);
-		expect(out[4]).toBe(result);
-		expect(asToolResult(out[4]!).toolCallId).toBe("t1");
+		expect(out).toHaveLength(6);
+		expect(out[4]).toBe(call);
+		expect(out[5]).toBe(result);
+		expect(asToolResult(out[5]!).toolCallId).toBe("t1");
 	});
 
-	test("missing rules, procedure spec or state leaves the call unprojected", () => {
+	test("missing rules, procedure spec, core or scratch leaves the call unprojected", () => {
 		const complete = [...head().all, assistantToolCall("t1"), toolResult("t1", "ok")];
-		for (const drop of [0, 1, 2]) {
+		for (const drop of [0, 1, 2, 3]) {
 			expect(project(complete.filter((_, i) => i !== drop), 32768)).toBeUndefined();
 		}
+	});
+
+	test("a branch holding only the legacy single state message is inert, never a two-message head", () => {
+		const h = head();
+		const legacy = [...h.all.slice(0, 2), custom("sh.omp.skill-state.state", "{}", { state: { goal: "x" } })];
+		expect(project([...legacy, assistantToolCall("t1"), toolResult("t1", "ok")], 32768)).toBeUndefined();
+		expect(project([...h.all.slice(0, 2), h.core, legacy[2]!, assistantToolCall("t1"), toolResult("t1", "ok")], 32768)).toBeUndefined();
 	});
 
 	test("trailing tool results without a preceding assistant tool call leave the call unprojected", () => {
@@ -240,21 +311,21 @@ describe("project assembly", () => {
 		const h = head();
 		const out = project([...h.all, assistantText("thinking out loud")], 32768)!;
 
-		expect(out).toEqual([h.rules, h.procedureSpec, h.state]);
+		expect(out).toEqual([h.rules, h.procedureSpec, h.core, perCall(h.scratch)]);
 	});
 
 	test("a fresh procedure with only the skill prompt and the head projects to the head only", () => {
 		const h = head();
 		const out = project([custom("skill-prompt"), ...h.all, developerMsg("note")], 32768)!;
 
-		expect(out).toEqual([h.rules, h.procedureSpec, h.state]);
+		expect(out).toEqual([h.rules, h.procedureSpec, h.core, perCall(h.scratch)]);
 	});
 
 	test("a trailing assistant tool call with no result yet projects to the head only", () => {
 		const h = head();
 		const out = project([...h.all, assistantToolCall("t1")], 32768)!;
 
-		expect(out).toEqual([h.rules, h.procedureSpec, h.state]);
+		expect(out).toEqual([h.rules, h.procedureSpec, h.core, perCall(h.scratch)]);
 	});
 
 	test("project never mutates its input, including under truncation", () => {
@@ -275,10 +346,10 @@ describe("project observation cap", () => {
 		const h = head();
 		const result = toolResult("call-9", "a".repeat(400), "bash");
 		const out = project([...h.all, assistantToolCall("call-9", "bash"), result], 300)!;
-		const capped = asToolResult(out[4]!);
+		const capped = asToolResult(out[5]!);
 		const marker = capped.content.at(-1)!;
 
-		expect(out[4]).not.toBe(result);
+		expect(out[5]).not.toBe(result);
 		expect(capped.toolCallId).toBe("call-9");
 		expect(marker.type).toBe("text");
 		const markerText = marker.type === "text" ? marker.text : "";
@@ -297,14 +368,14 @@ describe("project observation cap", () => {
 		const result = toolResult("t1", "small");
 		const out = project([...h.all, assistantToolCall("t1"), result], 32768)!;
 
-		expect(out[4]).toBe(result);
+		expect(out[5]).toBe(result);
 	});
 
 	test("multi-byte UTF-8 is cut on code point boundaries without replacement chars", () => {
 		const h = head();
 		const result = toolResult("t1", "€".repeat(200));
 		const out = project([...h.all, assistantToolCall("t1"), result], 300)!;
-		const capped = asToolResult(out[4]!);
+		const capped = asToolResult(out[5]!);
 		const text = capped.content
 			.map((b) => (b.type === "text" ? b.text : ""))
 			.join("");
@@ -321,13 +392,13 @@ describe("project observation cap", () => {
 			{ type: "toolCall", id: "t1", name: "read", arguments: {} },
 			{ type: "toolCall", id: "t2", name: "read", arguments: {} },
 		]), r1, r2], 350)!;
-		const capped1 = asToolResult(out[4]!);
-		const capped2 = asToolResult(out[5]!);
+		const capped1 = asToolResult(out[5]!);
+		const capped2 = asToolResult(out[6]!);
 		const marker1 = capped1.content.at(-1)!;
 		const marker2 = capped2.content.at(-1)!;
 
-		expect(out[4]).not.toBe(r1);
-		expect(out[5]).not.toBe(r2);
+		expect(out[5]).not.toBe(r1);
+		expect(out[6]).not.toBe(r2);
 		expect(marker1.type === "text" && marker1.text).toContain("this read result (t1)");
 		expect(marker2.type === "text" && marker2.text).toContain("this bash result (t2)");
 		expect(textBytes(out.filter((m) => m.role === "toolResult"))).toBeLessThanOrEqual(350);
@@ -341,7 +412,7 @@ describe("project observation cap", () => {
 			{ type: "toolCall", id: "t1", name: "read", arguments: {} },
 			{ type: "toolCall", id: "t2", name: "read", arguments: {} },
 		]), r1, r2], 100)!;
-		const capped = [asToolResult(out[4]!), asToolResult(out[5]!)];
+		const capped = [asToolResult(out[5]!), asToolResult(out[6]!)];
 
 		for (const [i, result] of capped.entries()) {
 			expect(result.content).toHaveLength(1);
@@ -356,7 +427,7 @@ describe("project observation cap", () => {
 		const turn = userMsg("u".repeat(5000));
 		const out = project([...h.all, turn], 100)!;
 
-		expect(out[3]).toBe(turn);
+		expect(out[4]).toBe(turn);
 	});
 
 	test("a total exactly at the cap passes through untouched", () => {
@@ -364,7 +435,7 @@ describe("project observation cap", () => {
 		const result = toolResult("t1", "x".repeat(300));
 		const out = project([...h.all, assistantToolCall("t1"), result], 300)!;
 
-		expect(out[4]).toBe(result);
+		expect(out[5]).toBe(result);
 	});
 
 	test("non-text blocks are neither counted nor cut", () => {
@@ -383,9 +454,9 @@ describe("project observation cap", () => {
 			{ type: "toolCall", id: "t2", name: "bash", arguments: {} },
 		]), image, text], 300)!;
 
-		expect(out[4]).toBe(image);
-		expect(out[5]).not.toBe(text);
-		expect(textBytes([out[5]!])).toBeLessThanOrEqual(300);
+		expect(out[5]).toBe(image);
+		expect(out[6]).not.toBe(text);
+		expect(textBytes([out[6]!])).toBeLessThanOrEqual(300);
 	});
 });
 
@@ -406,13 +477,13 @@ describe("project observation window", () => {
 			3,
 		)!;
 
-		expect(out).toHaveLength(9);
-		expect(out[3]).toBe(call1);
-		expect(out[4]).toBe(result1);
-		expect(out[5]).toBe(call2);
-		expect(out[6]).toBe(result2);
-		expect(out[7]).toBe(call3);
-		expect(out[8]).toBe(result3);
+		expect(out).toHaveLength(10);
+		expect(out[4]).toBe(call1);
+		expect(out[5]).toBe(result1);
+		expect(out[6]).toBe(call2);
+		expect(out[7]).toBe(result2);
+		expect(out[8]).toBe(call3);
+		expect(out[9]).toBe(result3);
 	});
 
 	test("a mismatched older pair stops the walk and keeps the newer pairs", () => {
@@ -427,11 +498,11 @@ describe("project observation window", () => {
 			3,
 		)!;
 
-		expect(out).toHaveLength(7);
-		expect(out[3]).toBe(call1);
-		expect(out[4]).toBe(result1);
-		expect(out[5]).toBe(call2);
-		expect(out[6]).toBe(result2);
+		expect(out).toHaveLength(8);
+		expect(out[4]).toBe(call1);
+		expect(out[5]).toBe(result1);
+		expect(out[6]).toBe(call2);
+		expect(out[7]).toBe(result2);
 	});
 
 	test("an older pair whose nearest message is not an assistant stops the walk", () => {
@@ -442,9 +513,9 @@ describe("project observation window", () => {
 		const result2 = toolResult("t2", "second");
 		const out = project([...h.all, userMsg("plain turn"), call1, result1, call2, result2], 32768, 3)!;
 
-		expect(out).toHaveLength(7);
-		expect(out[3]).toBe(call1);
-		expect(out[6]).toBe(result2);
+		expect(out).toHaveLength(8);
+		expect(out[4]).toBe(call1);
+		expect(out[7]).toBe(result2);
 	});
 
 	test("an older assistant with no results of its own stops the walk", () => {
@@ -453,9 +524,9 @@ describe("project observation window", () => {
 		const result2 = toolResult("t2", "second");
 		const out = project([...h.all, assistantToolCall("t1"), call2, result2], 32768, 3)!;
 
-		expect(out).toHaveLength(5);
-		expect(out[3]).toBe(call2);
-		expect(out[4]).toBe(result2);
+		expect(out).toHaveLength(6);
+		expect(out[4]).toBe(call2);
+		expect(out[5]).toBe(result2);
 	});
 
 	test("a window wider than the available pairs projects the pairs that exist", () => {
@@ -466,9 +537,9 @@ describe("project observation window", () => {
 		const result2 = toolResult("t2", "second");
 		const out = project([...h.all, call1, result1, call2, result2], 32768, 5)!;
 
-		expect(out).toHaveLength(7);
-		expect(out[3]).toBe(call1);
-		expect(out[6]).toBe(result2);
+		expect(out).toHaveLength(8);
+		expect(out[4]).toBe(call1);
+		expect(out[7]).toBe(result2);
 	});
 
 	test("the cap covers the whole window: both pairs are cut, largest first", () => {
@@ -480,11 +551,11 @@ describe("project observation window", () => {
 			350,
 			2,
 		)!;
-		const capped1 = asToolResult(out[4]!);
-		const capped2 = asToolResult(out[6]!);
+		const capped1 = asToolResult(out[5]!);
+		const capped2 = asToolResult(out[7]!);
 
-		expect(out[4]).not.toBe(r1);
-		expect(out[6]).not.toBe(r2);
+		expect(out[5]).not.toBe(r1);
+		expect(out[7]).not.toBe(r2);
 		expect(capped1.content.at(-1)).toMatchObject({ type: "text", text: expect.stringContaining("this read result (t1)") });
 		expect(capped2.content.at(-1)).toMatchObject({ type: "text", text: expect.stringContaining("this bash result (t2)") });
 		expect(textBytes(out.filter((m) => m.role === "toolResult"))).toBeLessThanOrEqual(350);
@@ -499,7 +570,7 @@ describe("project observation window", () => {
 			100,
 			2,
 		)!;
-		const capped = [asToolResult(out[4]!), asToolResult(out[6]!)];
+		const capped = [asToolResult(out[5]!), asToolResult(out[7]!)];
 
 		for (const [i, result] of capped.entries()) {
 			expect(result.content).toHaveLength(1);
@@ -540,14 +611,14 @@ describe("project flat band", () => {
 			if (rand() < 0.5) messages.push(userMsg(`note ${step}`));
 			messages.push(assistantToolCall(`t${step}`));
 			messages.push(toolResult(`t${step}`, "x".repeat(2048)));
-			if (step % 3 === 0) messages.push(stateMsg({ step }));
+			if (step % 3 === 0) messages.push(scratchMsg({ step }));
 			if (step === 5) early = project(messages, 8192);
 			if (step === 30) late = project(messages, 8192);
 		}
 
-		// Three head messages plus the pinned pair, at every step.
-		expect(early).toHaveLength(5);
-		expect(late).toHaveLength(5);
+		// Four head messages plus the pinned pair, at every step.
+		expect(early).toHaveLength(6);
+		expect(late).toHaveLength(6);
 		expect(textBytes(late!)).toBeLessThanOrEqual(textBytes(early!) + 64);
 	});
 });

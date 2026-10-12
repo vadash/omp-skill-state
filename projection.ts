@@ -1,5 +1,6 @@
 import type { ContextEvent } from "@oh-my-pi/pi-coding-agent";
-import { RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE } from "./messages";
+import { RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE } from "./messages";
+import { isPlainObject } from "./state";
 
 // The harness's transcript message union, taken from the context event payload:
 // the published package's root entry exports ContextEvent but not AgentMessage.
@@ -31,21 +32,34 @@ function isSkippable(message: AgentMessage): boolean {
 	return message.role === "custom" || message.role === "developer";
 }
 
-// Builds the projected prompt: head (rules, P, latest state) plus the current
-// step, all as the stored objects themselves. Returning the stored references
-// keeps them byte-equal to history, which anchors the provider cache prefix.
+// Builds the projected prompt: head (rules, P, state core, scratch state)
+// plus the current step. Rules, P and the core are the stored objects
+// themselves, which keeps them byte-equal to history and lets the provider's
+// cache prefix reach through the core. The scratch rides as a deliberately
+// differing copy: one extra field in details, outside the model-visible role
+// and content, makes the harness mark it per-call so the durable breakpoint
+// anchors on the newest stable message before it, the last core message.
 // undefined means no projection: the call gets ordinary context. That is the
 // safe fallback whenever the head is incomplete or provider pairing cannot be
 // established; a wrong prompt is worse than a plain one.
 export function project(messages: readonly AgentMessage[], observationBytes: number, observationWindow = 1): AgentMessage[] | undefined {
 	const rules = lastCustom(messages, RULES_MESSAGE_TYPE);
 	const procedureSpec = lastCustom(messages, PROCEDURE_SPEC_MESSAGE_TYPE);
-	const state = lastCustom(messages, STATE_MESSAGE_TYPE);
-	if (rules === undefined || procedureSpec === undefined || state === undefined) return undefined;
+	const core = lastCustom(messages, STATE_CORE_MESSAGE_TYPE);
+	const scratchStored = lastCustom(messages, STATE_SCRATCH_MESSAGE_TYPE);
+	if (rules === undefined || procedureSpec === undefined || core === undefined || scratchStored === undefined || scratchStored.role !== "custom") {
+		return undefined;
+	}
+	const storedDetails = scratchStored.details;
+	const scratchCopy: AgentMessage = {
+		...scratchStored,
+		details: { ...(isPlainObject(storedDetails) ? storedDetails : {}), perCall: true },
+	};
+	const head: AgentMessage[] = [rules, procedureSpec, core, scratchCopy];
 
 	let end = messages.length;
 	while (end > 0 && isSkippable(messages[end - 1]!)) end--;
-	if (end === 0) return [rules, procedureSpec, state];
+	if (end === 0) return head;
 
 	const last = messages[end - 1]!;
 	if (last.role === "toolResult") {
@@ -87,7 +101,7 @@ export function project(messages: readonly AgentMessage[], observationBytes: num
 		}
 		const window: AgentMessage[] = [];
 		for (let i = pairs.length - 1; i >= 0; i--) window.push(...pairs[i]!);
-		return [rules, procedureSpec, state, ...capObservation(window, observationBytes)];
+		return [...head, ...capObservation(window, observationBytes)];
 	}
 	if (last.role === "user") {
 		const turn: AgentMessage[] = [];
@@ -96,10 +110,10 @@ export function project(messages: readonly AgentMessage[], observationBytes: num
 			if (message.role === "user") turn.unshift(message);
 			else if (!isSkippable(message)) break;
 		}
-		return [rules, procedureSpec, state, ...turn];
+		return [...head, ...turn];
 	}
 	// A trailing assistant message has no observation yet.
-	return [rules, procedureSpec, state];
+	return head;
 }
 
 // The cap bounds the step's combined observation text, tool results only. The

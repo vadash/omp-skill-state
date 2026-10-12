@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import { SKILL_PROMPT_MESSAGE_TYPE, contentText, currentStepCut, scanBranch } from "./branch";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent } from "./messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent } from "./messages";
 import type { ExecutionState } from "./state";
 
 // Branch entries as the harness stores them; ids and timestamps are
@@ -46,30 +46,26 @@ function specEntry(name: string): SessionEntry {
 	};
 }
 
-function stateEntry(state: ExecutionState, details: unknown = { state }): SessionEntry {
+function stateEntry(customType: string, state: ExecutionState, details: unknown = { state }): SessionEntry {
 	return {
 		type: "custom_message",
 		id: nextId(),
 		parentId: null,
 		timestamp: stamp(),
-		customType: STATE_MESSAGE_TYPE,
+		customType,
 		content: renderStateContent(state),
 		display: true,
 		details,
 	};
 }
 
-// A state message with no details at all, as a foreign writer might store it.
-function bareStateEntry(): SessionEntry {
-	return {
-		type: "custom_message",
-		id: nextId(),
-		parentId: null,
-		timestamp: stamp(),
-		customType: STATE_MESSAGE_TYPE,
-		content: renderStateContent({}),
-		display: true,
-	};
+const coreEntry = (state: ExecutionState, details: unknown = { state }) => stateEntry(STATE_CORE_MESSAGE_TYPE, state, details);
+const scratchEntry = (state: ExecutionState, details: unknown = { state }) => stateEntry(STATE_SCRATCH_MESSAGE_TYPE, state, details);
+
+// A stored state message of the retired single-state type, as a pre-split
+// transcript carries it.
+function legacyStateEntry(state: ExecutionState): SessionEntry {
+	return stateEntry("sh.omp.skill-state.state", state);
 }
 
 function assistantEntry(id: string): SessionEntry {
@@ -110,48 +106,70 @@ describe("scanBranch", () => {
 		expect(scanBranch([])).toBeUndefined();
 	});
 
-	test("a user invocation followed by its spec and a state message re-derives that state", () => {
-		const found = scanBranch([invocation("recon"), specEntry("recon"), stateEntry({ goal: "x" })]);
+	test("a user invocation followed by its spec, a core and a scratch message re-derives the merged state", () => {
+		const found = scanBranch([invocation("recon"), specEntry("recon"), coreEntry({ goal: "x", working_dir: "." }), scratchEntry({ plan: ["a"] })]);
+
+		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x", working_dir: ".", plan: ["a"] } });
+	});
+
+	test("an empty scratch state still counts: the merged state is the core alone", () => {
+		const found = scanBranch([invocation("recon"), specEntry("recon"), coreEntry({ goal: "x" }), scratchEntry({})]);
 
 		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x" } });
 	});
 
-	test("the latest state message wins", () => {
-		const found = scanBranch([invocation("recon"), specEntry("recon"), stateEntry({ goal: "x" }), stateEntry({ goal: "y" })]);
+	test("the latest core and the latest scratch message win, each on its own type", () => {
+		const found = scanBranch([
+			invocation("recon"),
+			specEntry("recon"),
+			coreEntry({ goal: "old" }),
+			coreEntry({ goal: "new" }),
+			scratchEntry({ plan: ["old"] }),
+			scratchEntry({ plan: ["new"] }),
+		]);
 
-		expect(found?.state).toEqual({ goal: "y" });
+		expect(found?.state).toEqual({ goal: "new", plan: ["new"] });
 	});
 
-	test("an incomplete head is inert: no spec, or no state", () => {
-		expect(scanBranch([invocation("recon"), stateEntry({ goal: "x" })])).toBeUndefined();
+	test("an incomplete head is inert: no spec, no core, or no scratch", () => {
+		expect(scanBranch([invocation("recon"), scratchEntry({})])).toBeUndefined();
+		expect(scanBranch([invocation("recon"), coreEntry({})])).toBeUndefined();
 		expect(scanBranch([invocation("recon"), specEntry("recon")])).toBeUndefined();
+		expect(scanBranch([invocation("recon"), specEntry("recon"), coreEntry({ goal: "x" })])).toBeUndefined();
+		expect(scanBranch([invocation("recon"), specEntry("recon"), scratchEntry({ plan: [] })])).toBeUndefined();
+	});
+
+	test("a legacy single state message never completes the head", () => {
+		expect(scanBranch([invocation("recon"), specEntry("recon"), legacyStateEntry({ goal: "x" })])).toBeUndefined();
+		expect(scanBranch([invocation("recon"), specEntry("recon"), coreEntry({ goal: "x" }), legacyStateEntry({ stray: 1 })])).toBeUndefined();
 	});
 
 	test("a later invocation restarts the procedure: the earlier head is not attributed to it", () => {
-		const branch = [invocation("recon"), specEntry("recon"), stateEntry({ goal: "old" }), invocation("other")];
+		const branch = [invocation("recon"), specEntry("recon"), coreEntry({ goal: "old" }), scratchEntry({}), invocation("other")];
 		expect(scanBranch(branch)).toBeUndefined();
 
-		const found = scanBranch([...branch, specEntry("other"), stateEntry({ goal: "new" })]);
+		const found = scanBranch([...branch, specEntry("other"), coreEntry({ goal: "new" }), scratchEntry({})]);
 		expect(found).toEqual({ name: "other", spec: "Running skill other", state: { goal: "new" } });
 	});
 
 	test("an agent-attributed invocation and one without a name never count", () => {
-		expect(scanBranch([invocation("recon", "agent"), specEntry("recon"), stateEntry({ goal: "x" })])).toBeUndefined();
-		expect(scanBranch([invocation("recon", "user", {}), specEntry("recon"), stateEntry({ goal: "x" })])).toBeUndefined();
-		expect(scanBranch([invocation("recon", "user", { name: "" }), specEntry("recon"), stateEntry({ goal: "x" })])).toBeUndefined();
+		const head = [specEntry("recon"), coreEntry({ goal: "x" }), scratchEntry({})];
+		expect(scanBranch([invocation("recon", "agent"), ...head])).toBeUndefined();
+		expect(scanBranch([invocation("recon", "user", {}), ...head])).toBeUndefined();
+		expect(scanBranch([invocation("recon", "user", { name: "" }), ...head])).toBeUndefined();
 	});
 
 	test("head messages before any invocation are ignored", () => {
-		expect(scanBranch([specEntry("recon"), stateEntry({ goal: "x" }), invocation("recon")])).toBeUndefined();
+		expect(scanBranch([specEntry("recon"), coreEntry({ goal: "x" }), scratchEntry({}), invocation("recon")])).toBeUndefined();
 	});
 
-	test("only a plain-object details.state counts as a state", () => {
+	test("only a plain-object details.state counts, for core and scratch alike", () => {
 		const head = [invocation("recon"), specEntry("recon")];
 
-		expect(scanBranch([...head, bareStateEntry()])).toBeUndefined();
-		expect(scanBranch([...head, stateEntry({ goal: "x" }, {})])).toBeUndefined();
-		expect(scanBranch([...head, stateEntry({ goal: "x" }, { state: ["x"] })])).toBeUndefined();
-		expect(scanBranch([...head, stateEntry({ goal: "x" }, { state: null })])).toBeUndefined();
+		expect(scanBranch([...head, stateEntry(STATE_CORE_MESSAGE_TYPE, { goal: "x" }, {}), scratchEntry({})])).toBeUndefined();
+		expect(scanBranch([...head, coreEntry({ goal: "x" }, { state: ["x"] }), scratchEntry({})])).toBeUndefined();
+		expect(scanBranch([...head, coreEntry({ goal: "x" }), stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, { state: null })])).toBeUndefined();
+		expect(scanBranch([...head, coreEntry({ goal: "x" }), stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, "no details")])).toBeUndefined();
 	});
 
 	test("entries of other kinds are skipped", () => {
@@ -161,11 +179,13 @@ describe("scanBranch", () => {
 			assistantEntry("a1"),
 			specEntry("recon"),
 			toolResultEntry("r1"),
-			stateEntry({ goal: "x" }),
+			coreEntry({ goal: "x" }),
+			toolResultEntry("r2"),
+			scratchEntry({ plan: ["a"] }),
 			customEntry("c2"),
 		]);
 
-		expect(found?.state).toEqual({ goal: "x" });
+		expect(found?.state).toEqual({ goal: "x", plan: ["a"] });
 	});
 });
 
@@ -177,7 +197,7 @@ describe("currentStepCut", () => {
 			assistantEntry("a2"),
 			customEntry("c1"),
 			toolResultEntry("r2"),
-			stateEntry({}),
+			scratchEntry({}),
 		]);
 
 		expect(cut).toBe("a2");
@@ -185,7 +205,7 @@ describe("currentStepCut", () => {
 
 	test("is undefined when the branch holds no assistant message", () => {
 		expect(currentStepCut([])).toBeUndefined();
-		expect(currentStepCut([invocation("recon"), specEntry("recon"), stateEntry({})])).toBeUndefined();
+		expect(currentStepCut([invocation("recon"), specEntry("recon"), coreEntry({}), scratchEntry({})])).toBeUndefined();
 	});
 });
 

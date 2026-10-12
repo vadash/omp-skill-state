@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, SessionEntry, Skill, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { zod } from "@oh-my-pi/pi-coding-agent";
 import extension from "./index";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent, skillAnnouncement } from "./messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement } from "./messages";
 import { isPlainObject } from "./state";
 import type { ExecutionState } from "./state";
 
@@ -152,13 +152,24 @@ export class FakeSession {
 		this.branch = branch;
 	}
 
-	// The state of every stored state message, in order.
+	// The merged execution state of every stored core+scratch pair, in order.
+	// The runtime always stores the two state messages back to back, core
+	// first, so a scratch closes the pair its preceding core opened.
 	get storedStates(): ExecutionState[] {
 		const states: ExecutionState[] = [];
+		let core: ExecutionState | undefined;
 		for (const entry of this.branch) {
-			if (entry.type !== "custom_message" || entry.customType !== STATE_MESSAGE_TYPE) continue;
+			if (entry.type !== "custom_message") continue;
+			if (entry.customType !== STATE_CORE_MESSAGE_TYPE && entry.customType !== STATE_SCRATCH_MESSAGE_TYPE) continue;
 			const details = entry.details as { state?: unknown } | undefined;
-			if (details !== undefined && isPlainObject(details.state)) states.push(details.state as ExecutionState);
+			if (!isPlainObject(details?.state)) continue;
+			if (entry.customType === STATE_CORE_MESSAGE_TYPE) {
+				core = details!.state as ExecutionState;
+				continue;
+			}
+			if (core === undefined) continue;
+			states.push({ ...core, ...(details!.state as ExecutionState) });
+			core = undefined;
 		}
 		return states;
 	}
@@ -445,21 +456,37 @@ export function specEntry(name: string): SessionEntry {
 	} as SessionEntry;
 }
 
-export function stateEntry(state: ExecutionState, details: unknown = { state }): SessionEntry {
+function stateEntry(customType: string, state: ExecutionState, details: unknown = { state }): SessionEntry {
 	return {
 		type: "custom_message",
 		id: seedId(),
 		parentId: null,
 		timestamp: new Date(0).toISOString(),
-		customType: STATE_MESSAGE_TYPE,
+		customType,
 		content: renderStateContent(state),
 		display: true,
 		details,
 	} as SessionEntry;
 }
 
+export function coreStateEntry(state: ExecutionState): SessionEntry {
+	return stateEntry(STATE_CORE_MESSAGE_TYPE, state);
+}
+
+export function scratchStateEntry(state: ExecutionState): SessionEntry {
+	return stateEntry(STATE_SCRATCH_MESSAGE_TYPE, state);
+}
+
+// One stored checkpoint: the runtime commits a state as two messages, the
+// state core first and the scratch state second. Seeding uses an all-core
+// split with an empty scratch; a real run's partitions differ, but the head
+// shape and the merged state are what the reads under test consume.
+export function stateEntries(state: ExecutionState): SessionEntry[] {
+	return [coreStateEntry(state), scratchStateEntry({})];
+}
+
 // What an engaged run leaves on the branch: the invocation, then the head
-// asides, then one state entry per accepted patch.
+// asides, then one core+scratch pair per accepted patch.
 export function procedureBranch(name: string, ...states: ExecutionState[]): SessionEntry[] {
-	return [invocationEntry(name), specEntry(name), ...states.map((state) => stateEntry(state))];
+	return [invocationEntry(name), specEntry(name), ...states.flatMap((state) => stateEntries(state))];
 }

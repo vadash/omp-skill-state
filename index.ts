@@ -1,8 +1,8 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Text } from "@oh-my-pi/pi-coding-agent";
 import { SKILL_PROMPT_MESSAGE_TYPE, contentText, scanBranch } from "./branch";
-import { STATE_MESSAGE_TYPE, announcedSkillNames, renderStateContent, rulesMessage, stateMessage } from "./messages";
-import { compactionFor, headMessages, newProcedure, noteProjected, pendingNudges, recordReply } from "./procedure";
+import { STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, announcedSkillNames, renderStateContent, rulesMessage } from "./messages";
+import { compactionFor, headMessages, newProcedure, noteProjected, pendingNudges, recordReply, stateMessages } from "./procedure";
 import type { Procedure } from "./procedure";
 import { project } from "./projection";
 import { applyPatch, isPlainObject, loadStateSchema } from "./state";
@@ -76,7 +76,8 @@ export default function (pi: ExtensionAPI): void {
 			procedure.idle = 0;
 			// Aside delivery lands the state at the next step boundary, before
 			// the next provider call, without interrupting the in-flight batch.
-			pi.sendMessage(stateMessage(applied.state), { deliverAs: "aside" });
+			// A commit stores both partitions, state core first.
+			for (const payload of stateMessages(procedure)) pi.sendMessage(payload, { deliverAs: "aside" });
 			return { content: [{ type: "text", text: "execution state updated" }] };
 		},
 	};
@@ -104,17 +105,19 @@ export default function (pi: ExtensionAPI): void {
 		return procedure;
 	}
 
-	// The head: the operating rules, P and the current state, one message each
-	// so the projection can take the last stored copy of every type.
+	// The head: the operating rules, P, the state core and the scratch state,
+	// one message each so the projection can take the last stored copy of
+	// every type.
 	function sendHead(procedure: Procedure, options: { deliverAs: "aside" | "nextTurn" }): void {
 		for (const payload of headMessages(procedure)) pi.sendMessage(payload, options);
 	}
 
 	// Re-derives engagement from what is stored on the branch, so a cold load, a
 	// /resume, a rewind or a tree navigation land on the procedure state that
-	// branch actually carries. The head asides (rules, P, state) are already on
-	// the branch and are never re-sent: the projection takes the last of each
-	// type, and a fresh aside would shadow the real stored state.
+	// branch actually carries. The head asides (rules, P, state core, scratch
+	// state) are already on the branch and are never re-sent: the projection
+	// takes the last of each type, and a fresh aside would shadow the real
+	// stored state.
 	async function rederive(ctx: ExtensionContext, trigger: string): Promise<void> {
 		if (ctx.agent.kind !== "main") return;
 		const found = scanBranch(ctx.sessionManager.getBranch());
@@ -128,9 +131,14 @@ export default function (pi: ExtensionAPI): void {
 		disengage(ctx, trigger);
 	}
 
-	// Renderer registration is a load-time call and needs no session state, so it
-	// happens unconditionally at factory load, before any procedure engages.
-	pi.registerMessageRenderer<{ state?: ExecutionState }>(STATE_MESSAGE_TYPE, (message, { expanded }, theme) => {
+	// Renderer registration is a load-time call and needs no session state, so
+	// it happens unconditionally at factory load, before any procedure engages.
+	// Both stored state messages (state core, scratch state) render the same
+	// way: collapsed names the keys, expanded shows the pretty JSON. theme is
+	// structural because the harness's renderer type is not part of the root
+	// export; the real Theme satisfies it.
+	type StateTheme = { fg(role: string, text: string): string };
+	function renderStateMessage(message: { details?: { state?: ExecutionState } }, { expanded }: { expanded: boolean }, theme: StateTheme) {
 		const state = message.details?.state;
 		if (!isPlainObject(state)) return undefined;
 		const keys = Object.keys(state);
@@ -140,7 +148,9 @@ export default function (pi: ExtensionAPI): void {
 			? [label, theme.fg("text", JSON.stringify(state, null, 2))]
 			: [label + theme.fg("muted", ` state · ${keys.length} keys${keys.length > 0 ? `: ${list}` : ""}`)];
 		return new Text(lines.join("\n"), 0, 0);
-	});
+	}
+	pi.registerMessageRenderer<{ state?: ExecutionState }>(STATE_CORE_MESSAGE_TYPE, renderStateMessage);
+	pi.registerMessageRenderer<{ state?: ExecutionState }>(STATE_SCRATCH_MESSAGE_TYPE, renderStateMessage);
 
 	// The first step's rules ride in with the invocation batch itself. The hook
 	// fires at the batch's dequeue, before the skill prompt's message_end can
@@ -210,7 +220,7 @@ export default function (pi: ExtensionAPI): void {
 		const settle = (attempts: number): void => {
 			if (procedures.get(sessionId) !== procedure || procedure.state !== state) return;
 			if (ctx.isIdle() || attempts === 0) {
-				pi.sendMessage(stateMessage(state), { deliverAs: "nextTurn" });
+				for (const payload of stateMessages(procedure)) pi.sendMessage(payload, { deliverAs: "nextTurn" });
 				return;
 			}
 			setTimeout(() => settle(attempts - 1), FINAL_STATE_POLL_MS);

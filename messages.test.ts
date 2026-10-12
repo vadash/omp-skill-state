@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { announcedSkillNames, consolidationNudgeMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent, skillAnnouncement, stateMessage } from "./messages";
+import { announcedSkillNames, consolidationNudgeMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage } from "./messages";
 
 describe("consolidationNudgeMessage", () => {
 	test("is a developer message asking for a state_update consolidation, with no fence, so it never becomes an elide target", () => {
@@ -30,14 +30,30 @@ describe("renderStateContent", () => {
 	});
 });
 
-describe("stateMessage", () => {
-	test("carries the rendered state and details.state for re-derive", () => {
-		expect(stateMessage({ goal: "x" })).toEqual({
-			customType: STATE_MESSAGE_TYPE,
+describe("coreMessage", () => {
+	test("carries the rendered core partition and details.state for re-derive", () => {
+		expect(coreMessage({ goal: "x" })).toEqual({
+			customType: STATE_CORE_MESSAGE_TYPE,
 			content: renderStateContent({ goal: "x" }),
 			display: true,
 			details: { state: { goal: "x" } },
 		});
+	});
+});
+
+describe("scratchMessage", () => {
+	test("carries the rendered scratch partition and details.state for re-derive", () => {
+		expect(scratchMessage({ plan: ["a"] })).toEqual({
+			customType: STATE_SCRATCH_MESSAGE_TYPE,
+			content: renderStateContent({ plan: ["a"] }),
+			display: true,
+			details: { state: { plan: ["a"] } },
+		});
+	});
+
+	test("an empty scratch renders as a stored empty-object message", () => {
+		expect(scratchMessage({})).toEqual({ customType: STATE_SCRATCH_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {} } });
+		expect(coreMessage({})).toEqual({ customType: STATE_CORE_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {} } });
 	});
 });
 

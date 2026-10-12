@@ -1,8 +1,8 @@
 import type { CustomMessagePayload, SessionBeforeCompactEvent, SessionBeforeCompactResult } from "@oh-my-pi/pi-coding-agent";
 import { currentStepCut } from "./branch";
 import type { AgentMessage } from "./projection";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, consolidationNudgeMessage, nudgeMessage, renderStateContent, rulesMessage, stateMessage } from "./messages";
-import { applyPatch } from "./state";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, nudgeMessage, renderStateContent, rulesMessage, scratchMessage } from "./messages";
+import { applyPatch, splitState, volatileKeys } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
 
 // One run of a procedure skill (CONTEXT.md: Procedure). Everything the step
@@ -107,9 +107,12 @@ export function nudgePending(procedure: Procedure): boolean {
 // capNudged latches when the nudge is handed out and re-arms when the
 // committed state measures back under the cap. The cap never blocks, never
 // ends the procedure: this query only decides what the next prompt carries.
+// The measurement is the sum of both stored state messages' rendered content,
+// the core's and the scratch's.
 function overCap(procedure: Procedure): boolean {
-	return procedure.params.stateBytes > 0
-		&& Buffer.byteLength(renderStateContent(procedure.state)) > procedure.params.stateBytes;
+	if (procedure.params.stateBytes <= 0) return false;
+	const { core, scratch } = statePartitions(procedure);
+	return Buffer.byteLength(renderStateContent(core)) + Buffer.byteLength(renderStateContent(scratch)) > procedure.params.stateBytes;
 }
 
 // The turn-scoped nudges the next provider call should carry, in delivery
@@ -129,34 +132,52 @@ export function pendingNudges(procedure: Procedure): AgentMessage[] {
 	return nudges;
 }
 
-// The head: the operating rules, P and the current state, one message each so
-// the projection can take the last stored copy of every type. Byte-equal for
-// the same state on every call, which is what lets a head re-sent after a
-// compaction keep the provider's cache prefix.
+// The current state split into its two stored partitions, derived from the
+// schema the record already holds; nothing about the split is remembered.
+function statePartitions(procedure: Procedure): { core: ExecutionState; scratch: ExecutionState } {
+	return splitState(procedure.state, procedure.schema, volatileKeys(procedure.schema));
+}
+
+// The two stored state messages of the current state, core first. Shared by
+// the head, the patch aside and the final-state send, so every stored
+// checkpoint has the same shape.
+export function stateMessages(procedure: Procedure): CustomMessagePayload[] {
+	const { core, scratch } = statePartitions(procedure);
+	return [coreMessage(core), scratchMessage(scratch)];
+}
+
+// The head: the operating rules, P, the state core and the scratch state, one
+// message each so the projection can take the last stored copy of every type.
+// Byte-equal for the same state on every call, which is what lets a head
+// re-sent after a compaction keep the provider's cache prefix. An empty core
+// still renders as a stored empty-object message: the head is complete only
+// with all four.
 export function headMessages(procedure: Procedure): CustomMessagePayload[] {
 	return [
 		rulesMessage(),
 		{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: procedure.spec, display: false, details: { name: procedure.name } },
-		stateMessage(procedure.state),
+		...stateMessages(procedure),
 	];
 }
 
-// The compaction while engaged (ADR 0001): the summary is the state, the cut is
-// the current step, and the raw state rides along in preserveData so the next
-// compaction can carry it forward. No summarizer call is involved; the factory
-// only registers the handler and guards the session.
+// The compaction while engaged (ADR 0001): the summary is the full state, the
+// cut is the current step, and both state partitions ride along in
+// preserveData so the next compaction can carry them forward. No summarizer
+// call is involved; the factory only registers the handler and guards the
+// session.
 export function compactionFor(
 	procedure: Procedure,
 	preparation: Pick<SessionBeforeCompactEvent["preparation"], "firstKeptEntryId" | "tokensBefore">,
 	branchEntries: SessionBeforeCompactEvent["branchEntries"],
 ): SessionBeforeCompactResult {
+	const { core, scratch } = statePartitions(procedure);
 	return {
 		compaction: {
 			summary: `Execution state of procedure "${procedure.name}" (skill-state runtime):\n\n${JSON.stringify(procedure.state, null, 2)}`,
 			shortSummary: `skill-state: procedure "${procedure.name}" execution state`,
 			firstKeptEntryId: currentStepCut(branchEntries) ?? preparation.firstKeptEntryId,
 			tokensBefore: preparation.tokensBefore,
-			preserveData: { state: procedure.state },
+			preserveData: { core, scratch },
 		},
 	};
 }

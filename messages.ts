@@ -2,7 +2,8 @@ import type { CustomMessagePayload } from "@oh-my-pi/pi-coding-agent";
 import type { ExecutionState } from "./state";
 import type { AgentMessage } from "./projection";
 
-export const STATE_MESSAGE_TYPE = "sh.omp.skill-state.state";
+export const STATE_CORE_MESSAGE_TYPE = "sh.omp.skill-state.core";
+export const STATE_SCRATCH_MESSAGE_TYPE = "sh.omp.skill-state.scratch";
 export const RULES_MESSAGE_TYPE = "sh.omp.skill-state.rules";
 export const PROCEDURE_SPEC_MESSAGE_TYPE = "sh.omp.skill-state.procedure-spec";
 
@@ -60,9 +61,14 @@ export function renderStateContent(state: ExecutionState): string {
 }
 
 // details.state lets later re-derives rebuild t from the branch without
-// re-parsing the content.
-export function stateMessage(state: ExecutionState): CustomMessagePayload {
-	return { customType: STATE_MESSAGE_TYPE, content: renderStateContent(state), display: true, details: { state } };
+// re-parsing the content. The execution state is stored as two messages (the
+// state core and the scratch state, ADR 0003), each holding its partition.
+export function coreMessage(core: ExecutionState): CustomMessagePayload {
+	return { customType: STATE_CORE_MESSAGE_TYPE, content: renderStateContent(core), display: true, details: { state: core } };
+}
+
+export function scratchMessage(scratch: ExecutionState): CustomMessagePayload {
+	return { customType: STATE_SCRATCH_MESSAGE_TYPE, content: renderStateContent(scratch), display: true, details: { state: scratch } };
 }
 
 // The idle warning the model sees one step before the cutoff. Per-call by

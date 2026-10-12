@@ -3,13 +3,28 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { SessionEntry, Skill } from "@oh-my-pi/pi-coding-agent";
-import { fakeOmp, invocationEntry, procedureBranch, specEntry, stateEntry } from "./fake-session";
-import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent, stateMessage } from "./messages";
-import type { ExecutionState } from "./state";
+import { fakeOmp, coreStateEntry, invocationEntry, procedureBranch, scratchStateEntry, specEntry, stateEntries } from "./fake-session";
+import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, coreMessage, scratchMessage } from "./messages";
+import type { ExecutionState, StateSchema } from "./state";
+import { splitState, volatileKeys } from "./state";
 import { makeSkill } from "./skill-fixtures";
 
-// Engage sends exactly these three asides; the patch loop must add nothing else.
-const engageAsideTypes = [RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MESSAGE_TYPE];
+// Engage sends exactly these four asides; the patch loop must add nothing else.
+const engageAsideTypes = [RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE];
+
+// The `procedure` skill's schema declares only `goal`, so `goal` lands
+// in the state core and every other key in the scratch state.
+const procedureSchema: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
+
+// The two stored state messages a commit sends, in order, as the fake records
+// them.
+const stateSends = (state: ExecutionState, deliverAs: "aside" | "nextTurn") => {
+	const { core, scratch } = splitState(state, procedureSchema, volatileKeys(procedureSchema));
+	return [
+		{ payload: coreMessage(core) as Record<string, unknown>, options: { deliverAs } },
+		{ payload: scratchMessage(scratch) as Record<string, unknown>, options: { deliverAs } },
+	];
+};
 
 // The step options for a reply whose batch calls state_update with a patch,
 // optionally alongside extra tools.
@@ -29,6 +44,11 @@ function nudgeIn(prompt: unknown[] | undefined): { role: unknown; content: unkno
 	}
 	return nudges;
 }
+
+// Narrows an unknown context message to the custom head messages; the fake's
+// branch messages are untyped at this seam.
+const isCustomMessage = (message: unknown): message is { role: "custom"; customType: string; content: unknown } =>
+	typeof message === "object" && message !== null && "role" in message && message.role === "custom";
 
 const engageNotices = (name: string) => [
 	{ message: `skill-state: procedure "${name}" engaged`, type: "info" },
@@ -52,7 +72,7 @@ let capProcedure: Skill;
 
 beforeAll(async () => {
 	root = await mkdtemp(path.join(tmpdir(), "omp-skill-state-"));
-	procedure = await makeSkill(root, "procedure", JSON.stringify({ type: "object", properties: { goal: { type: "string" } } }));
+	procedure = await makeSkill(root, "procedure", JSON.stringify(procedureSchema));
 	smallProcedure = await makeSkill(
 		root,
 		"smallcap",
@@ -110,15 +130,21 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		expect(s.notices).toEqual(engageNotices("procedure"));
 	});
 
-	test("engage sends the rules, the procedure spec and the initial state as three asides", async () => {
+	test("engage sends the rules, the procedure spec and the initial state core and scratch as four asides", async () => {
 		const { s } = await engaged();
 
 		expect(s.sends.map((sent) => sent.payload)).toEqual([
 			{ customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false },
 			{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: "Running skill procedure", display: false, details: { name: "procedure" } },
-			{ customType: STATE_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {} } },
+			{ customType: STATE_CORE_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {} } },
+			{ customType: STATE_SCRATCH_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {} } },
 		]);
-		expect(s.sends.map((sent) => sent.options)).toEqual([{ deliverAs: "aside" }, { deliverAs: "aside" }, { deliverAs: "aside" }]);
+		expect(s.sends.map((sent) => sent.options)).toEqual([
+			{ deliverAs: "aside" },
+			{ deliverAs: "aside" },
+			{ deliverAs: "aside" },
+			{ deliverAs: "aside" },
+		]);
 	});
 
 	test("stays inert for a skill without a state schema", async () => {
@@ -229,7 +255,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		const { omp, s } = await engaged();
 		await s.step("recording", patchStep({ goal: "x" }));
 		await s.step("recording", patchStep({ goal: "y" }));
-		expect(s.sends.map((sent) => sent.payload.customType)).toEqual([...engageAsideTypes, STATE_MESSAGE_TYPE, STATE_MESSAGE_TYPE]);
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual([...engageAsideTypes, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE]);
 
 		// The new session carries the rewound branch: invocation, head, goal:x.
 		const rewound = omp.session("s2", { branch: procedureBranch("procedure", {}, { goal: "x" }) });
@@ -241,7 +267,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		expect(rewound.sends).toEqual([]);
 
 		await rewound.step("recording", patchStep({ extra: 1 }));
-		expect(rewound.sends.at(-1)?.payload.details).toEqual({ state: { goal: "x", extra: 1 } });
+		expect(rewound.storedStates.at(-1)).toEqual({ goal: "x", extra: 1 });
 	});
 
 	test("tree navigation re-derives like a rewind", async () => {
@@ -252,7 +278,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		expect(s.notices).toEqual(engageNotices("procedure"));
 		expect(s.sends).toEqual([]);
 		await s.step("recording", patchStep({ extra: 1 }));
-		expect(s.sends.at(-1)?.payload.details).toEqual({ state: { goal: "x", extra: 1 } });
+		expect(s.storedStates.at(-1)).toEqual({ goal: "x", extra: 1 });
 	});
 
 	test("/resume of an engaged session re-derives its state and re-engages without resending the head", async () => {
@@ -265,7 +291,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		expect(target.notices).toEqual(engageNotices("procedure"));
 		expect(target.sends).toEqual([]);
 		await target.step("recording", patchStep({ extra: 1 }));
-		expect(target.sends.at(-1)?.payload.details).toEqual({ state: { goal: "x", extra: 1 } });
+		expect(target.storedStates.at(-1)).toEqual({ goal: "x", extra: 1 });
 	});
 
 	test("/new starts the next session inert", async () => {
@@ -288,7 +314,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		expect(s.notices).toEqual(engageNotices("procedure"));
 		expect(s.sends).toEqual([]);
 		await s.step("recording", patchStep({ extra: 1 }));
-		expect(s.sends.at(-1)?.payload.details).toEqual({ state: { goal: "x", extra: 1 } });
+		expect(s.storedStates.at(-1)).toEqual({ goal: "x", extra: 1 });
 	});
 
 	test("session_start stays inert without a usable procedure on the branch", async () => {
@@ -298,7 +324,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		expect(await empty.step("recording", patchStep({ goal: "x" }))).toBeUndefined();
 
 		const agent = fakeOmp([procedure]).session("s1", {
-			branch: [invocationEntry("procedure", "agent"), specEntry("procedure"), stateEntry({ goal: "x" })],
+			branch: [invocationEntry("procedure", "agent"), specEntry("procedure"), ...stateEntries({ goal: "x" })],
 		});
 		await agent.start();
 		expect(agent.notices).toEqual([]);
@@ -313,7 +339,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		expect(sub.notices).toEqual([]);
 
 		// Without the stored P there is no head to re-send after a compaction.
-		const specless = fakeOmp([procedure]).session("s1", { branch: [invocationEntry("procedure"), stateEntry({ goal: "x" })] });
+		const specless = fakeOmp([procedure]).session("s1", { branch: [invocationEntry("procedure"), ...stateEntries({ goal: "x" })] });
 		await specless.start();
 		expect(specless.notices).toEqual([]);
 	});
@@ -327,12 +353,23 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 
 		expect(s.notices).toEqual(engageNotices("smallcap"));
 		await s.step("recording", patchStep({ extra: 1 }));
-		expect(s.sends.at(-1)?.payload.details).toEqual({ state: { goal: "new", extra: 1 } });
+		expect(s.storedStates.at(-1)).toEqual({ goal: "new", extra: 1 });
 	});
 
 	test("an invocation with no state message after it stays inert, even when an earlier procedure left one", async () => {
 		const s = fakeOmp([procedure, smallProcedure]).session("s1", {
 			branch: [...procedureBranch("procedure", { goal: "old" }), ...procedureBranch("smallcap")],
+		});
+
+		await s.start();
+
+		expect(s.notices).toEqual([]);
+		expect(await s.step("recording", patchStep({ goal: "x" }))).toBeUndefined();
+	});
+
+	test("a branch whose head holds a state core but no scratch state stays inert", async () => {
+		const s = fakeOmp([procedure]).session("s1", {
+			branch: [invocationEntry("procedure"), specEntry("procedure"), coreStateEntry({ goal: "x" })],
 		});
 
 		await s.start();
@@ -479,7 +516,8 @@ describe("omp-skill-state first-step rules", () => {
 			RULES_MESSAGE_TYPE,
 			RULES_MESSAGE_TYPE,
 			PROCEDURE_SPEC_MESSAGE_TYPE,
-			STATE_MESSAGE_TYPE,
+			STATE_CORE_MESSAGE_TYPE,
+			STATE_SCRATCH_MESSAGE_TYPE,
 		]);
 	});
 
@@ -544,9 +582,6 @@ describe("omp-skill-state first-step rules", () => {
 });
 
 describe("omp-skill-state patch loop", () => {
-	// A state message send as the fake records it.
-	const stateSend = (state: ExecutionState, deliverAs: "aside" | "nextTurn") => ({ payload: stateMessage(state) as Record<string, unknown>, options: { deliverAs } });
-
 	// An engaged session: the head asides are pending until the first step
 	// boundary, which is where the recorded pi left every patch test too.
 	async function engaged(skill: Skill = procedure) {
@@ -556,21 +591,25 @@ describe("omp-skill-state patch loop", () => {
 		return { omp, s };
 	}
 
-	test("the renderer shows keys collapsed and pretty JSON expanded, never the raw one-liner", () => {
-		const renderer = fakeOmp([procedure]).renderers.get(STATE_MESSAGE_TYPE) as
-			| ((message: unknown, options: { expanded: boolean }, theme: unknown) => { getText(): string })
-			| undefined;
-		expect(renderer).toBeDefined();
+	test("the renderers show keys collapsed and pretty JSON expanded, never the raw one-liner", () => {
+		const omp = fakeOmp([procedure]);
 		const theme = { fg: (_color: string, text: string) => text };
-		const render = (expanded: boolean, state: ExecutionState) =>
-			renderer!({ role: "custom", customType: STATE_MESSAGE_TYPE, content: renderStateContent(state), display: true, details: { state }, timestamp: Date.now() }, { expanded }, theme).getText();
+		const render = (type: string, expanded: boolean, state: ExecutionState) => {
+			const renderer = omp.renderers.get(type) as
+				| ((message: unknown, options: { expanded: boolean }, theme: unknown) => { getText(): string })
+				| undefined;
+			if (renderer === undefined) throw new Error(`no renderer registered for ${type}`);
+			return renderer({ role: "custom", customType: type, content: renderStateContent(state), display: true, details: { state }, timestamp: Date.now() }, { expanded }, theme).getText();
+		};
 
-		const collapsed = render(false, { goal: "g" });
-		expect(collapsed).toContain("goal");
-		expect(collapsed).not.toContain('{"goal":"g"}');
+		for (const type of [STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE]) {
+			const collapsed = render(type, false, { goal: "g" });
+			expect(collapsed).toContain("goal");
+			expect(collapsed).not.toContain('{"goal":"g"}');
 
-		const expanded = render(true, { goal: "g" });
-		expect(expanded).toContain('"goal": "g"');
+			const expanded = render(type, true, { goal: "g" });
+			expect(expanded).toContain('"goal": "g"');
+		}
 	});
 
 	test("no state_update call is an empty patch: nothing sent, tool calls run", async () => {
@@ -582,13 +621,13 @@ describe("omp-skill-state patch loop", () => {
 		expect(s.blocked).toEqual([]);
 	});
 
-	test("a valid state_update call commits the patch and the aside lands at the step boundary", async () => {
+	test("a valid state_update call commits the patch and the core+scratch asides land at the step boundary", async () => {
 		const { s } = await engaged();
 
 		await s.step("recording", patchStep({ goal: "x" }));
 
-		expect(s.sends).toHaveLength(4);
-		expect(s.sends[3]).toEqual(stateSend({ goal: "x" }, "aside"));
+		expect(s.sends).toHaveLength(6);
+		expect(s.sends.slice(4)).toEqual(stateSends({ goal: "x" }, "aside"));
 		expect(s.blocked).toEqual([]);
 		// Stored at the step boundary, before the next provider call.
 		expect(s.storedStates).toEqual([{}, { goal: "x" }]);
@@ -600,8 +639,10 @@ describe("omp-skill-state patch loop", () => {
 		await s.step("recording", patchStep({ goal: "x" }));
 		await s.step("recording", patchStep({ extra: 1 }));
 
-		expect(s.sends).toHaveLength(5);
-		expect(s.sends[4]!.payload.details).toEqual({ state: { goal: "x", extra: 1 } });
+		expect(s.sends).toHaveLength(8);
+		// goal is declared, so it rides in the core; the undeclared extra is scratch.
+		expect(s.sends[6]!.payload).toEqual(coreMessage({ goal: "x" }) as Record<string, unknown>);
+		expect(s.sends[7]!.payload).toEqual(scratchMessage({ extra: 1 }) as Record<string, unknown>);
 		expect(s.storedStates.at(-1)).toEqual({ goal: "x", extra: 1 });
 	});
 
@@ -632,7 +673,7 @@ describe("omp-skill-state patch loop", () => {
 
 		// Only the failed step's calls were blocked; the retry's call ran.
 		expect(s.blocked).toHaveLength(1);
-		expect(s.sends).toHaveLength(4); // engage asides plus the recovered state message
+		expect(s.sends).toHaveLength(6); // engage asides plus the recovered core+scratch pair
 
 		await s.switchTo(omp.session("s2"), "new");
 		expect(s.notices).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/new")]);
@@ -692,7 +733,7 @@ describe("omp-skill-state patch loop", () => {
 		expect(s.notices).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/new")]);
 	});
 
-	test("agent_end settles the live state as a next-turn message once the session is idle", async () => {
+	test("agent_end settles the live state as next-turn core and scratch once the session is idle", async () => {
 		const { s } = await engaged();
 		jest.useFakeTimers();
 		try {
@@ -700,21 +741,21 @@ describe("omp-skill-state patch loop", () => {
 			// The run ends with a tool-free reply. Nothing is sent yet, because
 			// the harness would only hold the message until the next prompt.
 			await s.step("done", { tools: [] });
-			expect(s.sends).toHaveLength(4);
+			expect(s.sends).toHaveLength(6);
 			jest.advanceTimersByTime(100);
-			expect(s.sends).toHaveLength(4);
+			expect(s.sends).toHaveLength(6);
 
 			s.setIdle(true);
 			jest.advanceTimersByTime(20);
-			expect(s.sends).toHaveLength(5);
-			expect(s.sends[4]).toEqual(stateSend({ goal: "x" }, "nextTurn"));
+			expect(s.sends).toHaveLength(8);
+			expect(s.sends.slice(6)).toEqual(stateSends({ goal: "x" }, "nextTurn"));
 			// Idle delivery lands on the branch at once, without a turn.
 			expect(s.storedStates.at(-1)).toEqual({ goal: "x" });
 
 			// A later run end settles the live state again: agent_end always
 			// snapshots procedure.state.
 			await s.step("again", { tools: [] });
-			expect(s.sends[5]).toEqual(stateSend({ goal: "x" }, "nextTurn"));
+			expect(s.sends.slice(8)).toEqual(stateSends({ goal: "x" }, "nextTurn"));
 		} finally {
 			jest.useRealTimers();
 		}
@@ -727,14 +768,14 @@ describe("omp-skill-state patch loop", () => {
 			await s.step("done", { tools: [] });
 			// A queued prompt ran another step before the session went idle.
 			await s.step("recording", patchStep({ goal: "y" }));
-			expect(s.sends).toHaveLength(4);
-			expect(s.sends[3]!.payload.details).toEqual({ state: { goal: "y" } });
+			expect(s.sends).toHaveLength(6);
+			expect(s.sends[4]!.payload).toEqual(coreMessage({ goal: "y" }) as Record<string, unknown>);
 
 			s.setIdle(true);
 			jest.advanceTimersByTime(5000);
 			// The poll's snapshot predates the patch that moved the state, so
-			// the stale copy is dropped and only the patch's aside went out.
-			expect(s.sends).toHaveLength(4);
+			// the stale copy is dropped and only the patch's asides went out.
+			expect(s.sends).toHaveLength(6);
 		} finally {
 			jest.useRealTimers();
 		}
@@ -747,10 +788,10 @@ describe("omp-skill-state patch loop", () => {
 			await s.step("recording", patchStep({ goal: "x" }));
 			await s.step("done", { tools: [] });
 			jest.advanceTimersByTime(1900);
-			expect(s.sends).toHaveLength(4);
+			expect(s.sends).toHaveLength(6);
 			jest.advanceTimersByTime(200);
-			expect(s.sends).toHaveLength(5);
-			expect(s.sends[4]!.options).toEqual({ deliverAs: "nextTurn" });
+			expect(s.sends).toHaveLength(8);
+			expect(s.sends.slice(6).map((sent) => sent.options)).toEqual([{ deliverAs: "nextTurn" }, { deliverAs: "nextTurn" }]);
 			// Sent while busy: held to the next step boundary, not on the branch yet.
 			expect(s.storedStates).toEqual([{}, { goal: "x" }]);
 		} finally {
@@ -807,7 +848,7 @@ describe("omp-skill-state state_update registration", () => {
 		expect(OPERATING_RULES).toContain("state_update");
 	});
 
-	test("a direct execute applies a valid patch: commits and sends the aside", async () => {
+	test("a direct execute applies a valid patch: commits and sends the core+scratch asides", async () => {
 		const omp = fakeOmp([procedure]);
 		const s = omp.session("s1");
 		await s.invoke("procedure");
@@ -816,9 +857,9 @@ describe("omp-skill-state state_update registration", () => {
 		const result = await def.execute("t1", { patch: { goal: "x" } }, undefined, undefined, s.ctx());
 
 		expect(result.isError).toBeUndefined();
-		// The aside flushed at the next step boundary.
+		// The asides flushed at the next step boundary.
 		await s.step("flush");
-		expect(s.sends[3]).toEqual({ payload: stateMessage({ goal: "x" }) as Record<string, unknown>, options: { deliverAs: "aside" } });
+		expect(s.sends.slice(4)).toEqual(stateSends({ goal: "x" }, "aside"));
 		expect(s.storedStates).toEqual([{}, { goal: "x" }]);
 	});
 
@@ -973,14 +1014,14 @@ describe("omp-skill-state idle disengage", () => {
 		const { s } = await projecting(idleProcedure);
 
 		await s.step("recording", patchStep({ goal: "x" }));
-		expect(s.sends).toHaveLength(4);
+		expect(s.sends).toHaveLength(6);
 
 		await s.step("recording", patchStep({ goal: "x" }));
-		expect(s.sends).toHaveLength(4);
+		expect(s.sends).toHaveLength(6);
 		expect(s.notices).toEqual(engageNotices("idleproc"));
 
 		await s.step("recording", patchStep({ goal: "x" }));
-		expect(s.sends).toHaveLength(4);
+		expect(s.sends).toHaveLength(6);
 		expect(s.storedStates).toEqual([{}, { goal: "x" }]);
 		expect(s.notices).toEqual([...engageNotices("idleproc"), ...disengageNotices("idleproc", "idle for 2 steps")]);
 	});
@@ -1077,7 +1118,15 @@ describe("omp-skill-state state cap", () => {
 
 		expect(s.blocked).toEqual([]);
 		expect(s.notices).toEqual(engageNotices("capproc"));
-		expect(s.sends.map((sent) => sent.payload.customType)).toEqual([...engageAsideTypes, STATE_MESSAGE_TYPE, STATE_MESSAGE_TYPE, STATE_MESSAGE_TYPE]);
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual([
+			...engageAsideTypes,
+			STATE_CORE_MESSAGE_TYPE,
+			STATE_SCRATCH_MESSAGE_TYPE,
+			STATE_CORE_MESSAGE_TYPE,
+			STATE_SCRATCH_MESSAGE_TYPE,
+			STATE_CORE_MESSAGE_TYPE,
+			STATE_SCRATCH_MESSAGE_TYPE,
+		]);
 		expect(s.storedStates).toEqual([{}, { blob: "x".repeat(400) }, {}, { blob: "x".repeat(400) }]);
 	});
 
@@ -1125,10 +1174,10 @@ describe("omp-skill-state compaction ownership", () => {
 		expect(compaction?.summary).toContain('Execution state of procedure "procedure"');
 		expect(compaction?.summary).toContain(JSON.stringify({ goal: "g" }, null, 2));
 		expect(compaction?.shortSummary).toContain('"procedure"');
-		expect(compaction?.preserveData).toEqual({ state: { goal: "g" } });
+		expect(compaction?.preserveData).toEqual({ core: { goal: "g" }, scratch: {} });
 		// No summarizer step: session_before_compact itself sends nothing; the
-		// three sends after the patch loop's are session_compact's head re-send.
-		expect(s.sends.map((sent) => sent.payload.customType)).toEqual([...engageAsideTypes, STATE_MESSAGE_TYPE, ...engageAsideTypes]);
+		// four sends after the patch loop's are session_compact's head re-send.
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual([...engageAsideTypes, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, ...engageAsideTypes]);
 	});
 
 	test("a branch with no assistant message yet falls back to the harness's cut", async () => {
@@ -1152,9 +1201,9 @@ describe("omp-skill-state compaction ownership", () => {
 		await s.step("recording", patchStep({ step: 2 }));
 		const second = await s.compact({ firstKeptEntryId: "e9", tokensBefore: 5000, previousPreserveData: first?.compaction?.preserveData });
 
-		expect(first?.compaction?.preserveData).toEqual({ state: { goal: "g" } });
+		expect(first?.compaction?.preserveData).toEqual({ core: { goal: "g" }, scratch: {} });
 		expect(second?.compaction?.tokensBefore).toBe(5000);
-		expect(second?.compaction?.preserveData).toEqual({ state: { goal: "g", step: 2 } });
+		expect(second?.compaction?.preserveData).toEqual({ core: { goal: "g" }, scratch: { step: 2 } });
 	});
 
 	test("after a compaction the head is sent again, byte-equal, so the projection survives the cut", async () => {
@@ -1165,27 +1214,29 @@ describe("omp-skill-state compaction ownership", () => {
 
 		await s.compact();
 
-		expect(s.sends.map((sent) => sent.payload.customType)).toEqual([...engageAsideTypes, STATE_MESSAGE_TYPE, ...engageAsideTypes]);
-		expect(s.sends.slice(4).map((sent) => sent.payload)).toEqual([s.sends[0]!.payload, s.sends[1]!.payload, s.sends[3]!.payload]);
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual([...engageAsideTypes, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, ...engageAsideTypes]);
+		expect(s.sends.slice(6).map((sent) => sent.payload)).toEqual([s.sends[0]!.payload, s.sends[1]!.payload, s.sends[4]!.payload, s.sends[5]!.payload]);
 		// Mid-run: asides, so the copies land before the next provider call.
-		expect(s.sends.slice(4).map((sent) => sent.options)).toEqual([{ deliverAs: "aside" }, { deliverAs: "aside" }, { deliverAs: "aside" }]);
+		expect(s.sends.slice(6).map((sent) => sent.options)).toEqual([{ deliverAs: "aside" }, { deliverAs: "aside" }, { deliverAs: "aside" }, { deliverAs: "aside" }]);
 
 		// The cut kept the pre-compaction head, so the step right after the
 		// compaction still projects, pinning the step before as its observation.
 		const projected = await s.step("continue");
-		expect(projected?.slice(0, 3).map((message) => (message as { customType?: string }).customType)).toEqual(engageAsideTypes);
+		expect(projected?.slice(0, 4).map((message) => (message as { customType?: string }).customType)).toEqual(engageAsideTypes);
 		expect(projected?.[0] as Record<string, unknown>).toMatchObject(s.sends[0]!.payload);
 		expect(projected?.[1] as Record<string, unknown>).toMatchObject(s.sends[1]!.payload);
-		expect(projected?.[2] as Record<string, unknown>).toMatchObject(s.sends[3]!.payload);
-		expect(projected?.slice(3)).toHaveLength(2);
+		expect(projected?.[2] as Record<string, unknown>).toMatchObject(s.sends[4]!.payload);
+		expect(projected?.[3] as Record<string, unknown>).toMatchObject(s.sends[5]!.payload);
+		expect(projected?.slice(4)).toHaveLength(2);
 
 		// The copies flushed at that step boundary, so the next provider call
 		// carries them: the head is complete again after the cut.
 		const after = await s.step("done", { tools: [] });
-		expect(after?.[0] as Record<string, unknown>).toMatchObject(s.sends[4]!.payload);
-		expect(after?.[1] as Record<string, unknown>).toMatchObject(s.sends[5]!.payload);
-		expect(after?.[2] as Record<string, unknown>).toMatchObject(s.sends[6]!.payload);
-		expect(after?.slice(3)).toHaveLength(2);
+		expect(after?.[0] as Record<string, unknown>).toMatchObject(s.sends[6]!.payload);
+		expect(after?.[1] as Record<string, unknown>).toMatchObject(s.sends[7]!.payload);
+		expect(after?.[2] as Record<string, unknown>).toMatchObject(s.sends[8]!.payload);
+		expect(after?.[3] as Record<string, unknown>).toMatchObject(s.sends[9]!.payload);
+		expect(after?.slice(4)).toHaveLength(2);
 	});
 
 	test("a compaction while idle re-sends the head as next-turn messages, which wake no turn", async () => {
@@ -1196,8 +1247,8 @@ describe("omp-skill-state compaction ownership", () => {
 
 		await s.compact();
 
-		expect(s.sends).toHaveLength(6);
-		expect(s.sends.slice(3).map((sent) => sent.options)).toEqual([{ deliverAs: "nextTurn" }, { deliverAs: "nextTurn" }, { deliverAs: "nextTurn" }]);
+		expect(s.sends).toHaveLength(8);
+		expect(s.sends.slice(4).map((sent) => sent.options)).toEqual([{ deliverAs: "nextTurn" }, { deliverAs: "nextTurn" }, { deliverAs: "nextTurn" }, { deliverAs: "nextTurn" }]);
 	});
 
 	test("a re-derived engagement re-heads with the P and state stored on the branch", async () => {
@@ -1210,7 +1261,8 @@ describe("omp-skill-state compaction ownership", () => {
 		expect(s.sends.map((sent) => sent.payload)).toEqual([
 			{ customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false },
 			{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: "Running skill procedure", display: false, details: { name: "procedure" } },
-			{ customType: STATE_MESSAGE_TYPE, content: renderStateContent({ goal: "x" }), display: true, details: { state: { goal: "x" } } },
+			{ customType: STATE_CORE_MESSAGE_TYPE, content: renderStateContent({ goal: "x" }), display: true, details: { state: { goal: "x" } } },
+			{ customType: STATE_SCRATCH_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {} } },
 		]);
 	});
 
@@ -1255,7 +1307,7 @@ describe("omp-skill-state projection (context seam)", () => {
 		const prompt = await s.step("done", { tools: [] });
 		const input = s.lastContextMessages!;
 
-		expect(prompt).toHaveLength(5);
+		expect(prompt).toHaveLength(6);
 		// The head and the pinned call are the stored objects themselves: byte
 		// equality with history is what anchors the provider cache prefix. The
 		// injected first-step rules copy sits at input[1], so the head asides
@@ -1263,9 +1315,15 @@ describe("omp-skill-state projection (context seam)", () => {
 		expect(prompt?.[0]).toBe(input[4]);
 		expect(prompt?.[1]).toBe(input[5]);
 		expect(prompt?.[2]).toBe(input[6]);
-		expect(prompt?.[3]).toBe(input[7]);
-		const capped = prompt?.[4] as { content: Array<{ type: string; text?: string }>; toolCallId: string };
-		expect(capped.toolCallId).toBe((input[8] as { toolCallId: string }).toolCallId);
+		// The scratch rides as the per-call copy: not the stored reference,
+		// but the same model-visible content.
+		const projectedScratch = prompt?.[3];
+		const storedScratch = input[7];
+		if (!isCustomMessage(projectedScratch) || !isCustomMessage(storedScratch)) throw new Error("scratch head message is not a custom message");
+		expect(projectedScratch).not.toBe(storedScratch);
+		expect(projectedScratch.content).toBe(storedScratch.content);
+		const capped = prompt?.[5] as { content: Array<{ type: string; text?: string }>; toolCallId: string };
+		expect(capped.toolCallId).toBe((input[9] as { toolCallId: string }).toolCallId);
 		const total = capped.content.reduce(
 			(sum, block) => sum + (block.type === "text" ? Buffer.byteLength(block.text ?? "") : 0),
 			0,
@@ -1282,9 +1340,9 @@ describe("omp-skill-state projection (context seam)", () => {
 
 		const prompt = await s.userTurn("go on");
 
-		expect(prompt).toHaveLength(4);
+		expect(prompt).toHaveLength(5);
 		expect(prompt?.[0]).toBe(s.lastContextMessages?.[4]);
-		expect(prompt?.[3]).toBe(s.lastContextMessages?.at(-1));
+		expect(prompt?.[4]).toBe(s.lastContextMessages?.at(-1));
 	});
 
 	test("the projection never mutates the stored transcript, even when it truncates", async () => {
@@ -1300,7 +1358,7 @@ describe("omp-skill-state projection (context seam)", () => {
 		const prompt = await s.step("done", { tools: [] });
 
 		expect(message.content).toEqual(snapshot);
-		expect(prompt?.[4]).not.toBe(message);
+		expect(prompt?.[5]).not.toBe(message);
 	});
 
 	test("engaged: the bundled schema's observation window pins three pairs", async () => {
@@ -1316,11 +1374,12 @@ describe("omp-skill-state projection (context seam)", () => {
 
 		const prompt = await s.step("done", { tools: [] });
 
-		expect(prompt).toHaveLength(9);
+		expect(prompt).toHaveLength(10);
 		// One id per message: the assistant's toolCall id, or the result's
 		// message-level toolCallId. The session counter feeds both call ids and
-		// entry ids, so the three pinned pairs are call-9/12/15 and the dropped
-		// warm-up pair is call-3.
+		// entry ids, and the four-message head consumes one entry id more than
+		// the single state message did, so the three pinned pairs are
+		// call-10/13/16 and the dropped warm-up pair is call-4.
 		const ids = (prompt ?? []).map((message) => {
 			const { toolCallId, content } = message as { toolCallId?: unknown; content?: unknown };
 			if (typeof toolCallId === "string") return toolCallId;
@@ -1330,6 +1389,6 @@ describe("omp-skill-state projection (context seam)", () => {
 			}
 			return "";
 		});
-		expect(ids.filter(Boolean)).toEqual(["call-9", "call-9", "call-12", "call-12", "call-15", "call-15"]);
+		expect(ids.filter(Boolean)).toEqual(["call-10", "call-10", "call-13", "call-13", "call-16", "call-16"]);
 	});
 });

@@ -140,6 +140,35 @@ export function applyPatch(t: ExecutionState, patch: unknown, schema: StateSchem
 	return { ok: true, state: mergeState(t, patch as ExecutionState) };
 }
 
+// The schema's x-state.volatile list: the declared keys that change on most
+// steps and ride in the scratch state. Missing or malformed means no volatile
+// keys, so every declared key stays in the core.
+export function volatileKeys(schema: StateSchema): string[] {
+	const xState = schema["x-state"];
+	if (!isPlainObject(xState) || !Array.isArray(xState.volatile)) return [];
+	const volatile = xState.volatile;
+	return volatile.every((key) => typeof key === "string") ? (volatile as string[]) : [];
+}
+
+// Splits the execution state into the two stored partitions (ADR 0003): a
+// declared key outside the volatile list is state core; a volatile-listed key
+// or an undeclared key is scratch state, so a new key can never poison the
+// core's cached bytes. Pure, and the partitions are disjoint by construction.
+export function splitState(
+	state: ExecutionState,
+	schema: StateSchema,
+	volatile: readonly string[],
+): { core: ExecutionState; scratch: ExecutionState } {
+	const declared = Object.keys(schema.properties ?? {});
+	const core: ExecutionState = {};
+	const scratch: ExecutionState = {};
+	for (const [key, value] of Object.entries(state)) {
+		if (declared.includes(key) && !volatile.includes(key)) core[key] = value;
+		else scratch[key] = value;
+	}
+	return { core, scratch };
+}
+
 export function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }

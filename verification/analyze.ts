@@ -11,7 +11,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { CompactionEntry, ContextEvent, RawFileEntry } from "@oh-my-pi/pi-coding-agent";
-import { PROCEDURE_SPEC_MESSAGE_TYPE as SPEC, RULES_MESSAGE_TYPE as RULES, STATE_MESSAGE_TYPE as STATE } from "../messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE as SPEC, RULES_MESSAGE_TYPE as RULES, STATE_CORE_MESSAGE_TYPE as CORE, STATE_SCRATCH_MESSAGE_TYPE as SCRATCH } from "../messages";
 
 // The published root entry exports ContextEvent but not the message union itself.
 type AssistantMessage = Extract<ContextEvent["messages"][number], { role: "assistant" }>;
@@ -74,7 +74,10 @@ function analyze(file: string, titles?: { dir: string; n: number }): void {
 	let headRules = 0;
 	let headSpec = 0;
 	let shaken = 0;
-	let lastState: Record<string, unknown> = {};
+	// The last stored partitions on the branch; the merged pair is the live
+	// execution state and what the final-state section prints.
+	let lastCore: Record<string, unknown> = {};
+	let lastScratch: Record<string, unknown> = {};
 	// A state head message exists on the branch since the last reset or
 	// invocation, so the next provider call can be projected.
 	let headPresent = false;
@@ -102,16 +105,20 @@ function analyze(file: string, titles?: { dir: string; n: number }): void {
 				} else if (entry.customType === SPEC) {
 					headSpec++;
 					console.log(`[${entryIndex}] head procedure-spec (${textOf(entry.content).length} chars)`);
-				} else if (entry.customType === STATE) {
+				} else if (entry.customType === CORE || entry.customType === SCRATCH) {
 					stateMessages++;
 					headPresent = true;
 					stepsSinceState = 0;
 					if (steps.length > 0) steps[steps.length - 1]!.changed = true;
 					const state: unknown = detailsRecord.state;
-					lastState = typeof state === "object" && state !== null && !Array.isArray(state) ? (state as Record<string, unknown>) : {};
+					const partition = typeof state === "object" && state !== null && !Array.isArray(state) ? (state as Record<string, unknown>) : {};
+					if (entry.customType === CORE) lastCore = partition;
+					else lastScratch = partition;
+					const lastState = { ...lastCore, ...lastScratch };
+					const label = entry.customType === CORE ? "state core" : "scratch state";
 					const findings = Array.isArray(lastState.findings) ? lastState.findings.length : "-";
 					const open = Array.isArray(lastState.open_questions) ? lastState.open_questions.length : "-";
-					console.log(`[${entryIndex}] state keys=${Object.keys(lastState).length} findings=${findings} open=${open}`);
+					console.log(`[${entryIndex}] ${label} keys=${Object.keys(partition).length} findings=${findings} open=${open}`);
 				} else {
 					console.log(`[${entryIndex}] custom_message ${entry.customType}`);
 				}
@@ -131,8 +138,8 @@ function analyze(file: string, titles?: { dir: string; n: number }): void {
 			case "compaction": {
 				compactions.push(entry);
 				const preserve: unknown = entry.preserveData;
-				const preserveState = typeof preserve === "object" && preserve !== null && "state" in preserve;
-				console.log(`[${entryIndex}] COMPACTION tokensBefore=${entry.tokensBefore} tokensAfter=${entry.tokensAfter ?? "-"} method=${entry.method ?? "-"} fromExtension=${entry.fromExtension ?? "-"} firstKept=${entry.firstKeptEntryId} summary="${(entry.summary.split("\n")[0] ?? "").slice(0, 100)}" preserveState=${preserveState ? "yes" : "no"}`);
+				const preservePartitions = typeof preserve === "object" && preserve !== null && "core" in preserve && "scratch" in preserve;
+				console.log(`[${entryIndex}] COMPACTION tokensBefore=${entry.tokensBefore} tokensAfter=${entry.tokensAfter ?? "-"} method=${entry.method ?? "-"} fromExtension=${entry.fromExtension ?? "-"} firstKept=${entry.firstKeptEntryId} summary="${(entry.summary.split("\n")[0] ?? "").slice(0, 100)}" preservePartitions=${preservePartitions ? "yes" : "no"}`);
 				break;
 			}
 			case "reset_boundary":
@@ -179,7 +186,7 @@ function analyze(file: string, titles?: { dir: string; n: number }): void {
 	console.log(`compactions=${compactions.length} fromExtension=${compactions.filter((entry) => entry.fromExtension === true).length} stateSummaries=${stateSummaries}`);
 
 	console.log("\n## final state");
-	console.log(JSON.stringify(lastState, null, 2));
+	console.log(JSON.stringify({ ...lastCore, ...lastScratch }, null, 2));
 
 	const artifacts = file.replace(/\.jsonl$/, "");
 	console.log("\n## subagents");
@@ -204,7 +211,8 @@ function analyze(file: string, titles?: { dir: string; n: number }): void {
 			.filter((name: string) => name.endsWith(".md") && statSync(join(titles.dir, name)).isFile())
 			.sort((a: string, b: string) => a.toLowerCase().localeCompare(b.toLowerCase(), "en"))
 			.slice(0, titles.n);
-		const findings = Array.isArray(lastState.findings) ? lastState.findings.map(String) : [];
+		const merged: Record<string, unknown> = { ...lastCore, ...lastScratch };
+		const findings = Array.isArray(merged.findings) ? merged.findings.map(String) : [];
 		let matched = 0;
 		for (const name of files) {
 			const h1 = readFileSync(join(titles.dir, name), "utf8")

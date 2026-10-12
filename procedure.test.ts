@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
-import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, consolidationNudgeMessage, stateMessage } from "./messages";
+import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, scratchMessage } from "./messages";
 import { compactionFor, headMessages, newProcedure, noteProjected, nudgePending, pendingNudges, recordReply } from "./procedure";
 import type { Procedure, StepOutcome } from "./procedure";
 import { DEFAULT_PARAMS } from "./state";
@@ -276,10 +276,10 @@ describe("pendingNudges", () => {
 	});
 
 	test("re-arms when a commit lands the state back under the cap, and fires once more", () => {
-		const p = projected({ stateBytes: 100 }, { blob: "x".repeat(200) });
+		const p = projected({ stateBytes: 200 }, { blob: "x".repeat(200) });
 		expect(pendingNudges(p)).toHaveLength(1);
 
-		p.state = { blob: null };
+		p.state = {};
 		expect(pendingNudges(p)).toEqual([]);
 		expect(p.capNudged).toBe(false);
 
@@ -324,45 +324,81 @@ describe("pendingNudges", () => {
 		expect(pendingNudges(p)).toEqual([]);
 		expect(p.capNudged).toBe(false);
 	});
+
+	test("the cap measures both state messages: core and scratch rendered content summed", () => {
+		// Each partition alone renders under the 250-byte cap; only the sum is over it.
+		const p = projected({ stateBytes: 250 }, { goal: "x".repeat(100), blob: "y".repeat(100) });
+
+		expect(pendingNudges(p)).toEqual([consolidationNudgeMessage()]);
+
+		p.state = { goal: "x".repeat(100) };
+		expect(pendingNudges(p)).toEqual([]);
+	});
 });
 
 describe("headMessages", () => {
-	test("headMessages is the rules, P and the state, in order and byte-equal across calls", () => {
+	test("headMessages is the rules, P, state core and scratch state, in order", () => {
+		const p = procedure({}, { goal: "x", plan: ["a"] });
+
+		expect(headMessages(p)).toEqual([
+			{ customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false },
+			{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: "Running skill recon", display: false, details: { name: "recon" } },
+			coreMessage({ goal: "x" }),
+			scratchMessage({ plan: ["a"] }),
+		]);
+	});
+
+	test("an empty core still renders as a stored empty-object message", () => {
+		const p = procedure({}, { plan: ["a"] });
+
+		expect(headMessages(p)[2]).toEqual(coreMessage({}));
+		expect(headMessages(p)[3]).toEqual(scratchMessage({ plan: ["a"] }));
+	});
+
+	test("the head is byte-equal across calls for the same state", () => {
 		const p = procedure({}, { goal: "x" });
 
 		const head = headMessages(p);
 
-		expect(head).toEqual([
-			{ customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false },
-			{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: "Running skill recon", display: false, details: { name: "recon" } },
-			stateMessage({ goal: "x" }),
-		]);
 		expect(headMessages(p)).toEqual(head);
 	});
 
-	test("the head follows an accepted patch", () => {
-		const p = procedure();
-		commit(p, recordReply(p, step({ goal: "x" })));
+	test("a scratch-only patch leaves the core payload byte-equal and rewrites the scratch", () => {
+		const p = procedure({}, { goal: "x" });
+		const coreBefore = headMessages(p)[2];
 
-		expect(headMessages(p)[2]).toEqual(stateMessage({ goal: "x" }));
+		commit(p, recordReply(p, step({ plan: ["next"] })));
+
+		expect(headMessages(p)[2]).toEqual(coreBefore);
+		expect(headMessages(p)[3]).toEqual(scratchMessage({ plan: ["next"] }));
+	});
+
+	test("a core-key patch changes the core payload", () => {
+		const p = procedure({}, { goal: "x" });
+		const coreBefore = headMessages(p)[2];
+
+		commit(p, recordReply(p, step({ goal: "y" })));
+
+		expect(headMessages(p)[2]).not.toEqual(coreBefore);
+		expect(headMessages(p)[2]).toEqual(coreMessage({ goal: "y" }));
 	});
 });
 
 describe("compactionFor", () => {
 	const preparation = { firstKeptEntryId: "h1", tokensBefore: 4321 };
 
-	test("summarises to the state, cuts at the current step and preserves the raw state", () => {
-		const p = procedure({}, { goal: "g" });
+	test("summarises to the full state, cuts at the current step and preserves both partitions", () => {
+		const p = procedure({}, { goal: "g", plan: ["a"] });
 
 		const result = compactionFor(p, preparation, [assistantEntry("a1"), assistantEntry("a2")]);
 
 		expect(result).toEqual({
 			compaction: {
-				summary: `Execution state of procedure "recon" (skill-state runtime):\n\n${JSON.stringify({ goal: "g" }, null, 2)}`,
+				summary: `Execution state of procedure "recon" (skill-state runtime):\n\n${JSON.stringify({ goal: "g", plan: ["a"] }, null, 2)}`,
 				shortSummary: 'skill-state: procedure "recon" execution state',
 				firstKeptEntryId: "a2",
 				tokensBefore: 4321,
-				preserveData: { state: { goal: "g" } },
+				preserveData: { core: { goal: "g" }, scratch: { plan: ["a"] } },
 			},
 		});
 	});
@@ -371,10 +407,10 @@ describe("compactionFor", () => {
 		expect(compactionFor(procedure(), preparation, []).compaction?.firstKeptEntryId).toBe("h1");
 	});
 
-	test("a later compaction carries the live state", () => {
+	test("a later compaction carries the live partitions", () => {
 		const p = procedure({}, { goal: "g" });
 		commit(p, recordReply(p, step({ step: 2 })));
 
-		expect(compactionFor(p, preparation, []).compaction?.preserveData).toEqual({ state: { goal: "g", step: 2 } });
+		expect(compactionFor(p, preparation, []).compaction?.preserveData).toEqual({ core: { goal: "g" }, scratch: { step: 2 } });
 	});
 });

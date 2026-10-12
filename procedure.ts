@@ -1,6 +1,7 @@
 import type { CustomMessagePayload, SessionBeforeCompactEvent, SessionBeforeCompactResult } from "@oh-my-pi/pi-coding-agent";
 import { currentStepCut } from "./branch";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, renderStateContent, rulesMessage, stateMessage } from "./messages";
+import type { AgentMessage } from "./projection";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, consolidationNudgeMessage, nudgeMessage, renderStateContent, rulesMessage, stateMessage } from "./messages";
 import { applyPatch } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
 
@@ -19,6 +20,10 @@ export interface Procedure {
 	pendingError?: string;
 	invalidPatches: number;
 	idle: number;
+	// Whether the consolidation nudge already fired in the current over-cap
+	// episode. pendingNudges latches it when it hands the nudge out; a commit
+	// that lands the state back under the cap re-arms it there.
+	capNudged: boolean;
 	// Whether the latest provider call carried the stored head. A step without
 	// the stored head does not count as idle. The first step runs before the
 	// engage asides land but has seen the rules through the before_agent_start
@@ -30,7 +35,7 @@ export interface Procedure {
 // Every procedure starts with fresh counters, from a new invocation and from a
 // re-derive alike.
 export function newProcedure(name: string, spec: string, schema: StateSchema, params: StateParams, state: ExecutionState): Procedure {
-	return { name, spec, schema, params, state, invalidPatches: 0, idle: 0, projected: false };
+	return { name, spec, schema, params, state, invalidPatches: 0, idle: 0, capNudged: false, projected: false };
 }
 
 // What one reply did to the procedure. The factory acts on it: a stored patch
@@ -96,6 +101,32 @@ export function noteProjected(procedure: Procedure, projected: boolean): void {
 // nudging on every single step, where no quiet step could ever precede the cutoff.
 export function nudgePending(procedure: Procedure): boolean {
 	return procedure.projected && procedure.idle > 0 && procedure.idle === procedure.params.idleSteps - 1;
+}
+
+// Over the soft state cap, the consolidation ask rides once per episode:
+// capNudged latches when the nudge is handed out and re-arms when the
+// committed state measures back under the cap. The cap never blocks, never
+// ends the procedure: this query only decides what the next prompt carries.
+function overCap(procedure: Procedure): boolean {
+	return procedure.params.stateBytes > 0
+		&& Buffer.byteLength(renderStateContent(procedure.state)) > procedure.params.stateBytes;
+}
+
+// The turn-scoped nudges the next provider call should carry, in delivery
+// order: the consolidation ask first, the idle cutoff last. Only for a call
+// whose prompt carries the stored head — same precondition as nudgePending.
+export function pendingNudges(procedure: Procedure): AgentMessage[] {
+	const nudges: AgentMessage[] = [];
+	if (procedure.projected && overCap(procedure)) {
+		if (!procedure.capNudged) {
+			procedure.capNudged = true;
+			nudges.push(consolidationNudgeMessage());
+		}
+	} else {
+		procedure.capNudged = false;
+	}
+	if (nudgePending(procedure)) nudges.push(nudgeMessage(procedure.idle));
+	return nudges;
 }
 
 // The head: the operating rules, P and the current state, one message each so

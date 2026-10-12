@@ -21,11 +21,12 @@ export interface StateSchema extends JsonSchema {
 export interface StateParams {
 	observationBytes: number;
 	observationWindow: number;
+	stateBytes: number;
 	idleSteps: number;
 	retries: number;
 }
 
-export const DEFAULT_PARAMS: StateParams = { observationBytes: 32768, observationWindow: 1, idleSteps: 5, retries: 3 };
+export const DEFAULT_PARAMS: StateParams = { observationBytes: 32768, observationWindow: 1, stateBytes: 0, idleSteps: 5, retries: 3 };
 
 export type SchemaLoad =
 	| { ok: true; schema: StateSchema; params: StateParams }
@@ -58,6 +59,8 @@ function readParams(raw: unknown): StateParams {
 		observationBytes: pick(raw.observationBytes, DEFAULT_PARAMS.observationBytes),
 		// A window of zero or fewer pairs would drop even the newest observation, so it clamps to one.
 		observationWindow: Math.max(1, pick(raw.observationWindow, DEFAULT_PARAMS.observationWindow)),
+		// A cap of zero or less disables the nudge: the cap is opt-in per skill.
+		stateBytes: Math.max(0, pick(raw.stateBytes, DEFAULT_PARAMS.stateBytes)),
 		idleSteps: pick(raw.idleSteps, DEFAULT_PARAMS.idleSteps),
 		retries: pick(raw.retries, DEFAULT_PARAMS.retries),
 	};

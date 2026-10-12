@@ -18,7 +18,8 @@ const patchStep = (patch: unknown, extraTools: string[] = []) => ({
 	arguments: [{ patch }, ...extraTools.map(() => ({}))],
 });
 
-// The developer messages a returned prompt carries; the idle nudge is the only one.
+// The developer messages a returned prompt carries; the per-call nudges are
+// the consolidation ask and the idle warning.
 function nudgeIn(prompt: unknown[] | undefined): { role: unknown; content: unknown }[] {
 	const nudges: { role: unknown; content: unknown }[] = [];
 	for (const message of prompt ?? []) {
@@ -47,6 +48,7 @@ let smallProcedure: Skill;
 let windowProcedure: Skill;
 let idleProcedure: Skill;
 let warnProcedure: Skill;
+let capProcedure: Skill;
 
 beforeAll(async () => {
 	root = await mkdtemp(path.join(tmpdir(), "omp-skill-state-"));
@@ -77,6 +79,11 @@ beforeAll(async () => {
 		root,
 		"warnproc",
 		JSON.stringify({ type: "object", properties: { goal: { type: "string" } }, "x-state": { idleSteps: 3 } }),
+	);
+	capProcedure = await makeSkill(
+		root,
+		"capproc",
+		JSON.stringify({ type: "object", properties: { goal: { type: "string" } }, "x-state": { stateBytes: 300 } }),
 	);
 	plain = await makeSkill(root, "plain");
 	brokenArray = await makeSkill(root, "brokenarray", "[]");
@@ -1013,6 +1020,75 @@ describe("omp-skill-state idle disengage", () => {
 		await s.step("recording", patchStep({ goal: "x" }));
 		expect(s.blocked).toEqual([]);
 		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
+	});
+});
+
+describe("omp-skill-state state cap", () => {
+	// The first step after engage runs before the head asides land, so its
+	// prompt is not projected and it never counts as idle (spec section 11.4).
+	// Every step after it carries the head.
+	async function projecting(skill: Skill = procedure) {
+		const omp = fakeOmp([skill]);
+		const s = omp.session("s1");
+		await s.invoke(skill.name);
+		expect(await s.step("the first step lands the head")).toBeUndefined();
+		return { omp, s };
+	}
+
+	test("the consolidation nudge fires once per over-cap episode and re-arms on recovery", async () => {
+		const { s } = await projecting(capProcedure);
+
+		const growing = await s.step("recording", patchStep({ blob: "x".repeat(400) }));
+		expect(nudgeIn(growing)).toEqual([]);
+
+		const prompt = await s.step("step 3");
+		const nudges = nudgeIn(prompt);
+		expect(nudges).toHaveLength(1);
+		expect(nudges[0].role).toBe("developer");
+		expect(nudges[0].content).toContain("size cap");
+		expect(prompt?.at(-1)).toBe(nudges[0]);
+
+		const stillOver = await s.step("step 4");
+		expect(nudgeIn(stillOver)).toEqual([]);
+
+		const shrinking = await s.step("recording", patchStep({ blob: null }));
+		expect(nudgeIn(shrinking)).toEqual([]);
+		const underCap = await s.step("step 6");
+		expect(nudgeIn(underCap)).toEqual([]);
+
+		const regrowing = await s.step("recording", patchStep({ blob: "x".repeat(400) }));
+		expect(nudgeIn(regrowing)).toEqual([]);
+		const again = await s.step("step 8");
+		const renudges = nudgeIn(again);
+		expect(renudges).toHaveLength(1);
+		expect(renudges[0].content).toContain("size cap");
+	});
+
+	test("the cap never blocks, never ends, and the nudge is never stored or sent", async () => {
+		const { s } = await projecting(capProcedure);
+
+		await s.step("recording", patchStep({ blob: "x".repeat(400) }));
+		await s.step("step 3");
+		await s.step("step 4");
+		await s.step("recording", patchStep({ blob: null }));
+		await s.step("step 6");
+		await s.step("recording", patchStep({ blob: "x".repeat(400) }));
+		await s.step("step 8");
+
+		expect(s.blocked).toEqual([]);
+		expect(s.notices).toEqual(engageNotices("capproc"));
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual([...engageAsideTypes, STATE_MESSAGE_TYPE, STATE_MESSAGE_TYPE, STATE_MESSAGE_TYPE]);
+		expect(s.storedStates).toEqual([{}, { blob: "x".repeat(400) }, {}, { blob: "x".repeat(400) }]);
+	});
+
+	test("a skill without a cap never carries a nudge on any prompt", async () => {
+		const { s } = await projecting();
+
+		await s.step("recording", patchStep({ goal: "x" }));
+		await s.step("step 3");
+		await s.step("step 4");
+
+		for (const prompt of s.prompts) expect(nudgeIn(prompt)).toEqual([]);
 	});
 });
 

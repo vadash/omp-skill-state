@@ -1,5 +1,19 @@
 import { describe, expect, test } from "bun:test";
-import { announcedSkillNames, OPERATING_RULES, RULES_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent, skillAnnouncement, stateMessage } from "./messages";
+import { announcedSkillNames, consolidationNudgeMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, STATE_MESSAGE_TYPE, renderStateContent, skillAnnouncement, stateMessage } from "./messages";
+
+describe("consolidationNudgeMessage", () => {
+	test("is a developer message asking for a state_update consolidation, with no fence, so it never becomes an elide target", () => {
+		const nudge = consolidationNudgeMessage();
+		expect(nudge).toEqual({
+			role: "developer",
+			content: expect.stringContaining("size cap"),
+			timestamp: expect.any(Number),
+		});
+		if (!("content" in nudge) || typeof nudge.content !== "string") throw new Error("developer message without text content");
+		expect(nudge.content).toContain("state_update");
+		expect(nudge.content.split("\n").some((line) => line.trimStart().startsWith("```"))).toBe(false);
+	});
+});
 
 describe("OPERATING_RULES", () => {
 	test("names the state_update tool and carries no fence, so the stored rules message is never an elide target", () => {

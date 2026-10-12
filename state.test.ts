@@ -20,6 +20,8 @@ let plain: Skill;
 let garbage: Skill;
 let windowed: Skill;
 let zerowindow: Skill;
+let capped: Skill;
+let negcap: Skill;
 
 beforeAll(async () => {
 	root = await mkdtemp(path.join(tmpdir(), "omp-skill-state-core-"));
@@ -45,6 +47,12 @@ beforeAll(async () => {
 	zerowindow = await makeSkill(root, "zerowindow", JSON.stringify({
 		"x-state": { observationWindow: 0 },
 	}));
+	capped = await makeSkill(root, "capped", JSON.stringify({
+		"x-state": { stateBytes: 4096 },
+	}));
+	negcap = await makeSkill(root, "negcap", JSON.stringify({
+		"x-state": { stateBytes: -5 },
+	}));
 });
 
 afterAll(async () => {
@@ -57,7 +65,7 @@ describe("loadStateSchema", () => {
 
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
-		expect(loaded.params).toEqual({ observationBytes: 4096, observationWindow: 1, idleSteps: 5, retries: 2 });
+		expect(loaded.params).toEqual({ observationBytes: 4096, observationWindow: 1, idleSteps: 5, retries: 2, stateBytes: 0 });
 		expect(loaded.schema.properties?.goal).toEqual({ type: "string" });
 	});
 
@@ -66,7 +74,7 @@ describe("loadStateSchema", () => {
 
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
-		expect(loaded.params).toEqual({ observationBytes: 32768, observationWindow: 1, idleSteps: 7, retries: 3 });
+		expect(loaded.params).toEqual({ observationBytes: 32768, observationWindow: 1, idleSteps: 7, retries: 3, stateBytes: 0 });
 	});
 
 	test("uses defaults when x-state is absent", async () => {
@@ -74,7 +82,7 @@ describe("loadStateSchema", () => {
 
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
-		expect(loaded.params).toEqual({ observationBytes: 32768, observationWindow: 1, idleSteps: 5, retries: 3 });
+		expect(loaded.params).toEqual({ observationBytes: 32768, observationWindow: 1, idleSteps: 5, retries: 3, stateBytes: 0 });
 	});
 
 	test("reads the observation window and floors values below one", async () => {
@@ -88,12 +96,23 @@ describe("loadStateSchema", () => {
 		expect(zero.params.observationWindow).toBe(1);
 	});
 
+	test("reads the state cap and clamps values below zero to the disabled default", async () => {
+		const withCap = await loadStateSchema("capped", [capped]);
+		const negative = await loadStateSchema("negcap", [negcap]);
+
+		expect(withCap.ok).toBe(true);
+		expect(negative.ok).toBe(true);
+		if (!withCap.ok || !negative.ok) return;
+		expect(withCap.params.stateBytes).toBe(4096);
+		expect(negative.params.stateBytes).toBe(0);
+	});
+
 	test("ignores non-numeric x-state fields", async () => {
 		const loaded = await loadStateSchema("garbage", [garbage]);
 
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
-		expect(loaded.params).toEqual({ observationBytes: 32768, observationWindow: 1, idleSteps: 2, retries: 3 });
+		expect(loaded.params).toEqual({ observationBytes: 32768, observationWindow: 1, idleSteps: 2, retries: 3, stateBytes: 0 });
 	});
 });
 

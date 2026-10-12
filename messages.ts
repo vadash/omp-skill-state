@@ -76,3 +76,14 @@ export function nudgeMessage(idle: number): AgentMessage {
 		timestamp: Date.now(),
 	};
 }
+
+// The ask the model sees while the execution state is over its soft size cap.
+// Per-call by construction, like the idle warning: appended to the projected
+// prompt only, never stored, never re-sent from history.
+export function consolidationNudgeMessage(): AgentMessage {
+	return {
+		role: "developer",
+		content: `The execution state has grown past its size cap. Consolidate it with a state_update patch: drop superseded findings — delete keys that no longer matter (null deletes a key) and rewrite values to only what the rest of the run needs. The cap never blocks anything; it only asks for this cleanup.`,
+		timestamp: Date.now(),
+	};
+}

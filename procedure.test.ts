@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
-import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, stateMessage } from "./messages";
-import { compactionFor, headMessages, newProcedure, noteProjected, nudgePending, recordReply } from "./procedure";
+import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, consolidationNudgeMessage, stateMessage } from "./messages";
+import { compactionFor, headMessages, newProcedure, noteProjected, nudgePending, pendingNudges, recordReply } from "./procedure";
 import type { Procedure, StepOutcome } from "./procedure";
 import { DEFAULT_PARAMS } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
@@ -61,6 +61,7 @@ describe("newProcedure", () => {
 			state: {},
 			invalidPatches: 0,
 			idle: 0,
+			capNudged: false,
 			projected: false,
 		});
 	});
@@ -254,6 +255,74 @@ describe("nudgePending", () => {
 		recordReply(p, empty());
 		expect(p.idle).toBe(2);
 		expect(nudgePending(p)).toBe(false);
+	});
+});
+
+describe("pendingNudges", () => {
+	test("returns nothing while the state is under the cap and leaves the latch off", () => {
+		const p = projected();
+
+		expect(pendingNudges(p)).toEqual([]);
+		expect(p.capNudged).toBe(false);
+	});
+
+	test("hands the consolidation nudge out once while over cap, then latches", () => {
+		const p = projected({ stateBytes: 100 }, { blob: "x".repeat(200) });
+
+		const nudges = pendingNudges(p);
+		expect(nudges).toEqual([consolidationNudgeMessage()]);
+		expect(p.capNudged).toBe(true);
+		expect(pendingNudges(p)).toEqual([]);
+	});
+
+	test("re-arms when a commit lands the state back under the cap, and fires once more", () => {
+		const p = projected({ stateBytes: 100 }, { blob: "x".repeat(200) });
+		expect(pendingNudges(p)).toHaveLength(1);
+
+		p.state = { blob: null };
+		expect(pendingNudges(p)).toEqual([]);
+		expect(p.capNudged).toBe(false);
+
+		p.state = { blob: "x".repeat(200) };
+		expect(pendingNudges(p)).toEqual([consolidationNudgeMessage()]);
+	});
+
+	test("a cap nudge and the idle warning ride on the same step, consolidation first", () => {
+		const p = projected({ stateBytes: 100 }, { blob: "x".repeat(200) });
+		recordReply(p, empty());
+		recordReply(p, empty());
+		recordReply(p, empty());
+		recordReply(p, empty());
+		expect(p.idle).toBe(4);
+
+		const nudges = pendingNudges(p);
+		expect(nudges).toHaveLength(2);
+		const [capAsk, idleWarn] = nudges;
+		if (capAsk === undefined || idleWarn === undefined || !("content" in capAsk) || !("content" in idleWarn) || typeof capAsk.content !== "string" || typeof idleWarn.content !== "string") {
+			throw new Error("nudges without text content");
+		}
+		expect(capAsk.role).toBe("developer");
+		expect(capAsk.content).toContain("size cap");
+		expect(idleWarn.role).toBe("developer");
+		expect(idleWarn.content).toContain("unchanged for 4 consecutive steps");
+	});
+
+	test("a step whose prompt carried no head neither nudges nor latches", () => {
+		const p = projected({ stateBytes: 100 }, { blob: "x".repeat(200) });
+		noteProjected(p, false);
+
+		expect(pendingNudges(p)).toEqual([]);
+		expect(p.capNudged).toBe(false);
+
+		noteProjected(p, true);
+		expect(pendingNudges(p)).toEqual([consolidationNudgeMessage()]);
+	});
+
+	test("a cap of zero disables the nudge at any state size", () => {
+		const p = projected({}, { blob: "x".repeat(1000) });
+
+		expect(pendingNudges(p)).toEqual([]);
+		expect(p.capNudged).toBe(false);
 	});
 });
 

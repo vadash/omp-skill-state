@@ -69,6 +69,10 @@ _Avoid_: cache hit rate, prefix limit
 The harness's mark for a prompt message that differs from its stored counterpart. A per-call message never anchors the durable cache breakpoint, and its presence moves that breakpoint to the newest stable message before it.
 _Avoid_: synthesized message, ephemeral message
 
+**Nudge**:
+A per-call developer message appended to the projected prompt when a policy threshold is met: the consolidation ask while the execution state is over its `stateBytes` cap, and the idle warning one step before an idle disengage. It is never stored and never re-sent from history.
+_Avoid_: warning, reminder, injection
+
 **Cut**:
 The compaction's first kept entry. While engaged it is the current step, the latest assistant message on the branch, not the turn-sized tail the harness proposes.
 _Avoid_: boundary, checkpoint, kept tail

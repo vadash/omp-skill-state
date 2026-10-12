@@ -106,6 +106,8 @@ Rules:
 {
   "x-state": {
     "observationBytes": 32768,
+    "observationWindow": 3,
+    "stateBytes": 16384,
     "idleSteps": 3,
     "retries": 3
   }
@@ -186,7 +188,9 @@ The finish protocol is unchanged: a reply with no tool call still ends the run. 
 
 No JSON repair exists on this channel. Tool arguments are protocol-level JSON, so the freehand block's malformed-JSON failure class (the paper's measured ~12% on small models) does not exist here, and silent repair could produce different state than the model meant, where the block-retry-degrade path reports exact errors.
 
-## 9. Observation cap
+## 9. Caps
+
+### Observation cap
 
 `O_t` is capped at `observationBytes`, default 32768.
 
@@ -194,6 +198,10 @@ No JSON repair exists on this channel. Tool arguments are protocol-level JSON, s
 - Over the cap, the runtime truncates from the end of the largest result and inserts a marker naming what was cut and how to re-read it.
 - Markers are never cut. When every result is cut to nothing, the observation is the markers alone, so the cap's floor is one marker per result.
 - The cap is per step. Exactly one observation window is ever in the prompt, so the cap is a ceiling on the steady state, not a cumulative budget.
+
+### State cap
+
+The execution state is capped at `stateBytes` — the byte length of the rendered state message content — default 0, which disables the cap; set per skill in `x-state`. The cap is soft: while the state measures over it, the next projected step's prompt carries a per-call developer nudge asking the model to consolidate the state with a `state_update` patch (drop superseded findings; `null` deletes a key). The nudge fires once per over-cap episode and re-arms when a commit lands the state back under the cap. The cap never blocks a step or a patch, and it never disengages or degrades the procedure: it is a signal, not a limit.
 
 ## 10. Compaction
 
@@ -256,6 +264,7 @@ Degrade is terminal for the session. The user gets ordinary history-based execut
 | `idleSteps` | 5 | schema `x-state` |
 | `retries` | 3 | schema `x-state` |
 | `observationWindow` | 1 | schema `x-state`, else runtime default |
+| `stateBytes` | 0 (disabled) | schema `x-state`, else runtime default |
 | dropped blocks | all live-state blocks | fixed in v1 |
 
 ## 16. Harness surfaces used

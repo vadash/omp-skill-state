@@ -3,7 +3,7 @@
 An omp plugin that runs a procedural skill against an explicit execution state instead of a growing transcript.
 Target: `omp-skill-state`, shipped as an omp plugin. No file under the harness source tree is modified.
 
-Status: implemented and verified against a long real session; the run, its figures and the deviations it forced are in `docs/verification.md`.
+Status: implemented and verified against a long real session; the acceptance run's figures are in `docs/verification.md`.
 
 ---
 
@@ -222,7 +222,7 @@ While engaged, the runtime owns compaction. See ADR 0001.
 
 Because auto-compaction floors on the stored transcript, it still fires while engaged whenever the transcript crosses the threshold; the handler is what makes that firing cheap and lossless.
 
-The cut is computed rather than taken from `preparation` because of what the harness does after a compaction. The harness proposes a turn-sized kept tail, and a procedure is one user turn, so its proposal keeps most of the run: entries the projection never sends but the harness still counts. When the kept tail is still over the harness's recovery band (0.8 × threshold) the harness treats the compaction as a dead end and "rescues" it with `shake("elide")`: it rewrites the kept entries in place, persisted to disk, replacing every tool result and every code or XML block of 400 or more tokens with a recovery placeholder. Custom messages are eligible, so that pass rewrote the stored state messages and the current step's observation in the integration run (`docs/verification.md`), and the projection then sent the model a placeholder as `t`. Cutting at the current step leaves nothing for the rescue to do. The state is rendered as plain labelled JSON for the same reason: the remaining shake paths (a manual `/shake`, the request-body-timeout and overflow retries) are not reachable through the extension API, and plain JSON under a label is never a shake region. The procedure spec `P` stays exposed to those paths if the skill body holds a code or XML block of 400 or more tokens.
+The cut is computed rather than taken from `preparation` because of what the harness does after a compaction. The harness proposes a turn-sized kept tail, and a procedure is one user turn, so its proposal keeps most of the run: entries the projection never sends but the harness still counts. When the kept tail is still over the harness's recovery band (0.8 × threshold) the harness treats the compaction as a dead end and "rescues" it with `shake("elide")`: it rewrites the kept entries in place, persisted to disk, replacing every tool result and every code or XML block of 400 or more tokens with a recovery placeholder. Custom messages are eligible, so an early integration run saw that pass rewrite the stored state messages and the current step's observation, and the projection then sent the model a placeholder as `t`. Cutting at the current step leaves nothing for the rescue to do. The state is rendered as plain labelled JSON for the same reason: the remaining shake paths (a manual `/shake`, the request-body-timeout and overflow retries) are not reachable through the extension API, and plain JSON under a label is never a shake region. The procedure spec `P` stays exposed to those paths if the skill body holds a code or XML block of 400 or more tokens.
 
 ## 11. Disengaging
 
@@ -231,7 +231,7 @@ Four triggers, all leading to the same reset (clear `t`, clear engaged flag, sto
 1. **New session.** `/new` starts one, firing `session_before_switch` and then `session_switch` with reason `new`; `session_start` fires only on a cold load. This is the intended ending, and the runtime tells the user so (section 12). On every `session_start` and `session_switch` the runtime re-derives engagement from the branch rather than resetting blindly: an empty branch is inert; a branch holding a user skill invocation for a procedure skill followed by its procedure-spec message and its two state messages, the latest core and the latest scratch, re-engages with the merged state, and either state message missing is inert (the spec is read back from the branch so no file is re-read). That is what makes `/resume` restore `t` while `/new` starts clean.
 2. **Context reset.** `/clear` keeps the session and drops messages in place, and emits nothing to extensions. The `input` event runs before command interpretation and does see the raw text, so the runtime disengages on `/clear` directly.
 3. **Session change.** A switch, a rewind or a fork all land in a different session id, so `session_before_switch` and `session_before_branch` end the outgoing engagement with the usual disengage notice. `session_switch`, `session_branch` and `session_tree` then re-derive engagement from the branch now loaded: a rewind that lands after the invocation re-engages with that branch's state, one that lands before it stays inert, and a fork re-derives like any other branch.
-4. **Idleness.** `idleSteps` consecutive steps with no patch or with a patch that leaves the state unchanged. At `idleSteps` − 1 consecutive idle steps — never at zero: a skill that sets `idleSteps` to 1 disengages on its first idle step unwarned — the next step's prompt carries a per-call developer nudge naming the count and the imminent disengage, so the model can record a meaningful fact before the cutoff; the nudge is never stored and never re-sent from history. The model has stopped editing its state; the runtime stands down. A step whose provider call carried no stored head still does not count: the first step carries the rules through the `before_agent_start` delivery (section 7) but runs before the engage asides land, and the step after a compaction can run before the re-sent head lands, so the rules are missing from its prompt in that case — no head means no count and no nudge. The integration run (`docs/verification.md`, finding 7) showed the rule firing on a legitimate preamble of reads before the first fact; it is kept as specified.
+4. **Idleness.** `idleSteps` consecutive steps with no patch or with a patch that leaves the state unchanged. At `idleSteps` − 1 consecutive idle steps — never at zero: a skill that sets `idleSteps` to 1 disengages on its first idle step unwarned — the next step's prompt carries a per-call developer nudge naming the count and the imminent disengage, so the model can record a meaningful fact before the cutoff; the nudge is never stored and never re-sent from history. The model has stopped editing its state; the runtime stands down. A step whose provider call carried no stored head still does not count: the first step carries the rules through the `before_agent_start` delivery (section 7) but runs before the engage asides land, and the step after a compaction can run before the re-sent head lands, so the rules are missing from its prompt in that case — no head means no count and no nudge. An early integration run disengaged on a legitimate preamble of reads before the first fact; the raised default and the nudge above are the answer to that case.
 
 The remaining exit is **degrade**, from section 8, which is a failure path rather than a normal ending.
 
@@ -338,7 +338,7 @@ Unit, no harness needed:
 
 `index.test.ts` drives the factory through a fake omp session (`fake-session.ts`): one factory with N sessions keyed by id, each owning its branch, sends, notices and idle flag. The fake auto-dispatches the harness event order inside one verb, assembles the context of each provider call from its branch, captures `registerTool` definitions, and models delivery timing: messages sent while busy flush at the end of the current step (so the stored head after engage lands at the first step boundary, while the first step's rules come from the `before_agent_start` delivery on the batch itself), messages sent while idle are appended at once, a reply with no tool call ends the run, and a call whose name has a captured definition runs that definition inside the step, recording its own result. The delivery model is the fake interface contract; `docs/verification.md` remains the real-session ground truth.
 
-Against a real session (`docs/verification.md` records the outcome of each item; the invalid-patch and degrade items did not occur in the run and rest on the unit tests):
+Against a real session (run G and the nudge probe in `docs/verification.md`; the invalid-patch refusal occurred in run G, the degrade path did not occur and rests on the unit tests, and the `/new`, `/clear` and rewind outcomes are in the doc's git history):
 
 - engage on a user `/skill:` for a schema-bearing skill; stay inert for a skill without one; stay inert for a model-initiated `read skill://…`.
 - invalid patch blocks the batch and the retry recovers.
@@ -348,8 +348,27 @@ Against a real session (`docs/verification.md` records the outcome of each item;
 - `/new` and `/clear` both disengage.
 - prompt size is flat across a long run: assert the reported input tokens per step stay inside a band.
 
-## 19. Out of scope for v1
+## 19. Out of scope
 
 - Multi-agent procedures with concurrent state writes and conflict resolution.
 - Automatic schema discovery for skills that do not declare one.
 - Any change under the harness source tree.
+- Multiple concurrent procedures per session; retrieval or summarization of dropped history.
+- Per-key array append modes; the merge stays set-whole.
+- JSON repair in any form; `setActiveTools` registration gymnastics.
+- Hard enforcement of the state cap (the nudge is the only sanction, by decision).
+
+## 20. Design record: the V2 change
+
+The v1 runtime executed a narrow class of procedures well: one tool result of memory per step, a state of a handful of keys. Four leaks out of that shape drove the V2 change: the one-pair observation forced re-reads across consecutive steps; a tight idle threshold disengaged on a legitimate quiet preamble; the fenced patch channel arrived one step late — no rules on the first prompt — so skills had to re-teach the patch format; and nothing checked state growth. On the cost side the cache ceiling sat too low: the state changes nearly every step, so everything after the procedure spec — roughly a third of a procedure step — re-billed, and on Anthropic-shaped providers even the rules and the spec re-billed for lack of a per-call mark.
+
+Four generalities and one channel change answered that. Decisions are recorded in ADR 0002 and ADR 0003; the behavior lives in sections 5, 7, 8, 9 and 11:
+
+- Observation window: pin the last K tool pairs, not one, under one shared byte cap.
+- Idle: default threshold 5, and a turn-scoped warning nudge one step before the disengage.
+- First-step rules: the operating rules delivered on the invocation batch, so no skill teaches the patch format.
+- State cap: a soft `stateBytes` cap whose only sanction is a consolidation nudge.
+- Patch channel: the strict, zero-approval `state_update` tool; the fenced block and its parser deleted outright, not kept as a fallback. Rejected: dual channels — a precedence rule in every doc and test surface, for a failure class the tool cannot produce — and JSON repair — silent corruption of the only record of the past, where block-and-retry reports exact errors.
+- Head split: the state message splits into a byte-stable core and a per-call scratch, so the durable cache breakpoint anchors on the core. Rejected: a single state message, which holds the ceiling at through-the-spec, and per-call marks on the whole head, which would cache nothing.
+
+Measured in run G (`docs/verification.md`): `cacheRead` pinned at 10496 — system prompt, tools, rules, spec, state core — across the patched steps while only the scratch, the observation window and the user turn re-billed. The baseline to beat was run F: median prompt 11,348 tokens, uncached median 788, cache read positive on 49 of 51 steps, a through-the-spec ceiling.

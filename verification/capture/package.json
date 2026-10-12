@@ -1,0 +1,9 @@
+{
+	"name": "skill-state-capture",
+	"version": "0.0.1",
+	"description": "Verification instrument: dump every provider request payload to $SKILL_STATE_CAPTURE_DIR/requests.jsonl; dormant unless the variable is set",
+	"type": "module",
+	"omp": {
+		"extensions": ["./index.ts"]
+	}
+}

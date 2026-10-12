@@ -17,7 +17,7 @@ Status: implemented and verified against a long real session (`docs/verification
 | `index.test.ts`, `*.test.ts` | Unit tests for the factory contract, the step policy, the branch reads, the state merge and the projection |
 | `skills/zstate/` | Bundled mode-entry procedure skill (`SKILL.md` + `state.schema.json`): it carries no task of its own; the task is the text given with the invocation, and `disable-model-invocation` keeps it user-invoked only |
 | `docs/spec.md`, `docs/adr/`, `CONTEXT.md` | Design, decisions, glossary |
-| `docs/verification.md`, `verification/` | The long-session integration run: findings, and the session analyzer plus the config that drives it |
+| `docs/verification.md`, `verification/` | Run G's acceptance evidence: the session analyzer, the compact-early compaction config, and the `capture/` plugin that records provider request bodies when `SKILL_STATE_CAPTURE_DIR` is set |
 
 ## Develop
 

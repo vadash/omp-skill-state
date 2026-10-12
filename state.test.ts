@@ -3,25 +3,18 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Skill } from "@oh-my-pi/pi-coding-agent";
-import { applyPatch, loadStateSchema, mergeState, splitState, stateEquals, validatePatch, volatileKeys } from "./state";
+import { DEFAULT_PARAMS, applyPatch, loadStateSchema, mergeState, parseStateSchema, splitState, stateEquals, validatePatch, volatileKeys } from "./state";
 import type { ExecutionState, JsonSchema, StateSchema } from "./state";
 import { makeSkill } from "./skill-fixtures";
 
 let root: string;
 let valid: Skill;
-let partial: Skill;
-let defaulted: Skill;
 let malformed: Skill;
 let arrayTop: Skill;
 let nullTop: Skill;
 let stringTop: Skill;
 let numberTop: Skill;
 let plain: Skill;
-let garbage: Skill;
-let windowed: Skill;
-let zerowindow: Skill;
-let capped: Skill;
-let negcap: Skill;
 
 beforeAll(async () => {
 	root = await mkdtemp(path.join(tmpdir(), "omp-skill-state-core-"));
@@ -30,29 +23,12 @@ beforeAll(async () => {
 		properties: { goal: { type: "string" } },
 		"x-state": { observationBytes: 4096, idleSteps: 5, retries: 2 },
 	}));
-	partial = await makeSkill(root, "partial", JSON.stringify({ "x-state": { idleSteps: 7 } }));
-	defaulted = await makeSkill(root, "defaulted", JSON.stringify({ type: "object", properties: {} }));
 	malformed = await makeSkill(root, "malformed", "{ not json");
 	arrayTop = await makeSkill(root, "arraytop", "[]");
 	nullTop = await makeSkill(root, "nulltop", "null");
 	stringTop = await makeSkill(root, "stringtop", '"text"');
 	numberTop = await makeSkill(root, "numbertop", "42");
 	plain = await makeSkill(root, "plain");
-	garbage = await makeSkill(root, "garbage", JSON.stringify({
-		"x-state": { observationBytes: "65536", idleSteps: 2, retries: null },
-	}));
-	windowed = await makeSkill(root, "windowed", JSON.stringify({
-		"x-state": { observationWindow: 3 },
-	}));
-	zerowindow = await makeSkill(root, "zerowindow", JSON.stringify({
-		"x-state": { observationWindow: 0 },
-	}));
-	capped = await makeSkill(root, "capped", JSON.stringify({
-		"x-state": { stateBytes: 4096 },
-	}));
-	negcap = await makeSkill(root, "negcap", JSON.stringify({
-		"x-state": { stateBytes: -5 },
-	}));
 });
 
 afterAll(async () => {
@@ -60,7 +36,7 @@ afterAll(async () => {
 });
 
 describe("loadStateSchema", () => {
-	test("loads a valid schema with x-state params", async () => {
+	test("reads the file and delegates parsing", async () => {
 		const loaded = await loadStateSchema("valid", [valid]);
 
 		expect(loaded.ok).toBe(true);
@@ -68,51 +44,49 @@ describe("loadStateSchema", () => {
 		expect(loaded.params).toEqual({ observationBytes: 4096, observationWindow: 1, idleSteps: 5, retries: 2, stateBytes: 0 });
 		expect(loaded.schema.properties?.goal).toEqual({ type: "string" });
 	});
+});
 
-	test("fills unset x-state fields from defaults", async () => {
-		const loaded = await loadStateSchema("partial", [partial]);
+describe("parseStateSchema", () => {
+	const parse = (body: unknown) => parseStateSchema(body);
 
+	test("accepts an object schema and returns it with clamped params", () => {
+		const loaded = parse({ type: "object", properties: { goal: { type: "string" } } });
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
-		expect(loaded.params).toEqual({ observationBytes: 32768, observationWindow: 1, idleSteps: 7, retries: 3, stateBytes: 0 });
+		expect(loaded.schema.properties?.goal).toEqual({ type: "string" });
+		expect(loaded.params).toEqual(DEFAULT_PARAMS);
 	});
 
-	test("uses defaults when x-state is absent", async () => {
-		const loaded = await loadStateSchema("defaulted", [defaulted]);
-
+	test("fills unset x-state fields from the defaults", () => {
+		const loaded = parse({ "x-state": { idleSteps: 7 } });
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
-		expect(loaded.params).toEqual({ observationBytes: 32768, observationWindow: 1, idleSteps: 5, retries: 3, stateBytes: 0 });
+		expect(loaded.params).toEqual({ ...DEFAULT_PARAMS, idleSteps: 7 });
 	});
 
-	test("reads the observation window and floors values below one", async () => {
-		const withWindow = await loadStateSchema("windowed", [windowed]);
-		const zero = await loadStateSchema("zerowindow", [zerowindow]);
-
-		expect(withWindow.ok).toBe(true);
-		expect(zero.ok).toBe(true);
-		if (!withWindow.ok || !zero.ok) return;
-		expect(withWindow.params.observationWindow).toBe(3);
-		expect(zero.params.observationWindow).toBe(1);
+	test("reads the observation window and floors values below one", () => {
+		const withWindow = parse({ "x-state": { observationWindow: 3 } });
+		const zero = parse({ "x-state": { observationWindow: 0 } });
+		expect(withWindow).toMatchObject({ ok: true, params: { ...DEFAULT_PARAMS, observationWindow: 3 } });
+		expect(zero).toMatchObject({ ok: true, params: { ...DEFAULT_PARAMS, observationWindow: 1 } });
 	});
 
-	test("reads the state cap and clamps values below zero to the disabled default", async () => {
-		const withCap = await loadStateSchema("capped", [capped]);
-		const negative = await loadStateSchema("negcap", [negcap]);
-
-		expect(withCap.ok).toBe(true);
-		expect(negative.ok).toBe(true);
-		if (!withCap.ok || !negative.ok) return;
-		expect(withCap.params.stateBytes).toBe(4096);
-		expect(negative.params.stateBytes).toBe(0);
+	test("reads the state cap and clamps values below zero to the disabled default", () => {
+		const withCap = parse({ "x-state": { stateBytes: 4096 } });
+		const negative = parse({ "x-state": { stateBytes: -5 } });
+		expect(withCap).toMatchObject({ ok: true, params: { ...DEFAULT_PARAMS, stateBytes: 4096 } });
+		expect(negative).toMatchObject({ ok: true, params: { ...DEFAULT_PARAMS, stateBytes: 0 } });
 	});
 
-	test("ignores non-numeric x-state fields", async () => {
-		const loaded = await loadStateSchema("garbage", [garbage]);
+	test("ignores non-numeric x-state fields", () => {
+		const loaded = parse({ "x-state": { observationBytes: "65536", idleSteps: 2, retries: null } });
+		expect(loaded).toMatchObject({ ok: true, params: { ...DEFAULT_PARAMS, idleSteps: 2 } });
+	});
 
-		expect(loaded.ok).toBe(true);
-		if (!loaded.ok) return;
-		expect(loaded.params).toEqual({ observationBytes: 32768, observationWindow: 1, idleSteps: 2, retries: 3, stateBytes: 0 });
+	test("rejects a non-object schema", () => {
+		for (const body of ["text", 42, [], null, true]) {
+			expect(parse(body).ok).toBe(false);
+		}
 	});
 });
 
@@ -285,6 +259,29 @@ describe("mergeState", () => {
 		expect(merged).toEqual({ nested: { a: 1, c: 3 }, tags: ["y"], fresh: true });
 		expect(t).toEqual(tSnapshot);
 		expect(patch).toEqual(patchSnapshot);
+	});
+});
+
+describe("validatePatch prototype keys", () => {
+	const schema: StateSchema = { type: "object", properties: {} };
+
+	test("hazardous keys are rejected wherever they appear", () => {
+		for (const key of ["__proto__", "constructor", "prototype"]) {
+			expect(validatePatch({ [key]: {} }, schema)).toBe(`invalid state key "${key}"`);
+		}
+		// A patch arrives as parsed JSON, and only JSON.parse creates an own
+		// __proto__ property: an object literal would set a prototype instead.
+		const nested: StateSchema = { type: "object", properties: { meta: { type: "object", properties: {} } } };
+		const wired = JSON.parse('{"meta": {"__proto__": {}}}') as ExecutionState;
+		expect(validatePatch(wired, nested)).toBe('invalid state key "meta.__proto__"');
+	});
+});
+
+describe("validatePatch unsupported schema types", () => {
+	test("an array-typed schema type is a naming error, not a silent pass", () => {
+		const schema = { type: "object", properties: { either: { type: ["string", "null"] } } } as unknown as StateSchema;
+		expect(validatePatch({ either: "x" }, schema)).toBe('unsupported schema type for "either"');
+		expect(validatePatch({ either: null }, schema)).toBeNull();
 	});
 });
 

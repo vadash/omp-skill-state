@@ -62,16 +62,22 @@ function jsonEquals(a: JsonValue | undefined, b: JsonValue | undefined): boolean
 	return false;
 }
 
+// Pure schema parsing: the shape check plus parameter clamping, no I/O. The
+// in-memory seam the unit tests table over; loadStateSchema wraps it around
+// the file read.
+export function parseStateSchema(parsed: unknown): SchemaLoad {
+	if (!isPlainObject(parsed)) return { ok: false, error: "state schema is not a JSON object" };
+	const schema = parsed as StateSchema;
+	return { ok: true, schema, params: readParams(schema["x-state"]) };
+}
+
 // A missing or malformed schema is a returned failure, not a throw: a skill
 // without a usable state.schema.json is an ordinary skill and must stay silent.
 export async function loadStateSchema(skillName: string, skills: readonly Skill[]): Promise<SchemaLoad> {
 	try {
 		const schemaPath = await InternalUrlRouter.instance().locate(`skill://${skillName}/state.schema.json`, { skills });
 		if (schemaPath === null) return { ok: false, error: `no state.schema.json for skill "${skillName}"` };
-		const parsed: unknown = JSON.parse(await readFile(schemaPath, "utf8"));
-		if (!isPlainObject(parsed)) return { ok: false, error: `state.schema.json for "${skillName}" is not a JSON object` };
-		const schema = parsed as StateSchema;
-		return { ok: true, schema, params: readParams(schema["x-state"]) };
+		return parseStateSchema(JSON.parse(await readFile(schemaPath, "utf8")));
 	} catch (error) {
 		return { ok: false, error: error instanceof Error ? error.message : String(error) };
 	}
@@ -101,6 +107,11 @@ export function validatePatch(patch: unknown, schema: StateSchema): string | nul
 function validateObject(obj: Record<string, unknown>, schema: JsonSchema, path: string): string | null {
 	const properties = isPlainObject(schema.properties) ? schema.properties : {};
 	for (const key of Object.keys(obj)) {
+		// Prototype-hazard keys never enter the state: a later assignment of
+		// them would reach the object's prototype machinery, not its properties.
+		if (key === "__proto__" || key === "constructor" || key === "prototype") {
+			return `invalid state key "${path ? `${path}.${key}` : key}"`;
+		}
 		const sub = properties[key];
 		if (sub === undefined) {
 			// additionalProperties defaults to open, so only an explicit false rejects.
@@ -157,6 +168,11 @@ function validateValue(value: unknown, schema: JsonSchema, path: string): string
 		case "object":
 			if (!isPlainObject(value)) return `state key "${path}" must be an object`;
 			return validateObject(value, schema, path);
+		// Anything else — an array-typed `type`, a bogus value in hand-written
+		// JSON — is not a schema this runtime reads, and the patch must say so
+		// instead of silently passing.
+		default:
+			return `unsupported schema type for "${path}"`;
 	}
 }
 

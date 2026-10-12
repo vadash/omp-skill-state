@@ -279,6 +279,7 @@ Every mechanism above is public extension API. Nothing else is touched.
 | Need | Surface |
 | --- | --- |
 | per-step rewrite | `context` event; receives `AgentMessage[]` before `convertToLlm`, so `customType` is still visible, and its replacement never rewrites stored history |
+| nudge at the policy thresholds | the `context` handler appending `pendingNudges(procedure)` after the projected messages: the consolidation ask latched once per over-cap episode (`capNudged`, re-armed when a commit lands back under `stateBytes`) and the idle warning one step before the idle disengage, consolidation first, idle last; the nudges ride the event's replacement, are never stored and never re-sent from history (sections 9 and 11) |
 | validate before tools run | `assistant_message`, awaited before tool dispatch |
 | block a batch | `tool_call`, may block with a reason |
 | offer the state-write channel | `registerTool` with the strict, zero-approval `state_update` definition, registered inside every engage (section 8) |
@@ -307,9 +308,12 @@ omp-skill-state/
   branch.test.ts        branch read unit tests (bun test)
   procedure.ts          the procedure record and the step policy (patch outcomes, head, compaction)
   procedure.test.ts     step policy unit tests (bun test)
+  state.ts              the execution state module: schema and params loading, patch validation, merge and apply, the core/scratch split (volatileKeys, splitState)
+  state.test.ts         execution state unit tests (bun test)
   messages.ts           the message vocabulary: the head message types, the state renderer and the core and scratch state builders
   messages.test.ts      message vocabulary unit tests (bun test)
   fake-session.ts       the fake omp session for the adapter tests (branch, delivery timing, sends)
+  skill-fixtures.ts     the shared test fixture writing skill directories for the adapter and state tests (makeSkill)
   tsconfig.json         typecheck config (tsc --noEmit)
   skills/               optional bundled procedure skills, discovered from the plugin root
   CONTEXT.md            glossary

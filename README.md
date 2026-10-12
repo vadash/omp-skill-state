@@ -2,7 +2,7 @@
 
 An [omp](https://omp.sh) plugin that runs a procedural skill against an explicit execution state instead of a growing transcript. The design is in `docs/spec.md`; the vocabulary is in `CONTEXT.md`.
 
-Status: implemented and verified against a long real session (`docs/verification.md`). A procedure skill engages and disengages; the model's `state_update` calls are validated, merged and persisted as state messages, and invalid patches block the step and degrade after `retries` failures. While engaged, every provider call sees only the operating rules, the procedure spec, the latest state, the current step's observation (byte-capped) and the current user turn; the stored transcript stays complete. Compaction while engaged is owned by the runtime: the summary is the state, the cut is the current step, and no summarizer call is made.
+Status: implemented and verified against a long real session (`docs/verification.md`). A procedure skill engages and disengages; the model's `state_update` calls are validated, merged and persisted as state messages, and invalid patches block the step and degrade after `retries` failures. While engaged, every provider call sees only the head (the operating rules, the procedure spec, the state core and the scratch state), the observation window (the `observationWindow` most recent tool pairs under one shared byte cap; 1 by default, 3 in the bundled zstate skill), the current user turn and, when their thresholds are met, the two per-call nudges: the idle warning one step before an idle disengage and the consolidation ask while the state is over its `stateBytes` cap; the stored transcript stays complete. Compaction while engaged is owned by the runtime: the summary is the state, the cut is the current step, and no summarizer call is made.
 
 ## Layout
 
@@ -12,7 +12,7 @@ Status: implemented and verified against a long real session (`docs/verification
 | `index.ts` | The extension: a thin harness adapter over the modules below. omp imports the TypeScript directly; there is no build step. |
 | `branch.ts` | Pure reads over the stored branch: the re-derive scan and the compaction cut. |
 | `procedure.ts` | The procedure record and the step policy: patch outcomes, idle and retry counters, head and compaction construction. |
-| `messages.ts` | The custom message vocabulary: the head message types, the state renderer and the state message builder. |
+| `messages.ts` | The message vocabulary: the head message types (rules, procedure spec, state core, scratch), the state renderer, the core and scratch state builders, and the two nudge message builders. |
 | `fake-session.ts` | The fake omp session the adapter tests drive: branch, delivery timing, sends and notices. |
 | `index.test.ts`, `*.test.ts` | Unit tests for the factory contract, the step policy, the branch reads, the state merge and the projection |
 | `skills/zstate/` | Bundled mode-entry procedure skill (`SKILL.md` + `state.schema.json`): it carries no task of its own; the task is the text given with the invocation, and `disable-model-invocation` keeps it user-invoked only |

@@ -21,10 +21,11 @@ function projected(params: Partial<StateParams> = {}, state: ExecutionState = {}
 }
 
 // A patch always arrives as a state_update tool call, so a patch step is a
-// tool-call step by construction.
-const step = (patch: unknown) => ({ patch, hasPatch: true });
+// tool-call step by construction. A reply may carry several calls; their
+// patches ride in declaration order.
+const step = (...patches: unknown[]) => ({ patches, hasPatch: patches.length > 0 });
 // A reply with no state_update call is an empty patch.
-const empty = () => ({ hasPatch: false });
+const empty = () => ({ patches: [], hasPatch: false });
 
 // Commits a store outcome the way the state_update execute does, for tests
 // that read the record's state after the reply.
@@ -159,6 +160,26 @@ describe("recordReply with a patch", () => {
 		recordReply(p, step({ goal: 42 }));
 
 		expect(recordReply(p, step({ goal: 42 }))).toEqual({ kind: "block" });
+	});
+
+	test("a batch of valid patches folds in order into one store outcome", () => {
+		const p = procedure({}, { findings: ["old"] });
+
+		const outcome = recordReply(p, step({ findings: { $append: ["a"] } }, { next_step: "b" }));
+
+		expect(outcome).toEqual({ kind: "store", state: { findings: ["old", "a"], next_step: "b" } });
+		expect(p.pendingError).toBeUndefined();
+		expect(p.invalidPatches).toBe(0);
+	});
+
+	test("an invalid patch anywhere in a batch blocks the step with that patch's error", () => {
+		const p = procedure();
+
+		const outcome = recordReply(p, step({ goal: "x" }, { goal: 42 }));
+
+		expect(outcome).toEqual({ kind: "block" });
+		expect(p.pendingError).toContain('"goal"');
+		expect(p.invalidPatches).toBe(1);
 	});
 });
 

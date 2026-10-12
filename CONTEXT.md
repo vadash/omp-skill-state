@@ -50,7 +50,7 @@ The number of most recent tool pairs the projection pins as the step's observati
 _Avoid_: history window, result buffer
 
 **Step**:
-One provider call. A step produces at most one state patch, one batch of tool calls, and one set of observations.
+One provider call. A step's `state_update` patches fold in order into one merged state change, beside one batch of tool calls and one set of observations.
 _Avoid_: turn, iteration, round
 
 **Projection**:

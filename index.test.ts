@@ -653,6 +653,34 @@ describe("omp-skill-state patch loop", () => {
 		expect(s.storedStates).toEqual([{}, { goal: "x" }]);
 	});
 
+	test("several state_update calls in one batch all validate and commit in order", async () => {
+		const { s } = await engaged();
+
+		await s.step("recording", {
+			tools: [STATE_UPDATE_TOOL_NAME, STATE_UPDATE_TOOL_NAME],
+			arguments: [{ patch: { findings: { $append: ["a"] } } }, { patch: { next_step: "b" } }],
+		});
+
+		expect(s.blocked).toEqual([]);
+		// One core+scratch pair per accepted patch: the executes fold in
+		// declaration order, so the second commit carries both keys.
+		expect(s.storedStates).toEqual([{}, { findings: ["a"] }, { findings: ["a"], next_step: "b" }]);
+	});
+
+	test("a valid patch followed by an invalid one refuses the whole batch before any tool runs", async () => {
+		const { s } = await engaged();
+
+		await s.step("recording", {
+			tools: [STATE_UPDATE_TOOL_NAME, STATE_UPDATE_TOOL_NAME],
+			arguments: [{ patch: { goal: "x" } }, { patch: { goal: 42 } }],
+		});
+
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
+		expect(s.blocked.map((call) => call.toolName)).toEqual([STATE_UPDATE_TOOL_NAME, STATE_UPDATE_TOOL_NAME]);
+		for (const call of s.blocked) expect(call.reason).toContain('state key "goal" must be a string');
+		expect(s.storedStates).toEqual([{}]);
+	});
+
 	test("a null patch on a declared key clears it instead of blocking, as the operating rules promise", async () => {
 		const { s } = await engaged();
 

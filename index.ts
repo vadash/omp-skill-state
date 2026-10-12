@@ -184,19 +184,17 @@ export default function (pi: ExtensionAPI): void {
 		const procedure = current(ctx);
 		if (procedure === undefined) return undefined;
 		const content = event.message.content;
-		// The first state_update call of the reply carries the step's patch. It
-		// is validated here, before any tool executes, so an invalid patch
-		// blocks the whole batch, the state_update call itself included.
-		let patch: unknown;
-		let hasPatch = false;
+		// Every state_update call of the batch contributes its patch. All of
+		// them are validated here, folded in declaration order before any tool
+		// executes, so one invalid patch anywhere in the batch blocks the
+		// whole step, every state_update call included.
+		const patches: unknown[] = [];
 		for (const block of content) {
 			if (block.type === "toolCall" && block.name === STATE_UPDATE_TOOL_NAME) {
-				patch = (block.arguments as { patch?: unknown } | undefined)?.patch;
-				hasPatch = true;
-				break;
+				patches.push((block.arguments as { patch?: unknown } | undefined)?.patch);
 			}
 		}
-		const outcome = recordReply(procedure, { patch, hasPatch });
+		const outcome = recordReply(procedure, { patches, hasPatch: patches.length > 0 });
 		switch (outcome.kind) {
 			case "store":
 				// Nothing to do here: the commit and the aside send live in the

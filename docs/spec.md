@@ -180,13 +180,13 @@ Approval is zero-cost by decision: the definition declares `{ tier: "read", poli
 
 Ordering, and why all-or-nothing survives the channel change:
 
-1. `assistant_message` fires once per finalized assistant message, before the message reaches agent context, persistence, `message_end`, or tool dispatch. The handler scans the reply's tool-call blocks for the first `state_update` call and validates its `patch` against the state schema.
+1. `assistant_message` fires once per finalized assistant message, before the message reaches agent context, persistence, `message_end`, or tool dispatch. The handler collects every `state_update` call's `patch` and folds them in declaration order against the state schema — each patch applies to the previous one's result — so one invalid patch anywhere in the batch refuses the whole step.
 2. On failure it sets a pending-failure flag for this step and increments the retry counter.
 3. `tool_call` fires next, at argument-prep time, for every call of the batch — the `state_update` call included. While the flag is set, the handler blocks every call and returns the validation error as the reason. Because the `state_update` call itself is blocked, no tool of the step has executed by the time the batch is refused.
 4. When the patch is valid, the `state_update` execute runs with the rest of the batch: it re-validates defensively (an impossible failure would come back as the exact error in a failed tool result), merges the patch, commits the state, and asides land the new state's two messages, core then scratch, at the next step boundary, before the next provider call.
 5. The model receives the block reason and re-emits. A blocked call does not execute and emits no result hook.
 
-A step with no `state_update` call is legal and means an empty patch. A patch that leaves the state structurally unchanged commits nothing and sends nothing (the `changed` verdict of `applyPatch`, shared by the step policy and the tool execute). Only an *invalid* patch blocks.
+A step with no `state_update` call is legal and means an empty patch. A batch whose fold leaves the state structurally unchanged commits nothing and sends nothing (the `changed` verdict of `applyPatch`, shared by the step policy and the tool executes). Only an *invalid* patch blocks.
 
 Retry and degrade:
 

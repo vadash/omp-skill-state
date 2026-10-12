@@ -54,30 +54,38 @@ export type StepOutcome =
 	| { kind: "block" }
 	| { kind: "ended"; cause: "degrade" | "idle" };
 
-// The step policy: validate and merge the reply's state_update patch, and
-// decide what the reply means for the counters. The merged state rides on the
-// store outcome; the tool's execute commits it, so the record's own state is
-// untouched here. A reply with no state_update call, or with a patch that
-// leaves the state as it was, is an idle step; an invalid patch blocks the
-// step and counts toward degrade; a patch of any kind, valid or not, breaks an
-// idle run.
-export function recordReply(procedure: Procedure, reply: { patch?: unknown; hasPatch: boolean }): StepOutcome {
+// The step policy: validate and merge the reply's state_update patches, and
+// decide what the reply means for the counters. The reply may carry several
+// state_update calls; their patches fold in declaration order, each applying
+// to the previous one's result, and the first invalid patch refuses the whole
+// batch. The merged state rides on the store outcome; the tool's execute
+// commits it, so the record's own state is untouched here. A reply with no
+// state_update call, or whose fold leaves the state as it was, is an idle
+// step; an invalid patch blocks the step and counts toward degrade; a patch
+// of any kind, valid or not, breaks an idle run.
+export function recordReply(procedure: Procedure, reply: { patches: unknown[]; hasPatch: boolean }): StepOutcome {
 	// One reply is one step; the nudge memo is keyed to this counter.
 	procedure.step += 1;
-	if (!reply.hasPatch) {
+	if (!reply.hasPatch || reply.patches.length === 0) {
 		procedure.pendingError = undefined;
 		procedure.invalidPatches = 0;
 		return idleStep(procedure);
 	}
-	const applied = applyPatch(procedure.state, reply.patch, procedure.schema);
-	if (!applied.ok) return invalidPatch(procedure, applied.error);
+	let candidateState = procedure.state;
+	let anyChanged = false;
+	for (const patch of reply.patches) {
+		const applied = applyPatch(candidateState, patch, procedure.schema);
+		if (!applied.ok) return invalidPatch(procedure, applied.error);
+		candidateState = applied.state;
+		if (applied.changed) anyChanged = true;
+	}
 	procedure.pendingError = undefined;
 	procedure.invalidPatches = 0;
-	// A patch that leaves the state as it was is an empty patch: there is
+	// A fold that leaves the state as it was is an empty patch: there is
 	// nothing to store, and the model did not edit its state this step.
-	if (!applied.changed) return idleStep(procedure);
+	if (!anyChanged) return idleStep(procedure);
 	procedure.idle = 0;
-	return { kind: "store", state: applied.state };
+	return { kind: "store", state: candidateState };
 }
 
 // A step the model spent without editing its state. A step whose prompt

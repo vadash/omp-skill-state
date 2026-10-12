@@ -11,10 +11,10 @@
 	},
 	"additionalProperties": true,
 	"x-state": {
-		"observationBytes": 32768,
-		"observationWindow": 3,
-		"stateBytes": 16384,
-		"idleSteps": 7,
+		"observationBytes": 65536,
+		"observationWindow": 6,
+		"stateBytes": 32768,
+		"idleSteps": 8,
 		"retries": 3,
 		"volatile": ["plan", "findings", "open_questions", "next_step"]
 	}

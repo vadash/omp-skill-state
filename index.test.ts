@@ -6,7 +6,7 @@ import type { SessionEntry, Skill } from "@oh-my-pi/pi-coding-agent";
 import { fakeOmp, coreStateEntry, invocationEntry, procedureBranch, scratchStateEntry, specEntry, stateEntries } from "./fake-session";
 import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_UPDATE_TOOL_NAME, STATE_UPDATE_DESCRIPTION, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, coreMessage, scratchMessage } from "./messages";
 import type { ExecutionState, StateSchema } from "./state";
-import { splitState } from "./state";
+import { loadStateSchema, splitState } from "./state";
 import { makeSkill } from "./skill-fixtures";
 
 // Engage sends exactly these four asides; the patch loop must add nothing else.
@@ -1284,7 +1284,9 @@ describe("omp-skill-state compaction ownership", () => {
 		expect(after?.[1] as Record<string, unknown>).toMatchObject(s.sends[7]!.payload);
 		expect(after?.[2] as Record<string, unknown>).toMatchObject(s.sends[8]!.payload);
 		expect(after?.[3] as Record<string, unknown>).toMatchObject(s.sends[9]!.payload);
-		expect(after?.slice(4)).toHaveLength(2);
+		// The default window pins both stored pairs: the pre-cut step and the
+		// step right after the compaction.
+		expect(after?.slice(4)).toHaveLength(4);
 	});
 
 	test("a compaction while idle re-sends the head as next-turn messages, which wake no turn", async () => {
@@ -1355,8 +1357,8 @@ describe("omp-skill-state projection (context seam)", () => {
 		const prompt = await s.step("done", { tools: [] });
 		const input = s.lastContextMessages!;
 
-		expect(prompt).toHaveLength(6);
-		// The head and the pinned call are the stored objects themselves: byte
+		expect(prompt).toHaveLength(8);
+		// The head and the pinned calls are the stored objects themselves: byte
 		// equality with history is what anchors the provider cache prefix. The
 		// injected first-step rules copy sits at input[1], so the head asides
 		// start one entry later than the skill prompt alone would put them.
@@ -1370,7 +1372,9 @@ describe("omp-skill-state projection (context seam)", () => {
 		if (!isCustomMessage(projectedScratch) || !isCustomMessage(storedScratch)) throw new Error("scratch head message is not a custom message");
 		expect(projectedScratch).not.toBe(storedScratch);
 		expect(projectedScratch.content).toBe(storedScratch.content);
-		const capped = prompt?.[5] as { content: Array<{ type: string; text?: string }>; toolCallId: string };
+		// The default window pins both stored pairs; their combined text shares
+		// the 300-byte cap, so the largest result carries the truncation marker.
+		const capped = prompt?.[7] as { content: Array<{ type: string; text?: string }>; toolCallId: string };
 		expect(capped.toolCallId).toBe((input[9] as { toolCallId: string }).toolCallId);
 		const total = capped.content.reduce(
 			(sum, block) => sum + (block.type === "text" ? Buffer.byteLength(block.text ?? "") : 0),
@@ -1409,7 +1413,7 @@ describe("omp-skill-state projection (context seam)", () => {
 		expect(prompt?.[5]).not.toBe(message);
 	});
 
-	test("engaged: the bundled schema's observation window pins three pairs", async () => {
+	test("engaged: the bundled schema's observation window pins six pairs", async () => {
 		const omp = fakeOmp([windowProcedure]);
 		const s = omp.session("s1");
 		await s.invoke("zstate");
@@ -1419,15 +1423,18 @@ describe("omp-skill-state projection (context seam)", () => {
 		await s.step("step one");
 		await s.step("step two");
 		await s.step("step three");
+		await s.step("step four");
+		await s.step("step five");
+		await s.step("step six");
 
 		const prompt = await s.step("done", { tools: [] });
 
-		expect(prompt).toHaveLength(10);
+		expect(prompt).toHaveLength(16);
 		// One id per message: the assistant's toolCall id, or the result's
 		// message-level toolCallId. The session counter feeds both call ids and
-		// entry ids, and the four-message head consumes one entry id more than
-		// the single state message did, so the three pinned pairs are
-		// call-10/13/16 and the dropped warm-up pair is call-4.
+		// entry ids, and each step consumes three (call id, assistant entry,
+		// result entry) after the invoke's two entries, so the six pinned pairs
+		// are call-10/13/16/19/22/25 and the dropped warm-up pair is call-3.
 		const ids = (prompt ?? []).map((message) => {
 			const { toolCallId, content } = message as { toolCallId?: unknown; content?: unknown };
 			if (typeof toolCallId === "string") return toolCallId;
@@ -1437,6 +1444,20 @@ describe("omp-skill-state projection (context seam)", () => {
 			}
 			return "";
 		});
-		expect(ids.filter(Boolean)).toEqual(["call-10", "call-10", "call-13", "call-13", "call-16", "call-16"]);
+		expect(ids.filter(Boolean)).toEqual([
+			"call-10", "call-10", "call-13", "call-13", "call-16", "call-16",
+			"call-19", "call-19", "call-22", "call-22", "call-25", "call-25",
+		]);
+	});
+
+	test("the bundled zstate schema loads the extended limits", async () => {
+		const loaded = await loadStateSchema("zstate", [windowProcedure]);
+
+		expect(loaded.ok).toBe(true);
+		if (!loaded.ok) return;
+		expect(loaded.params.observationWindow).toBe(6);
+		expect(loaded.params.observationBytes).toBe(65536);
+		expect(loaded.params.stateBytes).toBe(32768);
+		expect(loaded.params.idleSteps).toBe(8);
 	});
 });

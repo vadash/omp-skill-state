@@ -201,7 +201,7 @@ No JSON repair exists on this channel. Tool arguments are protocol-level JSON, s
 
 ### Observation cap
 
-`O_t` is capped at `observationBytes`, default 32768.
+`O_t` is capped at `observationBytes`, default 65536.
 
 - The cap applies to the combined text of the whole observation window across its pairs, not to each result.
 - Over the cap, the runtime truncates from the end of the largest result and inserts a marker naming what was cut and how to re-read it.
@@ -269,10 +269,10 @@ Degrade is terminal for the session. The user gets ordinary history-based execut
 
 | Parameter | Default | Source |
 | --- | --- | --- |
-| `observationBytes` | 32768 | schema `x-state`, else runtime default |
+| `observationBytes` | 65536 | schema `x-state`, else runtime default |
 | `idleSteps` | 5 | schema `x-state` |
 | `retries` | 3 | schema `x-state` |
-| `observationWindow` | 1 | schema `x-state`, else runtime default |
+| `observationWindow` | 3 | schema `x-state`, else runtime default |
 | `stateBytes` | 0 (disabled) | schema `x-state`, else runtime default |
 | `volatile` | heuristic: array-typed and planning keys | schema `x-state.volatile`, else runtime heuristic |
 | dropped blocks | all live-state blocks | fixed in v1 |

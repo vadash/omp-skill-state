@@ -41,7 +41,7 @@ describe("loadStateSchema", () => {
 
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
-		expect(loaded.params).toEqual({ observationBytes: 4096, observationWindow: 1, idleSteps: 5, retries: 2, stateBytes: 0 });
+		expect(loaded.params).toEqual({ observationBytes: 4096, observationWindow: 3, idleSteps: 5, retries: 2, stateBytes: 0 });
 		expect(loaded.schema.properties?.goal).toEqual({ type: "string" });
 	});
 });

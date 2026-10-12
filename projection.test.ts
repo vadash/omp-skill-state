@@ -167,6 +167,65 @@ describe("project assembly", () => {
 		expect(out[5]).toBe(second);
 	});
 
+	test("a user turn projects the head, the preceding assistant prompt, and the user message", () => {
+		const h = head();
+		const promptAssistant = assistantText("Which candidate: (A) or (B)? I recommend (A).");
+		const userReply = userMsg("Agree with recommendations.");
+
+		const out = project([...h.all, promptAssistant, userReply], 32768)!;
+
+		// Head (4) + Preceding Assistant (1) + User Reply (1) = 6
+		expect(out).toHaveLength(6);
+		expect(out[4]).toBe(promptAssistant);
+		expect(out[5]).toBe(userReply);
+	});
+
+	test("multiple user messages still keep the single preceding assistant prompt", () => {
+		const h = head();
+		const promptAssistant = assistantText("Ready to proceed?");
+		const user1 = userMsg("Yes.");
+		const user2 = userMsg("Also remember to check tests.");
+
+		const out = project([...h.all, promptAssistant, user1, user2], 32768)!;
+
+		expect(out).toHaveLength(7);
+		expect(out[4]).toBe(promptAssistant);
+		expect(out[5]).toBe(user1);
+		expect(out[6]).toBe(user2);
+	});
+
+	test("a user turn without a preceding assistant message projects head plus user turn only", () => {
+		const h = head();
+		const user = userMsg("First instruction");
+
+		const out = project([...h.all, user], 32768)!;
+
+		expect(out).toHaveLength(5);
+		expect(out[4]).toBe(user);
+	});
+
+	test("a notice between the assistant prompt and the user reply does not break the pair", () => {
+		const h = head();
+		const promptAssistant = assistantText("Ready to proceed?");
+		const reply = userMsg("Yes.");
+		const out = project([...h.all, promptAssistant, custom("todo-error-reminder"), reply], 32768)!;
+
+		expect(out).toHaveLength(6);
+		expect(out[4]).toBe(promptAssistant);
+		expect(out[5]).toBe(reply);
+	});
+
+	test("a tool result between the last turn and the reply means no antecedent", () => {
+		const h = head();
+		const call = assistantToolCall("t1");
+		const result = toolResult("t1", "ok");
+		const reply = userMsg("now widen the search");
+		const out = project([...h.all, call, result, reply], 32768)!;
+
+		expect(out).toHaveLength(5);
+		expect(out[4]).toBe(reply);
+	});
+
 	test("returns the stored head and tail objects themselves when under the cap", () => {
 		const h = head();
 		const call = assistantToolCall("t1");

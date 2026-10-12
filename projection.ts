@@ -100,12 +100,22 @@ export function project(messages: readonly AgentMessage[], observationBytes: num
 		return [...head, ...capObservation(window, observationBytes)];
 	}
 	if (last.role === "user") {
+		// Human answers are anaphoric ("agree with your recommendation"), so
+		// the user turn rides with the assistant message immediately before
+		// it as its antecedent; one message bounds the turn, and once the
+		// agent acts on the answer the next step's observation is a tool
+		// result and the exchange rotates out.
 		const turn: AgentMessage[] = [];
-		for (let i = end - 1; i >= 0; i--) {
-			const message = messages[i]!;
+		let cursor = end - 1;
+		while (cursor >= 0) {
+			const message = messages[cursor]!;
 			if (message.role === "user") turn.unshift(message);
 			else if (!isSkippable(message)) break;
+			cursor--;
 		}
+		// Notices between the batch and its antecedent do not break the pair.
+		while (cursor >= 0 && isSkippable(messages[cursor]!)) cursor--;
+		if (cursor >= 0 && messages[cursor]!.role === "assistant") turn.unshift(messages[cursor]!);
 		return [...head, ...turn];
 	}
 	// A trailing assistant message has no observation yet.

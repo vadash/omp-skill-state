@@ -1,6 +1,7 @@
 import type { CustomMessagePayload } from "@oh-my-pi/pi-coding-agent";
+import { isPlainObject } from "./state";
 import type { ExecutionState } from "./state";
-import type { AgentMessage } from "./projection";
+import type { AgentMessage } from "./types";
 
 export const STATE_CORE_MESSAGE_TYPE = "sh.omp.skill-state.core";
 export const STATE_SCRATCH_MESSAGE_TYPE = "sh.omp.skill-state.scratch";
@@ -81,6 +82,29 @@ export function coreMessage(core: ExecutionState): CustomMessagePayload {
 
 export function scratchMessage(scratch: ExecutionState): CustomMessagePayload {
 	return { customType: STATE_SCRATCH_MESSAGE_TYPE, content: renderStateContent(scratch), display: true, details: { state: scratch } };
+}
+
+// Domain predicates and the payload accessor for the stored state messages:
+// one home for what a state message looks like, so the branch reads, the test
+// session and any future consumer cannot drift apart on the shape.
+export function isStateCoreMessage(entry: { customType?: string }): boolean {
+	return entry.customType === STATE_CORE_MESSAGE_TYPE;
+}
+
+export function isStateScratchMessage(entry: { customType?: string }): boolean {
+	return entry.customType === STATE_SCRATCH_MESSAGE_TYPE;
+}
+
+// The partition a state message carries, or undefined when the entry was not
+// written by this runtime: only its own messages hold a plain-object
+// details.state, and that check is the boundary.
+export function extractStatePayload(details: unknown): ExecutionState | undefined {
+	const state = isPlainObject(details) ? details.state : undefined;
+	if (!isPlainObject(state)) return undefined;
+	// This runtime only ever stores JSON values in details.state, so the
+	// plain-object check above is the whole contract.
+	const partition = state as ExecutionState;
+	return partition;
 }
 
 // The idle warning the model sees one step before the cutoff. Per-call by

@@ -405,15 +405,28 @@ describe("volatileKeys", () => {
 		expect(volatileKeys({ type: "object", "x-state": { volatile: [] } })).toEqual([]);
 	});
 
-	test("a missing x-state or volatile field is an empty list", () => {
-		expect(volatileKeys({ type: "object" })).toEqual([]);
-		expect(volatileKeys({ type: "object", "x-state": {} })).toEqual([]);
+	test("without an explicit list, array-typed and planning keys are volatile", () => {
+		expect(
+			volatileKeys({
+				type: "object",
+				properties: {
+					goal: { type: "string" },
+					findings: { type: "array", items: { type: "string" } },
+					next_step: { type: "string" },
+					open_questions: { type: "array" },
+					working_dir: { type: "string" },
+				},
+			}),
+		).toEqual(["findings", "next_step", "open_questions"]);
 	});
 
-	test("a non-array volatile field, or one holding a non-string, is invalid and empty", () => {
-		expect(volatileKeys({ type: "object", "x-state": { volatile: "plan" } })).toEqual([]);
-		expect(volatileKeys({ type: "object", "x-state": { volatile: ["plan", 3] } })).toEqual([]);
+	test("a non-array volatile field falls back to the heuristics", () => {
+		expect(volatileKeys({ type: "object", properties: { plan: { type: "array" } }, "x-state": { volatile: "plan" } })).toEqual(["plan"]);
 		expect(volatileKeys({ type: "object", "x-state": { volatile: null } })).toEqual([]);
+	});
+
+	test("non-string entries of an explicit list are dropped, not fatal", () => {
+		expect(volatileKeys({ type: "object", "x-state": { volatile: ["plan", 3] } })).toEqual(["plan"]);
 	});
 });
 
@@ -425,26 +438,27 @@ describe("splitState", () => {
 
 	test("declared non-volatile keys are the state core, volatile and undeclared keys the scratch", () => {
 		const state: ExecutionState = { goal: "x", plan: ["a"], stray: 1 };
-		const { core, scratch } = splitState(state, schema, ["plan"]);
+		const { core, scratch } = splitState(state, schema);
 
 		expect(core).toEqual({ goal: "x" });
 		expect(scratch).toEqual({ plan: ["a"], stray: 1 });
 	});
 
-	test("with an empty volatile list every declared key is core and only undeclared keys are scratch", () => {
-		const { core, scratch } = splitState({ goal: "x", stray: 1 }, schema, []);
+	test("an explicit x-state list overrides the heuristics in both directions", () => {
+		const annotated: StateSchema = { type: "object", properties: { goal: { type: "string" }, plan: { type: "array" } }, "x-state": { volatile: ["goal"] } };
+		const { core, scratch } = splitState({ goal: "x", plan: ["a"] }, annotated);
 
-		expect(core).toEqual({ goal: "x" });
-		expect(scratch).toEqual({ stray: 1 });
+		expect(core).toEqual({ plan: ["a"] });
+		expect(scratch).toEqual({ goal: "x" });
 	});
 
 	test("an empty state splits to two empty partitions", () => {
-		expect(splitState({}, schema, ["plan"])).toEqual({ core: {}, scratch: {} });
+		expect(splitState({}, schema)).toEqual({ core: {}, scratch: {} });
 	});
 
 	test("the partitions are disjoint and the input is not mutated", () => {
 		const state: ExecutionState = { goal: "x", plan: ["a"] };
-		const { core, scratch } = splitState(state, schema, ["plan"]);
+		const { core, scratch } = splitState(state, schema);
 
 		expect(Object.keys(core).filter((key) => key in scratch)).toEqual([]);
 		expect(state).toEqual({ goal: "x", plan: ["a"] });

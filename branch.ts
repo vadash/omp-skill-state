@@ -1,5 +1,5 @@
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE } from "./messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, extractStatePayload, isStateCoreMessage, isStateScratchMessage } from "./messages";
 import { isPlainObject } from "./state";
 import type { ExecutionState } from "./state";
 
@@ -51,13 +51,12 @@ export function scanBranch(entries: readonly SessionEntry[]): ProcedureOnBranch 
 			}
 		} else if (entry.customType === PROCEDURE_SPEC_MESSAGE_TYPE && name !== undefined) {
 			spec = contentText(entry.content);
-		} else if (entry.customType === STATE_CORE_MESSAGE_TYPE && name !== undefined) {
-			const details = entry.details as { state?: unknown } | undefined;
-			// Only entries this runtime wrote carry a plain-object details.state.
-			if (isPlainObject(details?.state)) core = details.state as ExecutionState;
-		} else if (entry.customType === STATE_SCRATCH_MESSAGE_TYPE && name !== undefined) {
-			const details = entry.details as { state?: unknown } | undefined;
-			if (isPlainObject(details?.state)) scratch = details.state as ExecutionState;
+		} else if (isStateCoreMessage(entry) && name !== undefined) {
+			const state = extractStatePayload(entry.details);
+			if (state !== undefined) core = state;
+		} else if (isStateScratchMessage(entry) && name !== undefined) {
+			const state = extractStatePayload(entry.details);
+			if (state !== undefined) scratch = state;
 		}
 	}
 	if (name === undefined || spec === undefined || core === undefined || scratch === undefined) return undefined;

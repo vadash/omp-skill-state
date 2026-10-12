@@ -1,8 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, SessionEntry, Skill, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { zod } from "@oh-my-pi/pi-coding-agent";
 import extension from "./index";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement } from "./messages";
-import { isPlainObject } from "./state";
+import { extractStatePayload, isStateCoreMessage, isStateScratchMessage, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement } from "./messages";
 import type { ExecutionState } from "./state";
 
 // A fake omp session for the adapter tests: one factory (one handler map) with
@@ -160,16 +159,15 @@ export class FakeSession {
 		let core: ExecutionState | undefined;
 		for (const entry of this.branch) {
 			if (entry.type !== "custom_message") continue;
-			if (entry.customType !== STATE_CORE_MESSAGE_TYPE && entry.customType !== STATE_SCRATCH_MESSAGE_TYPE) continue;
-			const details = entry.details as { state?: unknown } | undefined;
-			if (!isPlainObject(details?.state)) continue;
-			if (entry.customType === STATE_CORE_MESSAGE_TYPE) {
-				core = details!.state as ExecutionState;
-				continue;
+			if (isStateCoreMessage(entry)) {
+				const state = extractStatePayload(entry.details);
+				if (state !== undefined) core = state;
+			} else if (isStateScratchMessage(entry)) {
+				const state = extractStatePayload(entry.details);
+				if (state === undefined || core === undefined) continue;
+				states.push({ ...core, ...state });
+				core = undefined;
 			}
-			if (core === undefined) continue;
-			states.push({ ...core, ...(details!.state as ExecutionState) });
-			core = undefined;
 		}
 		return states;
 	}

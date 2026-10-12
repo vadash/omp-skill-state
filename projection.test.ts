@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE } from "./messages";
 import { project } from "./projection";
 import { isPlainObject } from "./state";
-import type { AgentMessage } from "./projection";
+import type { AgentMessage } from "./types";
 
 // Live-state blocks the harness injects around the model; all of them must
 // vanish from a projected prompt. The skill-state types appear too: an older

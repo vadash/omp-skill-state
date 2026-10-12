@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { announcedSkillNames, consolidationNudgeMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage } from "./messages";
+import { announcedSkillNames, consolidationNudgeMessage, extractStatePayload, isStateCoreMessage, isStateScratchMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage } from "./messages";
 
 describe("consolidationNudgeMessage", () => {
 	test("is a developer message asking for a state_update consolidation, with no fence, so it never becomes an elide target", () => {
@@ -70,5 +70,23 @@ describe("skillAnnouncement / announcedSkillNames", () => {
 	test("finds every announced name in a joined batch, in order", () => {
 		const prompt = `${skillAnnouncement("alpha")}\n\n${skillAnnouncement("beta")}\nbody`;
 		expect(announcedSkillNames(prompt)).toEqual(["alpha", "beta"]);
+	});
+});
+
+describe("state message predicates", () => {
+	test("tells the two partitions apart", () => {
+		expect(isStateCoreMessage({ customType: STATE_CORE_MESSAGE_TYPE })).toBe(true);
+		expect(isStateCoreMessage({ customType: STATE_SCRATCH_MESSAGE_TYPE })).toBe(false);
+		expect(isStateCoreMessage({})).toBe(false);
+		expect(isStateScratchMessage({ customType: STATE_SCRATCH_MESSAGE_TYPE })).toBe(true);
+		expect(isStateScratchMessage({ customType: "skill-prompt" })).toBe(false);
+	});
+
+	test("extractStatePayload reads only this runtime's payload shape", () => {
+		expect(extractStatePayload({ state: { goal: "x" } })).toEqual({ goal: "x" });
+		expect(extractStatePayload({ state: "junk" })).toBeUndefined();
+		expect(extractStatePayload({})).toBeUndefined();
+		expect(extractStatePayload(undefined)).toBeUndefined();
+		expect(extractStatePayload("nope")).toBeUndefined();
 	});
 });

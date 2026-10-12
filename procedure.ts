@@ -1,8 +1,8 @@
 import type { CustomMessagePayload, SessionBeforeCompactEvent, SessionBeforeCompactResult } from "@oh-my-pi/pi-coding-agent";
 import { currentStepCut } from "./branch";
-import type { AgentMessage } from "./projection";
+import type { AgentMessage } from "./types";
 import { PROCEDURE_SPEC_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, nudgeMessage, renderStateContent, rulesMessage, scratchMessage } from "./messages";
-import { applyPatch, splitState, volatileKeys } from "./state";
+import { applyPatch, splitState } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
 
 // One run of a procedure skill (CONTEXT.md: Procedure). Everything the step
@@ -154,7 +154,7 @@ export function pendingNudges(procedure: Procedure): AgentMessage[] {
 // The current state split into its two stored partitions, derived from the
 // schema the record already holds; nothing about the split is remembered.
 function statePartitions(procedure: Procedure): { core: ExecutionState; scratch: ExecutionState } {
-	return splitState(procedure.state, procedure.schema, volatileKeys(procedure.schema));
+	return splitState(procedure.state, procedure.schema);
 }
 
 // The two stored state messages of the current state, core first. Shared by

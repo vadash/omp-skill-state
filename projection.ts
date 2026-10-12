@@ -1,10 +1,6 @@
-import type { ContextEvent } from "@oh-my-pi/pi-coding-agent";
 import { RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE } from "./messages";
 import { isPlainObject } from "./state";
-
-// The harness's transcript message union, taken from the context event payload:
-// the published package's root entry exports ContextEvent but not AgentMessage.
-export type AgentMessage = ContextEvent["messages"][number];
+import type { AgentMessage } from "./types";
 
 type ToolResult = Extract<AgentMessage, { role: "toolResult" }>;
 type ResultContent = ToolResult["content"];

@@ -6,7 +6,7 @@ import type { SessionEntry, Skill } from "@oh-my-pi/pi-coding-agent";
 import { fakeOmp, coreStateEntry, invocationEntry, procedureBranch, scratchStateEntry, specEntry, stateEntries } from "./fake-session";
 import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_UPDATE_TOOL_NAME, STATE_UPDATE_DESCRIPTION, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, coreMessage, scratchMessage } from "./messages";
 import type { ExecutionState, StateSchema } from "./state";
-import { splitState, volatileKeys } from "./state";
+import { splitState } from "./state";
 import { makeSkill } from "./skill-fixtures";
 
 // Engage sends exactly these four asides; the patch loop must add nothing else.
@@ -19,7 +19,7 @@ const procedureSchema: StateSchema = { type: "object", properties: { goal: { typ
 // The two stored state messages a commit sends, in order, as the fake records
 // them.
 const stateSends = (state: ExecutionState, deliverAs: "aside" | "nextTurn") => {
-	const { core, scratch } = splitState(state, procedureSchema, volatileKeys(procedureSchema));
+	const { core, scratch } = splitState(state, procedureSchema);
 	return [
 		{ payload: coreMessage(core) as Record<string, unknown>, options: { deliverAs } },
 		{ payload: scratchMessage(scratch) as Record<string, unknown>, options: { deliverAs } },

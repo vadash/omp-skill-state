@@ -85,3 +85,27 @@ The checkout is read-only, so installing its dependencies in place is not an opt
 
 - Bump the pin to the newest published version first. Publishes track the checkout closely; `npm view @oh-my-pi/pi-coding-agent version` shows the latest.
 - Only a tarball packed from a copy of the monorepo, after its own install and build, could serve a `file:` dependency. That path is not verified here.
+
+## Authoring a procedure skill
+
+A procedure skill is an ordinary skill that declares a state schema: a `state.schema.json` shipped beside `SKILL.md` in the skill's directory. Only skills with a schema start a procedure; a skill without a `state.schema.json` is an ordinary skill and never engages. The schema is a JSON Schema subset whose top level must be an object, with the types `string`, `number`, `boolean`, `array`, `object` and `null`; `additionalProperties` defaults to `true`, so a run can carry keys the schema does not name. Author it once per domain, not per task:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "working_dir": { "type": "string" },
+    "discovered_flags": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": true,
+  "x-state": { "volatile": ["discovered_flags"] }
+}
+```
+
+The schema declares the execution state the procedure keeps. The model writes it only through `state_update` patches: a non-null value sets the key, a `null` value deletes it whatever its declared type, and `{"$append": [ ... ]}` appends items onto an array key instead of setting it whole. Declared keys are checked against their declared types; undeclared keys are accepted while `additionalProperties` is `true`; an invalid patch changes nothing. The optional `x-state` block tunes the step policy per skill: `observationBytes`, `observationWindow`, `stateBytes`, `idleSteps`, `retries` and `volatile`.
+
+The core/scratch split is the author's one declaration. Keys named in `x-state.volatile` ride in the scratch state; every other declared key stays in the state core; undeclared keys always land in scratch. The runtime owns the partition, the two stored messages (the state core first, the scratch state behind) and the merge; the author names the list and nothing else. Without an explicit list a heuristic applies: array-typed declared keys and the planning keys `plan`, `next_step`, `findings`, `open_questions` and `scratch` are volatile, and every other declared key is core.
+
+The heuristic protects only array-typed keys and those five names; a plain scalar outside them gets no protection. A declared scalar that changes on most steps must therefore be named in `x-state.volatile`. Left off the list, it rides in the state core: every patch that writes it changes the state core, and the provider's cached prompt prefix breaks on every write instead of holding through the state core.
+
+The bundled `skills/zstate/` is the worked example: a mode-entry skill whose schema keeps `goal`, `working_dir` and `constraints` in the state core and lists `plan`, `findings`, `open_questions` and `next_step` as volatile. Its `next_step` is a plain string overwritten every step, exactly the scalar case the rule above covers.

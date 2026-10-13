@@ -68,7 +68,7 @@ export function skillInvocationName(msg: { customType?: string; attribution?: st
 // The announcement line the harness prepends to the prompt of a user-invoked
 // skill, and the extraction of every name announced in a prompt (a joined
 // batch can carry several). Coupled to the pinned @oh-my-pi/pi-coding-agent
-// 18.8.7 template src/prompts/skills/user-invocation.md, first line; the pin
+// 18.10.3 template src/prompts/skills/user-invocation.md, first line; the pin
 // guard in messages.test.ts fails on a template change instead of letting
 // detection degrade silently. Only the first-step delivery reads prose: at
 // before_agent_start the invocation is not yet a stored message, so the

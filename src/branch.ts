@@ -1,11 +1,7 @@
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, extractStatePayload, isStateCoreMessage, isStateScratchMessage } from "./messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, extractStatePayload, isStateCoreMessage, isStateScratchMessage, skillInvocationName } from "./messages";
 import { isPlainObject } from "./state";
 import type { ExecutionState } from "./state";
-
-// The harness's own message type for a skill invocation; a user-attributed one
-// is what starts a procedure.
-export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 
 // Custom message content is a string or text blocks; the invocation's P is
 // taken from and the stored P is read back through the same path.
@@ -39,16 +35,14 @@ export function scanBranch(entries: readonly SessionEntry[]): ProcedureOnBranch 
 	let scratch: ExecutionState | undefined;
 	for (const entry of entries) {
 		if (entry.type !== "custom_message") continue;
-		if (entry.customType === SKILL_PROMPT_MESSAGE_TYPE && entry.attribution === "user") {
-			const details = entry.details as { name?: unknown } | undefined;
-			if (typeof details?.name === "string" && details.name.length > 0) {
-				// A later invocation restarts the procedure, so its head messages
-				// must not be attributed to the earlier one.
-				name = details.name;
-				spec = undefined;
-				core = undefined;
-				scratch = undefined;
-			}
+		const invoked = skillInvocationName(entry);
+		if (invoked !== undefined) {
+			// A later invocation restarts the procedure, so its head messages
+			// must not be attributed to the earlier one.
+			name = invoked;
+			spec = undefined;
+			core = undefined;
+			scratch = undefined;
 		} else if (entry.customType === PROCEDURE_SPEC_MESSAGE_TYPE && name !== undefined) {
 			spec = contentText(entry.content);
 		} else if (isStateCoreMessage(entry) && name !== undefined) {

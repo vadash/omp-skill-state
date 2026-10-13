@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
-import { SKILL_PROMPT_MESSAGE_TYPE, contentText, currentStepCut, scanBranch } from "../src/branch";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent } from "../src/messages";
+import { contentText, currentStepCut, scanBranch } from "../src/branch";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, SKILL_PROMPT_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent } from "../src/messages";
 import type { ExecutionState } from "../src/state";
 
 // Branch entries as the harness stores them; ids and timestamps are

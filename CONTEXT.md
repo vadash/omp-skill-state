@@ -12,6 +12,10 @@ _Avoid_: task, job, workflow, session
 A skill that declares a state schema. Only these can start a procedure.
 _Avoid_: stateful skill, state skill
 
+**Skill invocation**:
+The user's invocation of a skill: a user-attributed message the harness stores, naming the invoked skill. A procedure starts when the invocation names a procedure skill in the main agent's session. A model-initiated skill read is not an invocation.
+_Avoid_: trigger, slash command, skill call
+
 **Mode-entry skill**:
 A procedure skill whose spec carries no task of its own. The task is the text the user gives with the invocation, and the spec says only how to work under the runtime. The bundled `zstate` skill is one.
 _Avoid_: wrapper skill, meta skill, generic skill

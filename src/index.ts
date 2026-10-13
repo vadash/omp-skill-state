@@ -1,7 +1,7 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Text } from "@oh-my-pi/pi-coding-agent";
-import { SKILL_PROMPT_MESSAGE_TYPE, contentText, scanBranch } from "./branch";
-import { STATE_UPDATE_TOOL_NAME, STATE_UPDATE_DESCRIPTION, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, announcedSkillNames, rulesMessage } from "./messages";
+import { contentText, scanBranch } from "./branch";
+import { STATE_UPDATE_TOOL_NAME, STATE_UPDATE_DESCRIPTION, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, announcedSkillNames, rulesMessage, skillInvocationName } from "./messages";
 import { commitStep, compactionFor, headMessages, newProcedure, recordReply, stateMessages, stepPrompt } from "./procedure";
 import type { Procedure } from "./procedure";
 import { isPlainObject, loadStateSchema } from "./state";
@@ -236,11 +236,9 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("message_end", async (event, ctx) => {
 		if (ctx.agent.kind !== "main") return;
 		const message = event.message;
-		if (message.role !== "custom" || message.customType !== SKILL_PROMPT_MESSAGE_TYPE) return;
-		if (message.attribution !== "user") return;
-		const details = message.details as { name?: unknown } | undefined;
-		const name = details?.name;
-		if (typeof name !== "string" || name.length === 0) return;
+		if (message.role !== "custom") return;
+		const name = skillInvocationName(message);
+		if (name === undefined) return;
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (procedures.has(sessionId)) return;
 		const loaded = await loadStateSchema(name, pi.pi.getActiveSkills());

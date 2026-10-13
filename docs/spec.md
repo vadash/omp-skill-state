@@ -310,7 +310,7 @@ omp-skill-state/
   src/branch.ts         pure reads over the stored branch (re-derive scan, compaction cut)
   src/procedure.ts      the procedure record and the step policy (patch outcomes, head, compaction)
   src/state.ts          the execution state module: schema and params loading, patch validation, merge and apply, the core/scratch split (volatileKeys, splitState)
-  src/messages.ts       the message vocabulary: the head message types, the state renderer and the core and scratch state builders
+  src/messages.ts       the message vocabulary: the head message types, the invocation constant and its predicate, the announcement pair, the state renderer and the core and scratch state builders
   test/*.test.ts        unit tests (bun test), one per source module
   test/fake-session.ts  the fake omp session for the adapter tests (branch, delivery timing, sends)
   test/skill-fixtures.ts the shared test fixture writing skill directories for the adapter and state tests (makeSkill)

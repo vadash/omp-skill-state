@@ -7,6 +7,9 @@ export const STATE_CORE_MESSAGE_TYPE = "sh.omp.skill-state.core";
 export const STATE_SCRATCH_MESSAGE_TYPE = "sh.omp.skill-state.scratch";
 export const RULES_MESSAGE_TYPE = "sh.omp.skill-state.rules";
 export const PROCEDURE_SPEC_MESSAGE_TYPE = "sh.omp.skill-state.procedure-spec";
+// The harness's own message type for a skill invocation; a user-attributed
+// one is what starts a procedure.
+export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 
 // The patch channel's fixed name (ADR 0002), the one source for the
 // registration in index.ts, the operating rules below and the adapter tests,
@@ -51,13 +54,25 @@ export function rulesMessage(): CustomMessagePayload {
 	return { customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false };
 }
 
+// The skill invocation, one spelling of what starts a procedure (CONTEXT.md
+// "Skill invocation"): a user-attributed skill-prompt naming the invoked
+// skill. Sync and pure — the state-schema check that decides "procedure
+// skill" stays with the caller, through loadStateSchema. Shared by the
+// adapter's message_end and the branch's re-derive scan.
+export function skillInvocationName(msg: { customType?: string; attribution?: string; details?: unknown }): string | undefined {
+	if (msg.customType !== SKILL_PROMPT_MESSAGE_TYPE || msg.attribution !== "user") return undefined;
+	const name = (msg.details as { name?: unknown } | undefined)?.name;
+	return typeof name === "string" && name.length > 0 ? name : undefined;
+}
+
 // The announcement line the harness prepends to the prompt of a user-invoked
 // skill, and the extraction of every name announced in a prompt (a joined
-// batch can carry several). Coupled to the harness template
-// prompts/skills/user-invocation.md, first line, in the pinned
-// @oh-my-pi/pi-coding-agent 18.8.7: if the template changes, detection
-// silently degrades to the pre-#15 behavior (engage at message_end only, no
-// first-step delivery).
+// batch can carry several). Coupled to the pinned @oh-my-pi/pi-coding-agent
+// 18.8.7 template src/prompts/skills/user-invocation.md, first line; the pin
+// guard in messages.test.ts fails on a template change instead of letting
+// detection degrade silently. Only the first-step delivery reads prose: at
+// before_agent_start the invocation is not yet a stored message, so the
+// structural predicate above cannot see it.
 export function skillAnnouncement(name: string): string {
 	return `[IMPORTANT: User invoked the "${name}" skill; follow its instructions. Full skill below.]`;
 }

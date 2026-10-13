@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, SessionEntry, Skill, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { zod } from "@oh-my-pi/pi-coding-agent";
 import extension from "../src/index";
-import { extractStatePayload, isStateCoreMessage, isStateScratchMessage, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement } from "../src/messages";
+import { extractStatePayload, isStateCoreMessage, isStateScratchMessage, PROCEDURE_SPEC_MESSAGE_TYPE, SKILL_PROMPT_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement } from "../src/messages";
 import type { ExecutionState } from "../src/state";
 
 // A fake omp session for the adapter tests: one factory (one handler map) with
@@ -189,13 +189,13 @@ export class FakeSession {
 		// The real user-invocation template announces the skill; the autoload
 		// and agent template has no announcement.
 		const injected = await this.startBatch(attribution === "user" ? `${skillAnnouncement(name)}\n\n${content}` : content);
-		const message = { role: "custom", customType: "skill-prompt", content, display: true, timestamp: Date.now(), details, attribution };
+		const message = { role: "custom", customType: SKILL_PROMPT_MESSAGE_TYPE, content, display: true, timestamp: Date.now(), details, attribution };
 		this.branch.push({
 			type: "custom_message",
 			id: this.nextId(),
 			parentId: null,
 			timestamp: new Date(0).toISOString(),
-			customType: "skill-prompt",
+			customType: SKILL_PROMPT_MESSAGE_TYPE,
 			content,
 			display: true,
 			details,
@@ -433,7 +433,7 @@ export function invocationEntry(name: string, attribution: "user" | "agent" = "u
 		id: seedId(),
 		parentId: null,
 		timestamp: new Date(0).toISOString(),
-		customType: "skill-prompt",
+		customType: SKILL_PROMPT_MESSAGE_TYPE,
 		content: `Running skill ${name}`,
 		display: true,
 		details,

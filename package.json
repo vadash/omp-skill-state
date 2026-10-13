@@ -1,6 +1,6 @@
 {
 	"name": "omp-skill-state",
-	"version": "0.0.1",
+	"version": "0.1.0",
 	"description": "Run a procedural skill against an explicit execution state instead of a growing transcript (omp plugin)",
 	"type": "module",
 	"omp": {

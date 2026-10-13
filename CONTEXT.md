@@ -37,6 +37,14 @@ The model's proposed change to the execution state, `Δt`. It is a JSON object m
 _Avoid_: update, diff, mutation
 The fixed tool name `state_update` (ADR 0002) is exempt from the avoid-list: it is the channel's registered name, not a glossary synonym.
 
+**Fold**:
+The step policy's validation of a reply's state patches: folded in declaration order into a candidate state that is then discarded. It yields the step's verdict only, never a committed state.
+_Avoid_: merge, apply, replay
+
+**Commit**:
+The one write of a merged state into the procedure, made per state patch against the state the previous commit left. The fold and the commits apply the same patches in the same order; their agreement is the fold-versus-per-call-commit equivalence.
+_Avoid_: save, persist, write
+
 **State core**:
 The part of the execution state expected to hold for many steps, sent as its own stored message so the cached prompt prefix reaches into the state.
 _Avoid_: stable state, persistent keys, core

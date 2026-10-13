@@ -188,6 +188,8 @@ Ordering, and why all-or-nothing survives the channel change:
 
 A step with no `state_update` call is legal and means an empty patch. A batch whose fold leaves the state structurally unchanged commits nothing and sends nothing (the `changed` verdict of `applyPatch`, shared by the step policy and the tool executes). Only an *invalid* patch blocks.
 
+The two halves of that ordering have names (CONTEXT.md "Fold", "Commit"): the *fold* is the step policy's validation in `assistant_message`, which folds the batch's patches into a candidate state, discards it and yields the step's verdict only; the *commit* is each `state_update` execute's one write, applied against the state the previous commit left. The fold is not a staging area — nothing it computes is replayed — and the two agree by construction: the same patches in the same declaration order against the same intermediate states. That agreement is the fold-versus-per-call-commit equivalence (section 18).
+
 Retry and degrade:
 
 - Up to `retries` (default 3) consecutive invalid patches: block and re-prompt.

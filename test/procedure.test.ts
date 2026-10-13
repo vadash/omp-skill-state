@@ -160,7 +160,7 @@ describe("recordReply with a patch", () => {
 	test("a batch of valid patches folds in order into one ok step", () => {
 		const p = procedure({}, { findings: ["old"] });
 
-		const reply = step({ findings: { $append: ["a"] } }, { next_step: "b" });
+		const reply = step({ "$append": { findings: ["a"] } }, { next_step: "b" });
 		expect(recordReply(p, reply)).toEqual({ kind: "ok" });
 		expect(p.pendingError).toBeUndefined();
 		expect(p.invalidPatches).toBe(0);
@@ -173,7 +173,7 @@ describe("recordReply with a patch", () => {
 	test("a batch using $remove folds and commits to the same state", () => {
 		const p = procedure({}, { findings: ["old", "gone"] });
 
-		const reply = step({ findings: { $remove: ["gone"] } }, { next_step: "b" });
+		const reply = step({ "$remove": { findings: ["gone"] } }, { next_step: "b" });
 		expect(recordReply(p, reply)).toEqual({ kind: "ok" });
 		expect(p.pendingError).toBeUndefined();
 		expect(p.invalidPatches).toBe(0);

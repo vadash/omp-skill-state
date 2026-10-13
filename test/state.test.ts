@@ -307,17 +307,17 @@ describe("validatePatch prototype keys", () => {
 		const schema: StateSchema = { type: "object", properties: { tags: { type: "array" } } };
 		const wired = JSON.parse('{"tags": [{"__proto__": {}}]}') as ExecutionState;
 		expect(validatePatch(wired, schema)).toBe('invalid state key "tags[0].__proto__"');
-		const appended = JSON.parse('{"tags": {"$append": [{"__proto__": {}}]}}') as ExecutionState;
-		expect(validatePatch(appended, schema)).toBe('invalid state key "tags.$append[0].__proto__"');
-		const removed = JSON.parse('{"tags": {"$remove": [{"__proto__": {}}]}}') as ExecutionState;
-		expect(validatePatch(removed, schema)).toBe('invalid state key "tags.$remove[0].__proto__"');
+		const appended = JSON.parse('{"$append": {"tags": [{"__proto__": {}}]}}') as ExecutionState;
+		expect(validatePatch(appended, schema)).toBe('invalid state key "$append.tags[0].__proto__"');
+		const removed = JSON.parse('{"$remove": {"tags": [{"__proto__": {}}]}}') as ExecutionState;
+		expect(validatePatch(removed, schema)).toBe('invalid state key "$remove.tags[0].__proto__"');
 	});
 });
 
 describe("validatePatch $append scope", () => {
 	test("an object-typed key rejects the append operator", () => {
 		const schema: StateSchema = { type: "object", properties: { meta: { type: "object", properties: {} } } };
-		expect(validatePatch({ meta: { $append: ["x"] } }, schema)).toBe('state key "meta" does not accept $append');
+		expect(validatePatch({ "$append": { meta: ["x"] } }, schema)).toBe('state key "$append.meta" must be an object');
 	});
 });
 
@@ -363,61 +363,49 @@ describe("validatePatch null deletion", () => {
 describe("validatePatch $append", () => {
 	const schema: StateSchema = { type: "object", properties: { findings: { type: "array", items: { type: "string" } } } };
 
-	test("an $append op validates against the array schema and its items", () => {
-		expect(validatePatch({ findings: { $append: ["a"] } }, schema)).toBeNull();
-		const error = validatePatch({ findings: { $append: [1] } }, schema);
-		expect(error).toContain("findings");
-		expect(error).toContain("$append[0]");
+	test("an $append payload validates item-wise against the array schema", () => {
+		expect(validatePatch({ "$append": { findings: ["a"] } }, schema)).toBeNull();
+		expect(validatePatch({ "$append": { findings: [1] } }, schema)).toBe('state key "$append.findings[0]" must be a string (was number)');
 	});
 
 	test("a non-array $append payload is rejected", () => {
-		const error = validatePatch({ findings: { $append: "a" } }, schema);
-		expect(error).toContain("findings");
-		expect(error).toContain("$append");
+		expect(validatePatch({ "$append": { findings: "a" } }, schema)).toBe('state key "$append.findings" must be an array of items');
 	});
 
 	test("a null element is a value, not a deletion, and must satisfy the items schema", () => {
 		const error = validatePatch({ findings: ["a", null] }, schema);
 		expect(error).toContain('findings[1]" must be a string');
-		const appended = validatePatch({ findings: { $append: [null] } }, schema);
-		expect(appended).toContain('findings.$append[0]" must be a string');
-	});
-
-	test("members riding an $append op are rejected by name, so the merge drops nothing silently", () => {
-		const error = validatePatch({ findings: { $append: ["a"], next_step: "y" } }, schema);
-		expect(error).toContain('state key "findings" contains $append with unexpected sibling keys: "next_step"');
-		expect(error).toContain("Move those keys to the top level of the patch.");
+		expect(validatePatch({ "$append": { findings: [null] } }, schema)).toBe('state key "$append.findings[0]" must be a string (was null)');
 	});
 
 	test("a malformed $append on an undeclared key is rejected instead of merging literally", () => {
 		const open: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
-		const malformed = JSON.parse('{"extra": {"$append": "x"}}') as ExecutionState;
-		expect(validatePatch(malformed, open)).toBe('state key "extra.$append" must be an array of items');
+		expect(validatePatch({ "$append": { extra: "x" } }, open)).toBe('state key "$append.extra" must be an array of items');
 	});
 
 	test("$append merges onto the current array instead of replacing it", () => {
-		expect(mergeState({ findings: ["x"], goal: "g" }, { findings: { $append: ["a", "b"] } } as ExecutionState)).toEqual({
+		expect(mergeState({ findings: ["x"], goal: "g" }, { "$append": { findings: ["a", "b"] } } as ExecutionState)).toEqual({
 			findings: ["x", "a", "b"],
 			goal: "g",
 		});
 	});
 
 	test("$append to a missing key initializes the array", () => {
-		const applied = applyPatch({}, { findings: { $append: ["val"] } }, schema);
+		const applied = applyPatch({}, { "$append": { findings: ["val"] } }, schema);
 		expect(applied.ok).toBe(true);
 		if (applied.ok) expect(applied.state).toEqual({ findings: ["val"] });
 	});
 
 	test("$append of an empty array to an existing key changes nothing", () => {
-		expect(mergeState({ findings: ["x"] }, { findings: { $append: [] } })).toEqual({ findings: ["x"] });
+		expect(mergeState({ findings: ["x"] }, { "$append": { findings: [] } })).toEqual({ findings: ["x"] });
 	});
 
 	test("$append of an empty array to a missing key does not materialize an empty array", () => {
-		expect(mergeState({}, { findings: { $append: [] } } as ExecutionState)).toEqual({});
+		expect(mergeState({}, { "$append": { findings: [] } } as ExecutionState)).toEqual({});
 	});
 
-	test("$append never recurses into an object-keyed merge", () => {
-		expect(mergeState({ meta: { a: 1 } }, { meta: { $append: ["x"] } } as ExecutionState)).toEqual({ meta: ["x"] });
+	test("an op-shaped object below the root merges literally as data", () => {
+		expect(mergeState({ meta: { a: 1 } }, { meta: { "$append": ["x"] } } as ExecutionState)).toEqual({ meta: { a: 1, "$append": ["x"] } });
 	});
 
 	test("a nested null under an absent parent is a no-op, not an object holding nulls", () => {
@@ -429,70 +417,45 @@ describe("validatePatch $append", () => {
 describe("validatePatch $remove", () => {
 	const schema: StateSchema = { type: "object", properties: { findings: { type: "array", items: { type: "string" } } } };
 
-	test("a $remove op validates against the array schema and its items", () => {
-		expect(validatePatch({ findings: { $remove: ["a"] } }, schema)).toBeNull();
-		expect(validatePatch({ findings: { $remove: [1] } }, schema)).toBe('state key "findings.$remove[0]" must be a string (was number)');
+	test("a $remove payload validates item-wise against the array schema", () => {
+		expect(validatePatch({ "$remove": { findings: ["a"] } }, schema)).toBeNull();
+		expect(validatePatch({ "$remove": { findings: [1] } }, schema)).toBe('state key "$remove.findings[0]" must be a string (was number)');
 	});
 
 	test("a non-array $remove payload is rejected", () => {
-		expect(validatePatch({ findings: { $remove: "a" } }, schema)).toBe('state key "findings.$remove" must be an array of items');
+		expect(validatePatch({ "$remove": { findings: "a" } }, schema)).toBe('state key "$remove.findings" must be an array of items');
 	});
 
 	test("a null element is a value, not a deletion, and must satisfy the items schema", () => {
-		expect(validatePatch({ findings: { $remove: [null] } }, schema)).toBe('state key "findings.$remove[0]" must be a string (was null)');
-	});
-
-	test("members riding a $remove op are rejected by name, so the merge drops nothing silently", () => {
-		expect(validatePatch({ findings: { $remove: ["a"], next_step: "y" } }, schema)).toBe(
-			'state key "findings" contains $remove with unexpected sibling keys: "next_step". Move those keys to the top level of the patch.',
-		);
-	});
-
-	test("an op carrying both $append and $remove rejects $remove as an unexpected sibling", () => {
-		expect(validatePatch({ findings: { $append: ["a"], $remove: ["b"] } }, schema)).toBe(
-			'state key "findings" contains $append with unexpected sibling keys: "$remove". Move those keys to the top level of the patch.',
-		);
+		expect(validatePatch({ "$remove": { findings: [null] } }, schema)).toBe('state key "$remove.findings[0]" must be a string (was null)');
 	});
 
 	test("a malformed $remove on an undeclared key is rejected instead of merging literally", () => {
 		const open: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
-		const malformed = JSON.parse('{"extra": {"$remove": "x"}}') as ExecutionState;
-		expect(validatePatch(malformed, open)).toBe('state key "extra.$remove" must be an array of items');
-	});
-
-	test("members riding an op on an undeclared key are rejected, not dropped by the merge", () => {
-		const open: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
-		const rider = JSON.parse('{"extra": {"$remove": ["a"], "rider": 1}}') as ExecutionState;
-		expect(validatePatch(rider, open)).toBe(
-			'state key "extra" contains $remove with unexpected sibling keys: "rider". Move those keys to the top level of the patch.',
-		);
-		const riderAppend = JSON.parse('{"extra": {"$append": ["a"], "rider": 1}}') as ExecutionState;
-		expect(validatePatch(riderAppend, open)).toBe(
-			'state key "extra" contains $append with unexpected sibling keys: "rider". Move those keys to the top level of the patch.',
-		);
+		expect(validatePatch({ "$remove": { extra: "x" } }, open)).toBe('state key "$remove.extra" must be an array of items');
 	});
 
 	test("$remove deletes matching items by value and preserves the order of the rest", () => {
-		expect(mergeState({ findings: ["x", "a", "y", "b"], goal: "g" }, { findings: { $remove: ["a", "y"] } } as ExecutionState)).toEqual({
+		expect(mergeState({ findings: ["x", "a", "y", "b"], goal: "g" }, { "$remove": { findings: ["a", "y"] } } as ExecutionState)).toEqual({
 			findings: ["x", "b"],
 			goal: "g",
 		});
 	});
 
 	test("$remove deletes every matching occurrence, not just the first", () => {
-		expect(mergeState({ findings: ["a", "x", "a", "b"] }, { findings: { $remove: ["a"] } } as ExecutionState)).toEqual({
+		expect(mergeState({ findings: ["a", "x", "a", "b"] }, { "$remove": { findings: ["a"] } } as ExecutionState)).toEqual({
 			findings: ["x", "b"],
 		});
 	});
 
 	test("$remove matches object, array and null items by deep value", () => {
 		expect(
-			mergeState({ findings: [{ a: 1 }, [1, 2], null, "x"] }, { findings: { $remove: [{ a: 1 }, [1, 2], null] } } as ExecutionState),
+			mergeState({ findings: [{ a: 1 }, [1, 2], null, "x"] }, { "$remove": { findings: [{ a: 1 }, [1, 2], null] } } as ExecutionState),
 		).toEqual({ findings: ["x"] });
 	});
 
 	test("removing an absent item reports changed false and leaves the state untouched", () => {
-		expect(applyPatch({ findings: ["a", "b"] }, { findings: { $remove: ["z"] } }, schema)).toEqual({
+		expect(applyPatch({ findings: ["a", "b"] }, { "$remove": { findings: ["z"] } }, schema)).toEqual({
 			ok: true,
 			state: { findings: ["a", "b"] },
 			changed: false,
@@ -500,27 +463,89 @@ describe("validatePatch $remove", () => {
 	});
 
 	test("$remove on a missing key is a no-op and does not materialize the key", () => {
-		expect(mergeState({}, { findings: { $remove: ["a"] } } as ExecutionState)).toEqual({});
+		expect(mergeState({}, { "$remove": { findings: ["a"] } } as ExecutionState)).toEqual({});
 	});
 
 	test("$remove on a non-array current value is a no-op", () => {
-		expect(mergeState({ findings: "x" }, { findings: { $remove: ["a"] } } as ExecutionState)).toEqual({ findings: "x" });
+		expect(mergeState({ findings: "x" }, { "$remove": { findings: ["a"] } } as ExecutionState)).toEqual({ findings: "x" });
 	});
 
 	test("removing every item leaves an empty array because the key existed", () => {
-		expect(mergeState({ findings: ["a"] }, { findings: { $remove: ["a"] } } as ExecutionState)).toEqual({ findings: [] });
+		expect(mergeState({ findings: ["a"] }, { "$remove": { findings: ["a"] } } as ExecutionState)).toEqual({ findings: [] });
 	});
 });
 
 describe("validatePatch $remove scope", () => {
 	test("an object-typed key rejects the remove operator", () => {
 		const schema: StateSchema = { type: "object", properties: { meta: { type: "object", properties: {} } } };
-		expect(validatePatch({ meta: { $remove: ["x"] } }, schema)).toBe('state key "meta" does not accept $remove');
+		expect(validatePatch({ "$remove": { meta: ["x"] } }, schema)).toBe('state key "$remove.meta" must be an object');
+	});
+});
+
+describe("validatePatch root operators", () => {
+	const schema: StateSchema = {
+		type: "object",
+		properties: {
+			goal: { type: "string" },
+			findings: { type: "array", items: { type: "string" } },
+			meta: { type: "object", properties: {} },
+		},
+	};
+
+	test("a root key cannot be both set and $appended in one patch", () => {
+		expect(validatePatch({ goal: "x", "$append": { goal: ["a"] } }, schema)).toBe(
+			'state key "goal" cannot be both set and $appended in one patch',
+		);
 	});
 
-	test("a pop-like op is not an operator: an array-typed key rejects it as a non-array", () => {
-		const schema: StateSchema = { type: "object", properties: { findings: { type: "array", items: { type: "string" } } } };
-		expect(validatePatch({ findings: { $pop: 1 } }, schema)).toBe('state key "findings" must be an array');
+	test("a root key cannot be both set and $removed in one patch", () => {
+		expect(validatePatch({ findings: ["a"], "$remove": { findings: ["a"] } }, schema)).toBe(
+			'state key "findings" cannot be both set and $removed in one patch',
+		);
+	});
+
+	test("a root key cannot be both $appended and $removed in one patch", () => {
+		expect(validatePatch({ "$append": { findings: ["a"] }, "$remove": { findings: ["b"] } }, schema)).toBe(
+			'state key "findings" cannot be both $appended and $removed in one patch',
+		);
+	});
+
+	test("a null write still collides with an operator on the same key", () => {
+		expect(validatePatch({ goal: null, "$append": { goal: ["a"] } }, schema)).toBe(
+			'state key "goal" cannot be both set and $appended in one patch',
+		);
+	});
+
+	test("an unknown $-prefixed root key rejects as an unknown operator: the namespace is reserved", () => {
+		expect(validatePatch({ "$pop": 1 }, schema)).toBe('unknown state patch operator "$pop"; the operators are $append and $remove');
+		expect(validatePatch({ "$append": { findings: ["a"] }, "$push": { findings: ["b"] } }, schema)).toBe(
+			'unknown state patch operator "$push"; the operators are $append and $remove',
+		);
+	});
+
+	test("operators reach undeclared keys; append initializes from empty", () => {
+		const open: StateSchema = { type: "object", properties: {} };
+		const applied = applyPatch({}, { "$append": { extra: ["x"] } }, open);
+		expect(applied.ok).toBe(true);
+		if (applied.ok) expect(applied.state).toEqual({ extra: ["x"] });
+	});
+
+	test("an op-shaped object below the patch root is plain data, not an operator", () => {
+		const open: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
+		expect(validatePatch({ extra: { deep: { "$append": ["x"] } } }, open)).toBeNull();
+		expect(validatePatch({ meta: { "$remove": ["x"] } }, schema)).toBeNull();
+	});
+
+	test("hazard keys stay banned at every depth, operator payloads included", () => {
+		const wired = JSON.parse('{"$append": {"extra": [{"__proto__": {}}]}}') as ExecutionState;
+		expect(validatePatch(wired, schema)).toBe('invalid state key "$append.extra[0].__proto__"');
+		const target = JSON.parse('{"$remove": {"__proto__": []}}') as ExecutionState;
+		expect(validatePatch(target, schema)).toBe('invalid state key "$remove.__proto__"');
+	});
+
+	test("an operator payload must be an object mapping state keys to item arrays", () => {
+		expect(validatePatch({ "$append": ["a"] }, schema)).toBe('state key "$append" must be an object mapping state keys to item arrays');
+		expect(validatePatch({ "$remove": { extra: "a" } }, schema)).toBe('state key "$remove.extra" must be an array of items');
 	});
 });
 

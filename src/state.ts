@@ -105,7 +105,59 @@ function readParams(raw: unknown): StateParams {
 // All-or-nothing: callers must not merge a patch unless this returns null.
 export function validatePatch(patch: unknown, schema: StateSchema): string | null {
 	if (!isPlainObject(patch)) return "state patch must be a JSON object";
+	const error = validateRootOperators(patch, schema);
+	if (error !== null) return error;
 	return validateObject(patch, schema, "");
+}
+
+// The two patch operators (ADR 0004): root keys whose value maps state keys
+// to item arrays, so an array edit beside a key set needs no nested braces.
+// The $ namespace is reserved for operators.
+const OPERATORS = ["$append", "$remove"] as const;
+
+// The patch-root walk: an unknown $-prefixed key rejects, one state key
+// cannot carry two writes in one patch (set + operate, or both operators),
+// and each operator payload validates like any value of its target key —
+// item-wise against the declared array's items schema, or against the deep
+// check where no schema walks. The plain keys validate in validateObject.
+function validateRootOperators(patch: Record<string, unknown>, schema: StateSchema): string | null {
+	const properties = isPlainObject(schema.properties) ? schema.properties : {};
+	const sets = new Set<string>();
+	const appended: string[] = [];
+	const removed: string[] = [];
+	for (const key of Object.keys(patch)) {
+		if (!key.startsWith("$")) {
+			sets.add(key);
+			continue;
+		}
+		if (key !== "$append" && key !== "$remove") {
+			return `unknown state patch operator "${key}"; the operators are $append and $remove`;
+		}
+		const map = patch[key];
+		if (!isPlainObject(map)) return `state key "${key}" must be an object mapping state keys to item arrays`;
+		for (const target of Object.keys(map)) {
+			if (isHazardKey(target)) return `invalid state key "${key}.${target}"`;
+		}
+		(key === "$append" ? appended : removed).push(...Object.keys(map));
+	}
+	for (const target of appended) {
+		if (sets.has(target)) return `state key "${target}" cannot be both set and $appended in one patch`;
+		if (removed.includes(target)) return `state key "${target}" cannot be both $appended and $removed in one patch`;
+	}
+	for (const target of removed) {
+		if (sets.has(target)) return `state key "${target}" cannot be both set and $removed in one patch`;
+	}
+	for (const op of OPERATORS) {
+		const map = patch[op] as Record<string, unknown>;
+		for (const target of op === "$append" ? appended : removed) {
+			const payload = map[target];
+			if (!Array.isArray(payload)) return `state key "${op}.${target}" must be an array of items`;
+			const sub = properties[target];
+			const error = sub === undefined ? checkDeepPatch(payload, `${op}.${target}`) : validateValue(payload, sub, `${op}.${target}`);
+			if (error !== null) return error;
+		}
+	}
+	return null;
 }
 
 // The keys whose assignment would reach the object's prototype machinery
@@ -117,6 +169,9 @@ function isHazardKey(key: string): boolean {
 function validateObject(obj: Record<string, unknown>, schema: JsonSchema, path: string): string | null {
 	const properties = isPlainObject(schema.properties) ? schema.properties : {};
 	for (const key of Object.keys(obj)) {
+		// Operator maps are data-checked by the root operator walk; below the
+		// patch root a $-prefixed key is plain data like any other.
+		if (path === "" && key.startsWith("$")) continue;
 		if (isHazardKey(key)) {
 			return `invalid state key "${path ? `${path}.${key}` : key}"`;
 		}
@@ -139,20 +194,10 @@ function validateObject(obj: Record<string, unknown>, schema: JsonSchema, path: 
 	return null;
 }
 
-// The no-sibling rule shared by both array operators, at every depth: extra
-// members on the op object would be silently dropped by the merge.
-function siblingOpError(value: Record<string, unknown>, op: "$append" | "$remove", path: string): string | null {
-	const extraKeys = Object.keys(value).filter((key) => key !== op);
-	if (extraKeys.length === 0) return null;
-	return `state key "${path}" contains ${op} with unexpected sibling keys: ${extraKeys
-		.map((key) => `"${key}"`)
-		.join(", ")}. Move those keys to the top level of the patch.`;
-}
-
-// Rejects, at every depth of a value no schema walks: prototype-hazard keys,
-// and $append/$remove objects that are not a legal op — a payload that is not
-// an array, or members riding the operator (the merge would drop them
-// silently). Objects recursively, arrays element-wise, everything else is safe.
+// Rejects, at every depth of a value no schema walks: prototype-hazard keys.
+// Operator-shaped objects are legal data below the patch root (ADR 0004):
+// only the root operator walk reads $append and $remove. Objects
+// recursively, arrays element-wise, everything else is safe.
 function checkDeepPatch(value: unknown, path: string): string | null {
 	if (Array.isArray(value)) {
 		for (let i = 0; i < value.length; i++) {
@@ -162,38 +207,11 @@ function checkDeepPatch(value: unknown, path: string): string | null {
 		return null;
 	}
 	if (!isPlainObject(value)) return null;
-	const op = "$append" in value ? "$append" : "$remove" in value ? "$remove" : null;
-	if (op !== null) {
-		if (!Array.isArray(value[op])) return `state key "${path}.${op}" must be an array of items`;
-		const error = siblingOpError(value, op, path);
-		if (error !== null) return error;
-	}
 	for (const key of Object.keys(value)) {
 		if (isHazardKey(key)) {
 			return `invalid state key "${path}.${key}"`;
 		}
 		const error = checkDeepPatch(value[key], `${path}.${key}`);
-		if (error !== null) return error;
-	}
-	return null;
-}
-
-// Shared validation for the two array operators: the op object carries
-// nothing but its operator — extra members would be silently dropped by the
-// merge, so the error names them and sends them to the patch's top level —
-// and the payload validates item-wise against the items schema, or against
-// the deep check where no schema walks.
-function validateArrayOp(value: Record<string, unknown>, op: "$append" | "$remove", schema: JsonSchema, path: string): string | null {
-	const error = siblingOpError(value, op, path);
-	if (error !== null) return error;
-	const payload = value[op] as unknown[];
-	if (schema.items !== undefined) {
-		for (let i = 0; i < payload.length; i++) {
-			const error = validateValue(payload[i], schema.items, `${path}.${op}[${i}]`);
-			if (error !== null) return error;
-		}
-	} else {
-		const error = checkDeepPatch(payload, `${path}.${op}`);
 		if (error !== null) return error;
 	}
 	return null;
@@ -222,18 +240,8 @@ function validateValue(value: unknown, schema: JsonSchema, path: string): string
 		}
 		case "null":
 			return value === null ? null : `state key "${path}" must be null`;
-		case "array": {
-			// The $append and $remove operators mutate an array semantically:
-			// only the affected items are validated, against the items schema.
-			// An op carrying both is caught by the first branch, so the merge
-			// never sees it.
-			if (isAppendOp(value)) return validateArrayOp(value, "$append", schema, path);
-			if (isRemoveOp(value)) return validateArrayOp(value, "$remove", schema, path);
-			if (!Array.isArray(value)) {
-				if (isPlainObject(value) && "$append" in value) return `state key "${path}.$append" must be an array of items`;
-				if (isPlainObject(value) && "$remove" in value) return `state key "${path}.$remove" must be an array of items`;
-				return `state key "${path}" must be an array`;
-			}
+		case "array":
+			if (!Array.isArray(value)) return `state key "${path}" must be an array`;
 			if (schema.items !== undefined) {
 				for (let i = 0; i < value.length; i++) {
 					const error = validateValue(value[i], schema.items, `${path}[${i}]`);
@@ -244,13 +252,7 @@ function validateValue(value: unknown, schema: JsonSchema, path: string): string
 				if (error !== null) return error;
 			}
 			return null;
-		}
 		case "object":
-			// $append and $remove are array operators: only array keys can take
-			// them, so an object key rejects them here and the merge never sees
-			// these shapes.
-			if (isAppendOp(value)) return `state key "${path}" does not accept $append`;
-			if (isRemoveOp(value)) return `state key "${path}" does not accept $remove`;
 			if (!isPlainObject(value)) return `state key "${path}" must be an object`;
 			return validateObject(value, schema, path);
 		// Anything else — an array-typed `type`, a bogus value in hand-written
@@ -261,52 +263,48 @@ function validateValue(value: unknown, schema: JsonSchema, path: string): string
 	}
 }
 
-// The $append patch operator: appends items to an array key instead of
-// setting the array whole. Only the $append member is meaningful; a payload
-// that is not an array of values is not an append op.
-function isAppendOp(value: unknown): value is { $append: unknown[] } {
-	return isPlainObject(value) && "$append" in value && Array.isArray(value.$append);
-}
-
-// The $remove patch operator: removes items from an array key by value
-// instead of setting the array whole. Only the $remove member is meaningful;
-// a payload that is not an array of values is not a remove op.
-function isRemoveOp(value: unknown): value is { $remove: unknown[] } {
-	return isPlainObject(value) && "$remove" in value && Array.isArray(value.$remove);
-}
-
 // Pure: never mutates t or patch. Untouched nested objects stay shared with t,
-// which is safe because nothing downstream mutates state in place.
-export function mergeState(t: ExecutionState, patch: ExecutionState): ExecutionState {
+// which is safe because nothing downstream mutates state in place. The root
+// flag gates the operator maps: they ride the patch root only (ADR 0004), so
+// below it a $-prefixed key merges key-wise as plain data.
+export function mergeState(t: ExecutionState, patch: ExecutionState, root = true): ExecutionState {
 	const merged: ExecutionState = { ...t };
 	for (const key of Object.keys(patch)) {
 		const value = patch[key];
+		if (root && (key === "$append" || key === "$remove")) {
+			// Validation guarantees an operator target cannot collide with a
+			// plain key.
+			const map = value as ExecutionState;
+			for (const target of Object.keys(map)) {
+				// A missing or non-array current value starts from empty, so
+				// $append initializes the key; an empty append on a key with no
+				// array to grow is a no-op — it must not materialize an empty
+				// array. $remove only touches an existing array, so a missing
+				// key or a non-array value stays untouched and the op must not
+				// materialize the key.
+				const current: JsonValue[] = Array.isArray(t[target]) ? t[target] : [];
+				if (key === "$append") {
+					const appended = map[target] as JsonValue[];
+					if (appended.length > 0 || current.length > 0) merged[target] = [...current, ...appended];
+				} else {
+					// Items match by deep value; untouched items keep their order
+					// and share identity with the current array, so removing an
+					// absent item is a no-op.
+					const removals = map[target] as JsonValue[];
+					const kept = current.filter((item) => !removals.some((gone) => jsonEquals(item, gone)));
+					if (kept.length !== current.length) merged[target] = kept;
+				}
+			}
+			continue;
+		}
 		if (value === null) {
 			delete merged[key];
-		} else if (isAppendOp(value)) {
-			// A missing or non-array current value starts from empty, so $append
-			// initializes the key; an empty append on a key with no array to
-			// grow is a no-op — it must not materialize an empty array.
-			const current: JsonValue[] = Array.isArray(t[key]) ? t[key] : [];
-			// Items were validated against the schema's items in validateValue,
-			// and a patch only ever arrives as JSON, so each item is a JsonValue.
-			const appended = value.$append as JsonValue[];
-			if (appended.length > 0 || current.length > 0) merged[key] = [...current, ...appended];
-		} else if (isRemoveOp(value)) {
-			// $remove only touches an existing array: a missing key or a
-			// non-array value stays untouched, and the op must not materialize
-			// the key. Untouched items keep their order and share identity
-			// with the current array, so removing an absent item is a no-op.
-			const current: JsonValue[] = Array.isArray(t[key]) ? t[key] : [];
-			const removals = value.$remove as JsonValue[];
-			const kept = current.filter((item) => !removals.some((gone) => jsonEquals(item, gone)));
-			if (kept.length !== current.length) merged[key] = kept;
 		} else if (isPlainObject(value)) {
 			// Nested objects merge key-wise, and a key absent from t merges
 			// against empty so a nested null under an absent parent deletes
 			// into nothing instead of creating an object that holds nulls.
 			const base = isPlainObject(t[key]) ? (t[key] as ExecutionState) : null;
-			const nested = mergeState(base ?? {}, value as ExecutionState);
+			const nested = mergeState(base ?? {}, value as ExecutionState, false);
 			if (base !== null || Object.keys(nested).length > 0) merged[key] = nested;
 		} else {
 			merged[key] = value;

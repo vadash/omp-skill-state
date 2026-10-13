@@ -1,5 +1,5 @@
 import { RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE } from "./messages";
-import { isPlainObject } from "./state";
+import { isPlainObject } from "./types";
 import type { AgentMessage } from "./types";
 
 type ToolResult = Extract<AgentMessage, { role: "toolResult" }>;

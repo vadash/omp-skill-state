@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { Skill } from "@oh-my-pi/pi-coding-agent";
+import { isPlainObject } from "./types";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [k: string]: JsonValue };
 
@@ -317,8 +318,4 @@ export function splitState(state: ExecutionState, schema: StateSchema): { core: 
 		else scratch[key] = value;
 	}
 	return { core, scratch };
-}
-
-export function isPlainObject(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
 }

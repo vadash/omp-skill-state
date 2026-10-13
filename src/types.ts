@@ -5,3 +5,7 @@ import type { ContextEvent } from "@oh-my-pi/pi-coding-agent";
 // Its own module because messages.ts and projection.ts both need it, and one
 // importing the other would close an import cycle.
 export type AgentMessage = ContextEvent["messages"][number];
+
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}

@@ -4,7 +4,8 @@ import { contentText, scanBranch } from "./branch";
 import { STATE_UPDATE_TOOL_NAME, STATE_UPDATE_DESCRIPTION, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, announcedSkillNames, rulesMessage, skillInvocationName } from "./messages";
 import { commitStep, compactionFor, headMessages, newProcedure, recordReply, stateMessages, stepPrompt } from "./procedure";
 import type { Procedure } from "./procedure";
-import { isPlainObject, loadStateSchema } from "./state";
+import { loadStateSchema } from "./state";
+import { isPlainObject } from "./types";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
 
 // The final state waits for the session to go idle before it is stored; the
@@ -43,6 +44,23 @@ export default function (pi: ExtensionAPI): void {
 		if (procedure === undefined) return;
 		end(ctx, procedure, `disengaged (${trigger})`);
 	}
+
+	// The disengage trigger texts, one home per wording so a notice wording
+	// changes in exactly one place; the idle label is parameterized because it
+	// names idleSteps, and the /clear input check reads the same entry it
+	// disengages with.
+	const disengageLabels = {
+		new: "/new",
+		resume: "/resume",
+		fork: "fork",
+		branch: "branch",
+		btw: "btw",
+		sessionSwitch: "session switch",
+		sessionStart: "session start",
+		treeNavigation: "tree navigation",
+		clear: "/clear",
+		idle: (steps: number) => `idle for ${steps} steps`,
+	};
 
 	// The state-write channel (ADR 0002): a strict, zero-approval tool built
 	// and registered once at factory load, so the definition sits in every
@@ -191,7 +209,7 @@ export default function (pi: ExtensionAPI): void {
 		switch (outcome.kind) {
 			case "ended":
 				if (outcome.cause === "degrade") end(ctx, procedure, `degraded after ${procedure.params.retries} invalid patches; running ordinarily`, "warning");
-				else end(ctx, procedure, `disengaged (idle for ${procedure.params.idleSteps} steps)`);
+				else end(ctx, procedure, `disengaged (${disengageLabels.idle(procedure.params.idleSteps)})`);
 				break;
 			default:
 				// ok and none need nothing here: the state_update executes commit
@@ -287,41 +305,40 @@ export default function (pi: ExtensionAPI): void {
 	// record is ended here (with the spec's disengage notice) and the incoming
 	// session re-derives from the branch it loads; a fork re-derives like any
 	// branch because the state it carries is current, not stale.
-	const switchLabels: Record<"new" | "resume" | "fork", string> = { new: "/new", resume: "/resume", fork: "fork" };
 	pi.on("session_before_switch", (event, ctx) => {
-		disengage(ctx, switchLabels[event.reason]);
+		disengage(ctx, disengageLabels[event.reason]);
 		return undefined;
 	});
 
 	pi.on("session_before_branch", (event, ctx) => {
-		disengage(ctx, event.reason);
+		disengage(ctx, disengageLabels[event.reason]);
 		return undefined;
 	});
 
 	pi.on("session_switch", async (_event, ctx) => {
-		await rederive(ctx, "session switch");
+		await rederive(ctx, disengageLabels.sessionSwitch);
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		await rederive(ctx, "session start");
+		await rederive(ctx, disengageLabels.sessionStart);
 	});
 
 	// Both fire after the branch changed. A rewind lands in a new session id,
 	// whose record was never engaged; tree navigation keeps the id, so there the
 	// scan also disengages when the new leaf sits before the invocation.
 	pi.on("session_branch", async (_event, ctx) => {
-		await rederive(ctx, "branch");
+		await rederive(ctx, disengageLabels.branch);
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
-		await rederive(ctx, "tree navigation");
+		await rederive(ctx, disengageLabels.treeNavigation);
 	});
 
 	pi.on("input", (event, ctx) => {
 		// The input event fires before slash-command interpretation, so it is the
 		// only surface that still sees the raw /clear text (/clear emits nothing
 		// to extensions). Returning undefined keeps normal dispatch running.
-		if (event.text.trim() === "/clear") disengage(ctx, "/clear");
+		if (event.text.trim() === disengageLabels.clear) disengage(ctx, disengageLabels.clear);
 		return undefined;
 	});
 }

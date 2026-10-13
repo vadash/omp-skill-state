@@ -1,6 +1,6 @@
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import { PROCEDURE_SPEC_MESSAGE_TYPE, extractStatePayload, isStateCoreMessage, isStateScratchMessage, skillInvocationName } from "./messages";
-import { isPlainObject } from "./state";
+import { isPlainObject } from "./types";
 import type { ExecutionState } from "./state";
 
 // Custom message content is a string or text blocks; the invocation's P is

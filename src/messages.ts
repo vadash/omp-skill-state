@@ -1,5 +1,5 @@
 import type { CustomMessagePayload } from "@oh-my-pi/pi-coding-agent";
-import { isPlainObject } from "./state";
+import { isPlainObject } from "./types";
 import type { ExecutionState } from "./state";
 import type { AgentMessage } from "./types";
 

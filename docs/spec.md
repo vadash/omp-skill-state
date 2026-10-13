@@ -313,6 +313,7 @@ omp-skill-state/
   src/procedure.ts      the procedure record and the step policy (patch outcomes, head, compaction)
   src/state.ts          the execution state module: schema and params loading, patch validation, merge and apply, the core/scratch split (volatileKeys, splitState)
   src/messages.ts       the message vocabulary: the head message types, the invocation constant and its predicate, the announcement pair, the state renderer and the core and scratch state builders
+  src/types.ts          shared types: the harness message union and the structural object predicate
   test/*.test.ts        unit tests (bun test), one per source module; test/adapter-*.test.ts drive the factory through the fake session, one file per concern
   test/fake-session.ts  the fake omp session for the adapter tests (branch, delivery timing, sends)
   test/harness.ts       the adapter suites' shared harness: per-suite skill fixtures, the engaged/projecting session builders, assertion builders

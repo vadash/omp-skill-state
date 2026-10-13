@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE } from "../src/messages";
 import { project } from "../src/projection";
-import { isPlainObject } from "../src/state";
+import { isPlainObject } from "../src/types";
 import type { AgentMessage } from "../src/types";
 import { ZERO_USAGE } from "./entries";
 

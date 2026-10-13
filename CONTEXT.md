@@ -65,6 +65,14 @@ _Avoid_: result, output, feedback
 The number of most recent tool pairs the projection pins as the step's observation, under one shared byte cap.
 _Avoid_: history window, result buffer
 
+**Pair tag**:
+The short label minted per windowed tool pair: four hex digits derived from the tool call id, prepended to the projected tool result's text as `[#xxxx tool]`. Stable for the pair's lifetime in the window; the stored transcript never carries it. Modeled on the harness's hashline tags, but not one.
+_Avoid_: hex header, block id, hashline tag
+
+**Window notice**:
+The per-call developer line appended after the observation window each step, listing the window's pair tags oldest first. It states the drop rule — the oldest pairs leave as new results arrive — and never predicts which pair expires, because the drop count equals the next step's result count. Unlike a nudge it fires on every tool-result step, not when a threshold is met; like a nudge it is never stored.
+_Avoid_: expiry line, TTL banner, watermark
+
 **Step**:
 One provider call. A step's `state_update` patches fold in order into one merged state change, beside one batch of tool calls and one set of observations.
 _Avoid_: turn, iteration, round
@@ -88,6 +96,10 @@ _Avoid_: synthesized message, ephemeral message
 **Nudge**:
 A per-call developer message appended to the projected prompt when a policy threshold is met: the consolidation ask while the execution state is over its `stateBytes` cap, and the idle warning one step before an idle disengage. It is never stored and never re-sent from history.
 _Avoid_: warning, reminder, injection
+
+**Consolidation**:
+The ask the over-cap nudge makes: one state patch that brings the execution state back under `stateBytes`, by dropping superseded entries or null-deleting keys it no longer needs. The nudge fires once per over-cap episode and re-arms when a commit lands the state back under the cap.
+_Avoid_: prune, cleanup, shrink
 
 **Cut**:
 The compaction's first kept entry. While engaged it is the current step, the latest assistant message on the branch, not the turn-sized tail the harness proposes.

@@ -1,0 +1,13 @@
+# Patch operators move to the patch root
+
+The nested operator envelope made the patch's most common composite — an `$append` beside a top-level set — a brace-scoping exercise: `{"findings": {"$append": [...]}, "next_step": "..."}`. A real run produced a *rider* there, a member riding the envelope (`next_step` nested inside the `$append` object) that the merge would have dropped silently, so validation rejected it and the retry cost a step; the same fully blocked batch was the trigger surface for the raw-history fallback (ADR 0005). We move the operators to the patch root, MongoDB-style: `$append` and `$remove` are root keys, each mapping state keys to item arrays — `{"$append": {"findings": ["C1 thesis"]}, "next_step": "Write HTML report"}` — and the rider's nesting is gone by design. One patch cannot both set and operate on a key, nor append and remove one key: both reject with a deterministic error. Any other `$`-prefixed root key rejects as an unknown operator — the `$` namespace is reserved, so a hallucinated `$promote` can never silently merge as an undeclared data key. Operators still reach undeclared keys, append initializing from empty; `$remove` stays by-value; null deletion, nested-object key-wise merge and all-or-nothing validation are unchanged. Because an operator is only ever a root key, an op-shaped object below the patch root is unambiguously data: the deep banned-shape check shrinks to prototype-hazard keys.
+
+## Considered options
+
+- **Keep nested envelopes, teach with worked-example errors.** The rider self-heals in one retry (run G: a rejected patch alone blocks and the retry recovers), but the brace-slip surface stays and the value-position operator rules live forever.
+- **Auto-hoist riders to the patch root.** A silent rewrite of the emitted patch: unambiguous only for schema-declared array keys — an undeclared key's rider has two readings (a misplaced root key, or an object value carrying a spurious `$append`) — and it needs a duplicate-rider precedence rule. ADR 0002's principle holds past malformed JSON: reinterpretation is repair.
+- **Accept both grammars for one release.** A precedence rule in every rules text, doc and test surface — the shape ADR 0002 rejected for the fenced channel — for a repo-local plugin with no external consumers.
+
+## Consequences
+
+Hard cutover in one commit: the operating rules and tool description examples, spec §6 and §8, the bundled skills' docs and the validation and merge suites all move together; verification docs stay untouched as history. The state module's operator checks relocate from value position to the patch root. The `$` reservation keeps future root operators open without grammar churn.

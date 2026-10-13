@@ -37,6 +37,10 @@ The model's proposed change to the execution state, `Δt`. It is a JSON object m
 _Avoid_: update, diff, mutation
 The fixed tool name `state_update` (ADR 0002) is exempt from the avoid-list: it is the channel's registered name, not a glossary synonym.
 
+**Operator**:
+A `$`-prefixed root key of a state patch that carries list semantics instead of setting a key. Exactly two exist: `$append` and `$remove`, each mapping state keys to item arrays; a patch that both sets and operates on one key, or appends and removes one key, rejects. Any other `$`-prefixed root key rejects as an unknown operator: the `$` namespace is reserved.
+_Avoid_: op envelope, rider, modifier
+
 **Fold**:
 The step policy's validation of a reply's state patches: folded in declaration order into a candidate state that is then discarded. It yields the step's verdict only, never a committed state.
 _Avoid_: merge, apply, replay
@@ -52,6 +56,10 @@ _Avoid_: stable state, persistent keys, core
 **Scratch state**:
 The volatile remainder of the execution state, the keys that change on most steps, sent as its own stored message behind the state core.
 _Avoid_: working set, hot keys, delta
+
+**Knowledge bag**:
+A declared object-typed state key left open to any JSON value, where a skill holds stable discovered facts. It merges key-wise, lives in the state core, and survives a re-derive without any extra persistence. The bundled `zstate` skill carries one as `knowledge`.
+_Avoid_: memory, fact store, dict
 
 **State pair**:
 The two stored messages holding one committed execution state: the state core followed immediately by the scratch state. A scratch closes the pair its preceding core opened.
@@ -72,6 +80,10 @@ _Avoid_: hex header, block id, hashline tag
 **Window notice**:
 The per-call developer line appended after the observation window each step, listing the window's pair tags oldest first. It states the drop rule — the oldest pairs leave as new results arrive — and never predicts which pair expires, because the drop count equals the next step's result count. Unlike a nudge it fires on every tool-result step, not when a threshold is met; like a nudge it is never stored.
 _Avoid_: expiry line, TTL banner, watermark
+
+**Degraded step**:
+A step whose newest tool pair cannot be paired. The projection sends the head, the complete pairs that survive, and a degradation notice riding that step; the raw transcript is never sent while the head exists. The degradation itself advances neither the retry counter nor the idle count. Only a missing head falls back to the ordinary session.
+_Avoid_: fallback step, raw-history step
 
 **Step**:
 One provider call. A step's `state_update` patches fold in order into one merged state change, beside one batch of tool calls and one set of observations.

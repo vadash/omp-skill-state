@@ -311,9 +311,11 @@ omp-skill-state/
   src/procedure.ts      the procedure record and the step policy (patch outcomes, head, compaction)
   src/state.ts          the execution state module: schema and params loading, patch validation, merge and apply, the core/scratch split (volatileKeys, splitState)
   src/messages.ts       the message vocabulary: the head message types, the invocation constant and its predicate, the announcement pair, the state renderer and the core and scratch state builders
-  test/*.test.ts        unit tests (bun test), one per source module
+  test/*.test.ts        unit tests (bun test), one per source module; test/adapter-*.test.ts drive the factory through the fake session, one file per concern
   test/fake-session.ts  the fake omp session for the adapter tests (branch, delivery timing, sends)
-  test/skill-fixtures.ts the shared test fixture writing skill directories for the adapter and state tests (makeSkill)
+  test/harness.ts       the adapter suites' shared harness: per-suite skill fixtures, the engaged/projecting session builders, assertion builders
+  test/entries.ts       one home for the stored-branch entry builders the fake session and the suites seed with
+  test/skill-fixtures.ts the shared test fixture writing skill directories (makeSkill)
   tsconfig.json         typecheck config (tsc --noEmit)
   skills/               optional bundled procedure skills, discovered from the plugin root
   CONTEXT.md            glossary
@@ -336,7 +338,7 @@ Unit, no harness needed:
 - step policy: each reply outcome (none, ok, block, ended by degrade or idle), the counters and their resets, the fold-versus-per-call-commit equivalence, the nudge seam (project, note and nudge in one call, with cap episode, re-arm and idle warning by direct calls), the head and the compaction result.
 - first-step rules delivery on engage, and its absence for non-procedure prompts, agent-attributed invocations, subagents and mid-procedure batches.
 
-`test/index.test.ts` drives the factory through a fake omp session (`test/fake-session.ts`): one factory with N sessions keyed by id, each owning its branch, sends, notices and idle flag. The fake auto-dispatches the harness event order inside one verb, assembles the context of each provider call from its branch, captures `registerTool` definitions, and models delivery timing: messages sent while busy flush at the end of the current step (so the stored head after engage lands at the first step boundary, while the first step's rules come from the `before_agent_start` delivery on the batch itself), messages sent while idle are appended at once, a reply with no tool call ends the run, and a call whose name has a captured definition runs that definition inside the step, recording its own result. The delivery model is the fake interface contract; `docs/verification.md` remains the real-session ground truth.
+The `test/adapter-*.test.ts` suites drive the factory through a fake omp session (`test/fake-session.ts`, assembled by `test/harness.ts`): one factory with N sessions keyed by id, each owning its branch, sends, notices and idle flag. One adapter file per concern — lifecycle (engage, disengage, re-derive, first-step rules, idle), the patch channel (patch loop, `state_update` registration), compaction ownership, the projection seam — and each claim has one owner: the step policy, the projection assembly and the message vocabulary are the unit suites' claims, and the adapter keeps one wiring witness per behavior (event order, delivery timing, storage effects) instead of a second copy of the policy. The fake auto-dispatches the harness event order inside one verb, assembles the context of each provider call from its branch, captures `registerTool` definitions, and models delivery timing: messages sent while busy flush at the end of the current step (so the stored head after engage lands at the first step boundary, while the first step's rules come from the `before_agent_start` delivery on the batch itself), messages sent while idle are appended at once, a reply with no tool call ends the run, and a call whose name has a captured definition runs that definition inside the step, recording its own result. The delivery model is the fake interface contract; `docs/verification.md` remains the real-session ground truth.
 
 Against a real session (run G and the nudge probe in `docs/verification.md`; the invalid-patch refusal occurred in run G, the degrade path did not occur and rests on the unit tests, and the `/new`, `/clear` and rewind outcomes are in the doc's git history):
 

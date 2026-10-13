@@ -3,6 +3,7 @@ import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE
 import { project } from "../src/projection";
 import { isPlainObject } from "../src/state";
 import type { AgentMessage } from "../src/types";
+import { ZERO_USAGE } from "./entries";
 
 // Live-state blocks the harness injects around the model; all of them must
 // vanish from a projected prompt. The skill-state types appear too: an older
@@ -25,15 +26,6 @@ const DROPPED_CUSTOM_TYPES = [
 	STATE_SCRATCH_MESSAGE_TYPE,
 	"sh.omp.skill-state.state",
 ];
-
-const ZERO_USAGE = {
-	input: 0,
-	output: 0,
-	cacheRead: 0,
-	cacheWrite: 0,
-	totalTokens: 0,
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-};
 
 let seq = 0;
 

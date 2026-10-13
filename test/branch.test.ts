@@ -1,106 +1,27 @@
 import { describe, expect, test } from "bun:test";
 import type { CustomMessagePayload, SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import { contentText, currentStepCut, scanBranch, statePairs } from "../src/branch";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, SKILL_PROMPT_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent } from "../src/messages";
+import { STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE } from "../src/messages";
 import { commitStep, headMessages, newProcedure, stateMessages } from "../src/procedure";
 import { DEFAULT_PARAMS } from "../src/state";
 import type { ExecutionState, StateSchema } from "../src/state";
+import { assistantEntry, coreStateEntry, invocationEntry, scratchStateEntry, specEntry, stateEntry } from "./entries";
 
-// Branch entries as the harness stores them; ids and timestamps are
-// placeholders, only the shape matters to the reads under test.
 let seq = 0;
 const nextId = () => `e${seq++}`;
-const stamp = () => new Date(0).toISOString();
-
-const ZERO_USAGE = {
-	input: 0,
-	output: 0,
-	cacheRead: 0,
-	cacheWrite: 0,
-	totalTokens: 0,
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-};
-
-function invocation(name: string, attribution: "user" | "agent" = "user", details: unknown = { name }): SessionEntry {
-	return {
-		type: "custom_message",
-		id: nextId(),
-		parentId: null,
-		timestamp: stamp(),
-		customType: SKILL_PROMPT_MESSAGE_TYPE,
-		content: `Running skill ${name}`,
-		display: true,
-		details,
-		attribution,
-	};
-}
-
-function specEntry(name: string): SessionEntry {
-	return {
-		type: "custom_message",
-		id: nextId(),
-		parentId: null,
-		timestamp: stamp(),
-		customType: PROCEDURE_SPEC_MESSAGE_TYPE,
-		content: `Running skill ${name}`,
-		display: false,
-		details: { name },
-	};
-}
-
-function stateEntry(customType: string, state: ExecutionState, details: unknown = { state }): SessionEntry {
-	return {
-		type: "custom_message",
-		id: nextId(),
-		parentId: null,
-		timestamp: stamp(),
-		customType,
-		content: renderStateContent(state),
-		display: true,
-		details,
-	};
-}
-
-const coreEntry = (state: ExecutionState, details: unknown = { state }) => stateEntry(STATE_CORE_MESSAGE_TYPE, state, details);
-const scratchEntry = (state: ExecutionState, details: unknown = { state }) => stateEntry(STATE_SCRATCH_MESSAGE_TYPE, state, details);
-
-// A stored state message of the retired single-state type, as a pre-split
-// transcript carries it.
-function legacyStateEntry(state: ExecutionState): SessionEntry {
-	return stateEntry("sh.omp.skill-state.state", state);
-}
-
-function assistantEntry(id: string): SessionEntry {
-	return {
-		type: "message",
-		id,
-		parentId: null,
-		timestamp: stamp(),
-		message: {
-			role: "assistant",
-			content: [{ type: "text", text: "step" }],
-			api: "anthropic-messages",
-			provider: "anthropic",
-			model: "m",
-			usage: ZERO_USAGE,
-			stopReason: "toolUse",
-			timestamp: 0,
-		},
-	};
-}
 
 function toolResultEntry(id: string): SessionEntry {
 	return {
 		type: "message",
 		id,
 		parentId: null,
-		timestamp: stamp(),
+		timestamp: new Date(0).toISOString(),
 		message: { role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "ok" }], isError: false, timestamp: 0 },
 	};
 }
 
 function customEntry(id: string): SessionEntry {
-	return { type: "custom", id, parentId: null, timestamp: stamp(), customType: "tool_execution_start" };
+	return { type: "custom", id, parentId: null, timestamp: new Date(0).toISOString(), customType: "tool_execution_start" };
 }
 
 describe("scanBranch", () => {
@@ -109,69 +30,70 @@ describe("scanBranch", () => {
 	});
 
 	test("a user invocation followed by its spec, a core and a scratch message re-derives the merged state", () => {
-		const found = scanBranch([invocation("recon"), specEntry("recon"), coreEntry({ goal: "x", working_dir: "." }), scratchEntry({ plan: ["a"] })]);
+		const found = scanBranch([invocationEntry("recon"), specEntry("recon"), coreStateEntry({ goal: "x", working_dir: "." }), scratchStateEntry({ plan: ["a"] })]);
 
 		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x", working_dir: ".", plan: ["a"] } });
 	});
 
 	test("an empty scratch state still counts: the merged state is the core alone", () => {
-		const found = scanBranch([invocation("recon"), specEntry("recon"), coreEntry({ goal: "x" }), scratchEntry({})]);
+		const found = scanBranch([invocationEntry("recon"), specEntry("recon"), coreStateEntry({ goal: "x" }), scratchStateEntry({})]);
 
 		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x" } });
 	});
 
 	test("the latest complete pair wins: a re-sent head supersedes the earlier one", () => {
 		const found = scanBranch([
-			invocation("recon"),
+			invocationEntry("recon"),
 			specEntry("recon"),
-			coreEntry({ goal: "x" }),
-			scratchEntry({ plan: ["old"] }),
-			coreEntry({ goal: "x" }),
-			scratchEntry({ plan: ["new"] }),
+			coreStateEntry({ goal: "x" }),
+			scratchStateEntry({ plan: ["old"] }),
+			coreStateEntry({ goal: "x" }),
+			scratchStateEntry({ plan: ["new"] }),
 		]);
 
 		expect(found?.state).toEqual({ goal: "x", plan: ["new"] });
 	});
 
 	test("an incomplete head is inert: no spec, no core, or no scratch", () => {
-		expect(scanBranch([invocation("recon"), scratchEntry({})])).toBeUndefined();
-		expect(scanBranch([invocation("recon"), coreEntry({})])).toBeUndefined();
-		expect(scanBranch([invocation("recon"), specEntry("recon")])).toBeUndefined();
-		expect(scanBranch([invocation("recon"), specEntry("recon"), coreEntry({ goal: "x" })])).toBeUndefined();
-		expect(scanBranch([invocation("recon"), specEntry("recon"), scratchEntry({ plan: [] })])).toBeUndefined();
+		expect(scanBranch([invocationEntry("recon"), scratchStateEntry({})])).toBeUndefined();
+		expect(scanBranch([invocationEntry("recon"), coreStateEntry({})])).toBeUndefined();
+		expect(scanBranch([invocationEntry("recon"), specEntry("recon")])).toBeUndefined();
+		expect(scanBranch([invocationEntry("recon"), specEntry("recon"), coreStateEntry({ goal: "x" })])).toBeUndefined();
+		expect(scanBranch([invocationEntry("recon"), specEntry("recon"), scratchStateEntry({ plan: [] })])).toBeUndefined();
 	});
 
 	test("a legacy single state message never completes the head", () => {
-		expect(scanBranch([invocation("recon"), specEntry("recon"), legacyStateEntry({ goal: "x" })])).toBeUndefined();
-		expect(scanBranch([invocation("recon"), specEntry("recon"), coreEntry({ goal: "x" }), legacyStateEntry({ stray: 1 })])).toBeUndefined();
+		// stateEntry with the retired single-state type, as a pre-split transcript carries it.
+		expect(scanBranch([invocationEntry("recon"), specEntry("recon"), stateEntry("sh.omp.skill-state.state", { goal: "x" })])).toBeUndefined();
+		expect(scanBranch([invocationEntry("recon"), specEntry("recon"), coreStateEntry({ goal: "x" }), stateEntry("sh.omp.skill-state.state", { stray: 1 })])).toBeUndefined();
 	});
 
 	test("a later invocation restarts the procedure: the earlier head is not attributed to it", () => {
-		const branch = [invocation("recon"), specEntry("recon"), coreEntry({ goal: "old" }), scratchEntry({}), invocation("other")];
+		const branch = [invocationEntry("recon"), specEntry("recon"), coreStateEntry({ goal: "old" }), scratchStateEntry({}), invocationEntry("other")];
 		expect(scanBranch(branch)).toBeUndefined();
 
-		const found = scanBranch([...branch, specEntry("other"), coreEntry({ goal: "new" }), scratchEntry({})]);
+		const found = scanBranch([...branch, specEntry("other"), coreStateEntry({ goal: "new" }), scratchStateEntry({})]);
 		expect(found).toEqual({ name: "other", spec: "Running skill other", state: { goal: "new" } });
 	});
 
 	test("an agent-attributed invocation and one without a name never count", () => {
-		const head = [specEntry("recon"), coreEntry({ goal: "x" }), scratchEntry({})];
-		expect(scanBranch([invocation("recon", "agent"), ...head])).toBeUndefined();
-		expect(scanBranch([invocation("recon", "user", {}), ...head])).toBeUndefined();
-		expect(scanBranch([invocation("recon", "user", { name: "" }), ...head])).toBeUndefined();
+		const head = [specEntry("recon"), coreStateEntry({ goal: "x" }), scratchStateEntry({})];
+		expect(scanBranch([invocationEntry("recon", "agent"), ...head])).toBeUndefined();
+		expect(scanBranch([invocationEntry("recon", "user", {}), ...head])).toBeUndefined();
+		expect(scanBranch([invocationEntry("recon", "user", { name: "" }), ...head])).toBeUndefined();
 	});
 
 	test("head messages before any invocation are ignored", () => {
-		expect(scanBranch([specEntry("recon"), coreEntry({ goal: "x" }), scratchEntry({}), invocation("recon")])).toBeUndefined();
+		expect(scanBranch([specEntry("recon"), coreStateEntry({ goal: "x" }), scratchStateEntry({}), invocationEntry("recon")])).toBeUndefined();
 	});
 
 	test("only a plain-object details.state counts, for core and scratch alike", () => {
-		const head = [invocation("recon"), specEntry("recon")];
+		const head = [invocationEntry("recon"), specEntry("recon")];
 
-		expect(scanBranch([...head, stateEntry(STATE_CORE_MESSAGE_TYPE, { goal: "x" }, {}), scratchEntry({})])).toBeUndefined();
-		expect(scanBranch([...head, coreEntry({ goal: "x" }, { state: ["x"] }), scratchEntry({})])).toBeUndefined();
-		expect(scanBranch([...head, coreEntry({ goal: "x" }), stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, { state: null })])).toBeUndefined();
-		expect(scanBranch([...head, coreEntry({ goal: "x" }), stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, "no details")])).toBeUndefined();
+		expect(scanBranch([...head, stateEntry(STATE_CORE_MESSAGE_TYPE, { goal: "x" }, {}), scratchStateEntry({})])).toBeUndefined();
+		expect(scanBranch([...head, coreStateEntry({ goal: "x" }, { state: ["x"] }), scratchStateEntry({})])).toBeUndefined();
+		expect(scanBranch([...head, coreStateEntry({ goal: "x" }), stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, { state: null })])).toBeUndefined();
+		expect(scanBranch([...head, coreStateEntry({ goal: "x" }), stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, "no details")])).toBeUndefined();
 	});
 
 	test("a damaged or trailing state message means inert, never a fallback to an earlier pair", () => {
@@ -179,32 +101,32 @@ describe("scanBranch", () => {
 		// stale earlier pair must not re-engage (spec section 14: no head, stay inert).
 		expect(
 			scanBranch([
-				invocation("recon"),
+				invocationEntry("recon"),
 				specEntry("recon"),
-				coreEntry({ goal: "x" }),
-				scratchEntry({}),
-				coreEntry({ goal: "y" }),
+				coreStateEntry({ goal: "x" }),
+				scratchStateEntry({}),
+				coreStateEntry({ goal: "y" }),
 				stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, {}),
 			]),
 		).toBeUndefined();
 		// A core whose scratch never landed.
-		expect(scanBranch([invocation("recon"), specEntry("recon"), coreEntry({ goal: "x" }), scratchEntry({}), coreEntry({ goal: "y" })])).toBeUndefined();
+		expect(scanBranch([invocationEntry("recon"), specEntry("recon"), coreStateEntry({ goal: "x" }), scratchStateEntry({}), coreStateEntry({ goal: "y" })])).toBeUndefined();
 		// An orphan scratch after complete pairs.
-		expect(scanBranch([invocation("recon"), specEntry("recon"), coreEntry({ goal: "x" }), scratchEntry({}), scratchEntry({ stray: 1 })])).toBeUndefined();
+		expect(scanBranch([invocationEntry("recon"), specEntry("recon"), coreStateEntry({ goal: "x" }), scratchStateEntry({}), scratchStateEntry({ stray: 1 })])).toBeUndefined();
 		// A broken payload in the only pair.
-		expect(scanBranch([invocation("recon"), specEntry("recon"), coreEntry({ goal: "x" }), stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, "no details")])).toBeUndefined();
+		expect(scanBranch([invocationEntry("recon"), specEntry("recon"), coreStateEntry({ goal: "x" }), stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, "no details")])).toBeUndefined();
 	});
 
 	test("entries of other kinds are skipped", () => {
 		const found = scanBranch([
 			customEntry("c1"),
-			invocation("recon"),
+			invocationEntry("recon"),
 			assistantEntry("a1"),
 			specEntry("recon"),
 			toolResultEntry("r1"),
-			coreEntry({ goal: "x" }),
+			coreStateEntry({ goal: "x" }),
 			toolResultEntry("r2"),
-			scratchEntry({ plan: ["a"] }),
+			scratchStateEntry({ plan: ["a"] }),
 			customEntry("c2"),
 		]);
 
@@ -220,7 +142,7 @@ describe("currentStepCut", () => {
 			assistantEntry("a2"),
 			customEntry("c1"),
 			toolResultEntry("r2"),
-			scratchEntry({}),
+			scratchStateEntry({}),
 		]);
 
 		expect(cut).toBe("a2");
@@ -228,7 +150,7 @@ describe("currentStepCut", () => {
 
 	test("is undefined when the branch holds no assistant message", () => {
 		expect(currentStepCut([])).toBeUndefined();
-		expect(currentStepCut([invocation("recon"), specEntry("recon"), coreEntry({}), scratchEntry({})])).toBeUndefined();
+		expect(currentStepCut([invocationEntry("recon"), specEntry("recon"), coreStateEntry({}), scratchStateEntry({})])).toBeUndefined();
 	});
 });
 
@@ -250,7 +172,7 @@ describe("contentText", () => {
 
 describe("statePairs", () => {
 	test("returns every stored pair in order: a scratch closes the pair its preceding core opened", () => {
-		const pairs = statePairs([coreEntry({ goal: "x" }), scratchEntry({ plan: ["a"] }), coreEntry({ goal: "y" }), scratchEntry({ plan: ["b"] })]);
+		const pairs = statePairs([coreStateEntry({ goal: "x" }), scratchStateEntry({ plan: ["a"] }), coreStateEntry({ goal: "y" }), scratchStateEntry({ plan: ["b"] })]);
 
 		expect(pairs).toEqual([
 			{ core: { goal: "x" }, scratch: { plan: ["a"] } },
@@ -260,22 +182,22 @@ describe("statePairs", () => {
 
 	test("a branch with no state messages has no pairs", () => {
 		expect(statePairs([])).toEqual([]);
-		expect(statePairs([invocation("recon"), specEntry("recon")])).toEqual([]);
+		expect(statePairs([invocationEntry("recon"), specEntry("recon")])).toEqual([]);
 	});
 
 	test("an orphan scratch, a trailing open core and an unextractable payload yield no pair", () => {
-		expect(statePairs([scratchEntry({ plan: [] })])).toEqual([]);
-		expect(statePairs([coreEntry({ goal: "x" })])).toEqual([]);
-		expect(statePairs([stateEntry(STATE_CORE_MESSAGE_TYPE, { goal: "x" }, {}), scratchEntry({})])).toEqual([]);
-		expect(statePairs([coreEntry({ goal: "x" }), stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, { state: null })])).toEqual([]);
+		expect(statePairs([scratchStateEntry({ plan: [] })])).toEqual([]);
+		expect(statePairs([coreStateEntry({ goal: "x" })])).toEqual([]);
+		expect(statePairs([stateEntry(STATE_CORE_MESSAGE_TYPE, { goal: "x" }, {}), scratchStateEntry({})])).toEqual([]);
+		expect(statePairs([coreStateEntry({ goal: "x" }), stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, { state: null })])).toEqual([]);
 	});
 
 	test("a broken partition kills its pair only: later pairs still read", () => {
 		const pairs = statePairs([
-			coreEntry({ goal: "x" }),
+			coreStateEntry({ goal: "x" }),
 			stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, {}),
-			coreEntry({ goal: "y" }),
-			scratchEntry({ plan: ["b"] }),
+			coreStateEntry({ goal: "y" }),
+			scratchStateEntry({ plan: ["b"] }),
 		]);
 
 		expect(pairs).toEqual([{ core: { goal: "y" }, scratch: { plan: ["b"] } }]);
@@ -294,7 +216,7 @@ describe("statePairs", () => {
 					type: "custom_message" as const,
 					id: nextId(),
 					parentId: null,
-					timestamp: stamp(),
+					timestamp: new Date(0).toISOString(),
 					customType: payload.customType,
 					content: payload.content,
 					display: payload.display,

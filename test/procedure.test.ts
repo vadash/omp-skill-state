@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, scratchMessage } from "../src/messages";
 import { commitStep, compactionFor, headMessages, newProcedure, recordReply, stateMessages, stepPrompt } from "../src/procedure";
 import type { Procedure } from "../src/procedure";
 import { DEFAULT_PARAMS } from "../src/state";
 import type { ExecutionState, StateParams, StateSchema } from "../src/state";
 import type { AgentMessage } from "../src/types";
+import { assistantEntry } from "./entries";
 
 const schema: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
 
@@ -45,25 +45,6 @@ function commit(procedure: Procedure, reply: { patches: unknown[]; hasPatch: boo
 		const committed = commitStep(procedure, patch);
 		if ("error" in committed) throw new Error(`patch rejected: ${committed.error}`);
 	}
-}
-
-function assistantEntry(id: string): SessionEntry {
-	return {
-		type: "message",
-		id,
-		parentId: null,
-		timestamp: new Date(0).toISOString(),
-		message: {
-			role: "assistant",
-			content: [{ type: "text", text: "step" }],
-			api: "anthropic-messages",
-			provider: "anthropic",
-			model: "m",
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-			stopReason: "toolUse",
-			timestamp: 0,
-		},
-	};
 }
 
 describe("newProcedure", () => {
@@ -313,6 +294,9 @@ describe("stepPrompt nudges", () => {
 		return out.slice(head.length);
 	}
 
+	// The nudge rides with a build-time timestamp; match the text, not the clock.
+	const consolidationNudge = () => ({ ...consolidationNudgeMessage(), timestamp: expect.any(Number) });
+
 	test("returns nothing while the state is under the cap and leaves the latch off", () => {
 		const p = projected();
 
@@ -324,10 +308,10 @@ describe("stepPrompt nudges", () => {
 		const p = projected({ stateBytes: 100 }, { blob: "x".repeat(200) });
 
 		// The ask rode on the first projected prompt and latched.
-		expect(nudgesFor(p)).toEqual([consolidationNudgeMessage()]);
+		expect(nudgesFor(p)).toEqual([consolidationNudge()]);
 		expect(p.capNudged).toBe(true);
 		// A repeated call in the same step re-serves the same set, never a duplicate.
-		expect(nudgesFor(p)).toEqual([consolidationNudgeMessage()]);
+		expect(nudgesFor(p)).toEqual([consolidationNudge()]);
 
 		// The next step re-evaluates: the latch holds, so nothing rides again.
 		recordReply(p, empty());
@@ -348,7 +332,7 @@ describe("stepPrompt nudges", () => {
 		const grow = commitStep(p, { blob: "x".repeat(200) });
 		if ("error" in grow) throw new Error(grow.error);
 		recordReply(p, empty());
-		expect(nudgesFor(p)).toEqual([consolidationNudgeMessage()]);
+		expect(nudgesFor(p)).toEqual([consolidationNudge()]);
 	});
 
 	test("the idle warning rides exactly at threshold minus one and resets with a patch", () => {
@@ -392,7 +376,7 @@ describe("stepPrompt nudges", () => {
 		if (capAsk === undefined || idleWarn === undefined || !("content" in idleWarn) || typeof idleWarn.content !== "string") {
 			throw new Error("nudges without text content");
 		}
-		expect(capAsk).toEqual(consolidationNudgeMessage());
+		expect(capAsk).toEqual(consolidationNudge());
 		expect(idleWarn.content).toContain("unchanged for 2 consecutive steps");
 	});
 
@@ -404,7 +388,7 @@ describe("stepPrompt nudges", () => {
 
 		// From the next step, with the head back, the ask rides.
 		recordReply(p, empty());
-		expect(nudgesFor(p)).toEqual([consolidationNudgeMessage()]);
+		expect(nudgesFor(p)).toEqual([consolidationNudge()]);
 	});
 
 	test("a cap of zero disables the nudge at any state size", () => {
@@ -418,7 +402,7 @@ describe("stepPrompt nudges", () => {
 		// Each partition alone renders under the 250-byte cap; only the sum is over it.
 		const p = projected({ stateBytes: 250 }, { goal: "x".repeat(100), blob: "y".repeat(100) });
 
-		expect(nudgesFor(p)).toEqual([consolidationNudgeMessage()]);
+		expect(nudgesFor(p)).toEqual([consolidationNudge()]);
 
 		// Dropping the scratch key lands in a later step, the way a commit does.
 		const drop = commitStep(p, { blob: null });

@@ -14,7 +14,9 @@ Status: implemented and verified against a long real session (`docs/verification
 | `src/procedure.ts` | The procedure record and the step policy: patch outcomes, idle and retry counters, head and compaction construction. |
 | `src/messages.ts` | The message vocabulary: the head message types (rules, procedure spec, state core, scratch), the state renderer, the core and scratch state builders, and the two nudge message builders. |
 | `test/fake-session.ts` | The fake omp session the adapter tests drive: branch, delivery timing, sends and notices. |
-| `test/*.test.ts` | Unit tests for the factory contract, the step policy, the branch reads, the state merge and the projection |
+| `test/harness.ts` | The adapter suites' shared harness: per-suite skill fixtures, the engaged/projecting session builders, the assertion builders. |
+| `test/entries.ts` | One home for the stored-branch entry builders: invocation, spec, state pair, procedure branch, assistant. |
+| `test/*.test.ts` | Unit tests for the step policy, the branch reads, the state merge and the projection; `test/adapter-*.test.ts` drive the factory through the fake session, one file per concern (lifecycle, patch channel, compaction, projection seam) |
 | `skills/zstate/` | Bundled mode-entry procedure skill (`SKILL.md` + `state.schema.json`): it carries no task of its own; the task is the text given with the invocation, and `disable-model-invocation` keeps it user-invoked only |
 | `docs/spec.md`, `docs/adr/`, `CONTEXT.md` | Design, decisions, glossary |
 | `docs/verification.md`, `verification/` | Run G's acceptance evidence: the session analyzer, the compact-early compaction config, and the `capture/` plugin that records provider request bodies when `SKILL_STATE_CAPTURE_DIR` is set |

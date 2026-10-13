@@ -43,6 +43,9 @@ export function project(messages: readonly AgentMessage[], observationBytes: num
 	const procedureSpec = lastCustom(messages, PROCEDURE_SPEC_MESSAGE_TYPE);
 	const core = lastCustom(messages, STATE_CORE_MESSAGE_TYPE);
 	const scratchStored = lastCustom(messages, STATE_SCRATCH_MESSAGE_TYPE);
+	// Both state messages or inert; the stored pairing rule behind that has
+	// its one home in branch.ts (statePairs) — this is the presence check over
+	// the projected message list, a different shape, not a second walker.
 	if (rules === undefined || procedureSpec === undefined || core === undefined || scratchStored === undefined || scratchStored.role !== "custom") {
 		return undefined;
 	}

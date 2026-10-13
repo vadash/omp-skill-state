@@ -307,7 +307,7 @@ omp-skill-state/
   package.json          "omp": { "extensions": ["./src/index.ts"] }
   src/index.ts          the harness adapter: event registrations, sends, blocks, notices
   src/projection.ts     the projection (pure message assembly)
-  src/branch.ts         pure reads over the stored branch (re-derive scan, compaction cut)
+  src/branch.ts         pure reads over the stored branch (re-derive scan, state pairs, compaction cut)
   src/procedure.ts      the procedure record and the step policy (patch outcomes, head, compaction)
   src/state.ts          the execution state module: schema and params loading, patch validation, merge and apply, the core/scratch split (volatileKeys, splitState)
   src/messages.ts       the message vocabulary: the head message types, the invocation constant and its predicate, the announcement pair, the state renderer and the core and scratch state builders

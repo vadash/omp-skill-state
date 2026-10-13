@@ -1,7 +1,8 @@
 import type { ExtensionAPI, ExtensionContext, SessionEntry, Skill, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { zod } from "@oh-my-pi/pi-coding-agent";
+import { statePairs } from "../src/branch";
 import extension from "../src/index";
-import { extractStatePayload, isStateCoreMessage, isStateScratchMessage, PROCEDURE_SPEC_MESSAGE_TYPE, SKILL_PROMPT_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement } from "../src/messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, SKILL_PROMPT_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement } from "../src/messages";
 import type { ExecutionState } from "../src/state";
 
 // A fake omp session for the adapter tests: one factory (one handler map) with
@@ -151,25 +152,11 @@ export class FakeSession {
 		this.branch = branch;
 	}
 
-	// The merged execution state of every stored core+scratch pair, in order.
-	// The runtime always stores the two state messages back to back, core
-	// first, so a scratch closes the pair its preceding core opened.
+	// The merged execution state of every stored state pair (CONTEXT.md
+	// "State pair"), in order — read through the runtime's own pairing read,
+	// so the fake's view cannot drift from re-derive.
 	get storedStates(): ExecutionState[] {
-		const states: ExecutionState[] = [];
-		let core: ExecutionState | undefined;
-		for (const entry of this.branch) {
-			if (entry.type !== "custom_message") continue;
-			if (isStateCoreMessage(entry)) {
-				const state = extractStatePayload(entry.details);
-				if (state !== undefined) core = state;
-			} else if (isStateScratchMessage(entry)) {
-				const state = extractStatePayload(entry.details);
-				if (state === undefined || core === undefined) continue;
-				states.push({ ...core, ...state });
-				core = undefined;
-			}
-		}
-		return states;
+		return statePairs(this.branch).map(({ core, scratch }) => ({ ...core, ...scratch }));
 	}
 
 	setIdle(value: boolean): void {

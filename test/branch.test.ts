@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
-import { contentText, currentStepCut, scanBranch } from "../src/branch";
+import type { CustomMessagePayload, SessionEntry } from "@oh-my-pi/pi-coding-agent";
+import { contentText, currentStepCut, scanBranch, statePairs } from "../src/branch";
 import { PROCEDURE_SPEC_MESSAGE_TYPE, SKILL_PROMPT_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent } from "../src/messages";
-import type { ExecutionState } from "../src/state";
+import { commitStep, headMessages, newProcedure, stateMessages } from "../src/procedure";
+import { DEFAULT_PARAMS } from "../src/state";
+import type { ExecutionState, StateSchema } from "../src/state";
 
 // Branch entries as the harness stores them; ids and timestamps are
 // placeholders, only the shape matters to the reads under test.
@@ -118,17 +120,17 @@ describe("scanBranch", () => {
 		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x" } });
 	});
 
-	test("the latest core and the latest scratch message win, each on its own type", () => {
+	test("the latest complete pair wins: a re-sent head supersedes the earlier one", () => {
 		const found = scanBranch([
 			invocation("recon"),
 			specEntry("recon"),
-			coreEntry({ goal: "old" }),
-			coreEntry({ goal: "new" }),
+			coreEntry({ goal: "x" }),
 			scratchEntry({ plan: ["old"] }),
+			coreEntry({ goal: "x" }),
 			scratchEntry({ plan: ["new"] }),
 		]);
 
-		expect(found?.state).toEqual({ goal: "new", plan: ["new"] });
+		expect(found?.state).toEqual({ goal: "x", plan: ["new"] });
 	});
 
 	test("an incomplete head is inert: no spec, no core, or no scratch", () => {
@@ -170,6 +172,27 @@ describe("scanBranch", () => {
 		expect(scanBranch([...head, coreEntry({ goal: "x" }, { state: ["x"] }), scratchEntry({})])).toBeUndefined();
 		expect(scanBranch([...head, coreEntry({ goal: "x" }), stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, { state: null })])).toBeUndefined();
 		expect(scanBranch([...head, coreEntry({ goal: "x" }), stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, "no details")])).toBeUndefined();
+	});
+
+	test("a damaged or trailing state message means inert, never a fallback to an earlier pair", () => {
+		// The latest pair's scratch, replaced by an elide-pass placeholder: the
+		// stale earlier pair must not re-engage (spec section 14: no head, stay inert).
+		expect(
+			scanBranch([
+				invocation("recon"),
+				specEntry("recon"),
+				coreEntry({ goal: "x" }),
+				scratchEntry({}),
+				coreEntry({ goal: "y" }),
+				stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, {}),
+			]),
+		).toBeUndefined();
+		// A core whose scratch never landed.
+		expect(scanBranch([invocation("recon"), specEntry("recon"), coreEntry({ goal: "x" }), scratchEntry({}), coreEntry({ goal: "y" })])).toBeUndefined();
+		// An orphan scratch after complete pairs.
+		expect(scanBranch([invocation("recon"), specEntry("recon"), coreEntry({ goal: "x" }), scratchEntry({}), scratchEntry({ stray: 1 })])).toBeUndefined();
+		// A broken payload in the only pair.
+		expect(scanBranch([invocation("recon"), specEntry("recon"), coreEntry({ goal: "x" }), stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, "no details")])).toBeUndefined();
 	});
 
 	test("entries of other kinds are skipped", () => {
@@ -222,5 +245,72 @@ describe("contentText", () => {
 
 	test("anything else is stringified", () => {
 		expect(contentText(42)).toBe("42");
+	});
+});
+
+describe("statePairs", () => {
+	test("returns every stored pair in order: a scratch closes the pair its preceding core opened", () => {
+		const pairs = statePairs([coreEntry({ goal: "x" }), scratchEntry({ plan: ["a"] }), coreEntry({ goal: "y" }), scratchEntry({ plan: ["b"] })]);
+
+		expect(pairs).toEqual([
+			{ core: { goal: "x" }, scratch: { plan: ["a"] } },
+			{ core: { goal: "y" }, scratch: { plan: ["b"] } },
+		]);
+	});
+
+	test("a branch with no state messages has no pairs", () => {
+		expect(statePairs([])).toEqual([]);
+		expect(statePairs([invocation("recon"), specEntry("recon")])).toEqual([]);
+	});
+
+	test("an orphan scratch, a trailing open core and an unextractable payload yield no pair", () => {
+		expect(statePairs([scratchEntry({ plan: [] })])).toEqual([]);
+		expect(statePairs([coreEntry({ goal: "x" })])).toEqual([]);
+		expect(statePairs([stateEntry(STATE_CORE_MESSAGE_TYPE, { goal: "x" }, {}), scratchEntry({})])).toEqual([]);
+		expect(statePairs([coreEntry({ goal: "x" }), stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, { state: null })])).toEqual([]);
+	});
+
+	test("a broken partition kills its pair only: later pairs still read", () => {
+		const pairs = statePairs([
+			coreEntry({ goal: "x" }),
+			stateEntry(STATE_SCRATCH_MESSAGE_TYPE, {}, {}),
+			coreEntry({ goal: "y" }),
+			scratchEntry({ plan: ["b"] }),
+		]);
+
+		expect(pairs).toEqual([{ core: { goal: "y" }, scratch: { plan: ["b"] } }]);
+	});
+
+	test("the stored head and commit asides read back as the committed states", () => {
+		// The writer→reader round-trip: the runtime's own payloads, stored as
+		// the harness stores them, read back through the pairing rule. The two
+		// conversions must agree, so they share this local fixture.
+		const asEntries = (payloads: readonly CustomMessagePayload[]): SessionEntry[] =>
+			payloads.map((payload) => {
+				// The runtime's builders always set these; anything less is not a
+				// state message and fails loudly here rather than storing junk.
+				if (typeof payload !== "object" || payload.customType === undefined || payload.content === undefined || payload.display === undefined) throw new Error("not a runtime-built payload");
+				return {
+					type: "custom_message" as const,
+					id: nextId(),
+					parentId: null,
+					timestamp: stamp(),
+					customType: payload.customType,
+					content: payload.content,
+					display: payload.display,
+					details: payload.details,
+				};
+			});
+		const schema: StateSchema = { type: "object", properties: { goal: { type: "string" }, plan: { type: "array", items: { type: "string" } } } };
+		const procedure = newProcedure("recon", "spec", schema, DEFAULT_PARAMS, { goal: "x", plan: ["a"] });
+
+		const headEntries = asEntries(headMessages(procedure));
+		expect(statePairs(headEntries)).toEqual([{ core: { goal: "x" }, scratch: { plan: ["a"] } }]);
+
+		commitStep(procedure, { goal: "y", plan: ["a", "b"] });
+		expect(statePairs([...headEntries, ...asEntries(stateMessages(procedure))])).toEqual([
+			{ core: { goal: "x" }, scratch: { plan: ["a"] } },
+			{ core: { goal: "y" }, scratch: { plan: ["a", "b"] } },
+		]);
 	});
 });

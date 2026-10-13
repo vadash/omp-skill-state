@@ -45,6 +45,10 @@ _Avoid_: stable state, persistent keys, core
 The volatile remainder of the execution state, the keys that change on most steps, sent as its own stored message behind the state core.
 _Avoid_: working set, hot keys, delta
 
+**State pair**:
+The two stored messages holding one committed execution state: the state core followed immediately by the scratch state. A scratch closes the pair its preceding core opened.
+_Avoid_: checkpoint, checkpoint pair, head pair
+
 **Observation**:
 The environment output for the current step, `Oₜ`. It is the only past-free material the model receives besides the spec and the state.
 _Avoid_: result, output, feedback

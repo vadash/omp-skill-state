@@ -170,6 +170,19 @@ describe("recordReply with a patch", () => {
 		expect(p.state).toEqual({ findings: ["old", "a"], next_step: "b" });
 	});
 
+	test("a batch using $remove folds and commits to the same state", () => {
+		const p = procedure({}, { findings: ["old", "gone"] });
+
+		const reply = step({ findings: { $remove: ["gone"] } }, { next_step: "b" });
+		expect(recordReply(p, reply)).toEqual({ kind: "ok" });
+		expect(p.pendingError).toBeUndefined();
+		expect(p.invalidPatches).toBe(0);
+
+		// The execute road lands where the fold landed.
+		commit(p, reply);
+		expect(p.state).toEqual({ findings: ["old"], next_step: "b" });
+	});
+
 	test("an invalid patch anywhere in a batch blocks the step with that patch's error", () => {
 		const p = procedure();
 

@@ -30,9 +30,10 @@ To change the state, call the ${STATE_UPDATE_TOOL_NAME} tool directly with a sin
 
 Call it as a native tool call; do not redirect writes through xd:// devices or any other channel.
 
-Merge semantics: a non-null value sets its key, null deletes its key, keys absent from the object are left untouched. Arrays accept the complete array (set whole) or an append operator that adds items without resending the rest:
+Merge semantics: a non-null value sets its key, null deletes its key, keys absent from the object are left untouched. Arrays accept the complete array (set whole), an append operator that adds items without resending the rest, or a remove operator that drops items by value without resending the rest:
 
 {"patch": {"findings": {"$append": ["one new item"]}}}
+{"patch": {"findings": {"$remove": ["the item to retire"]}}}
 
 Send only the keys that change.
 
@@ -44,7 +45,7 @@ An invalid patch blocks every tool call of the step, and the error comes back as
 `;
 
 export const STATE_UPDATE_DESCRIPTION =
-	"Apply a patch to the running procedure's execution state. Call it once per step alongside your other tool calls. The patch is a JSON object merged into the state: a non-null value sets its key, null deletes its key, keys you omit are left untouched. Arrays accept the complete array or an {\"$append\": [items]} operator that adds items without resending the rest.";
+	"Apply a patch to the running procedure's execution state. Call it once per step alongside your other tool calls. The patch is a JSON object merged into the state: a non-null value sets its key, null deletes its key, keys you omit are left untouched. Arrays accept the complete array, an {\"$append\": [items]} operator that adds items without resending the rest, or a {\"$remove\": [items]} operator that drops matching items by value without resending the rest.";
 
 // One rules message, the same object shape everywhere the rules are delivered:
 // the first-step copy from before_agent_start and the stored head asides are

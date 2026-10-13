@@ -130,6 +130,7 @@ Merge operator `⊕`, applied to each accepted patch:
 - Keys absent from `Δt` are untouched.
 - Merge is shallow and recursive only for objects: an object value merges key-wise, an array or scalar replaces.
 - An array key may instead carry the append operator `{"$append": [items]}`, which appends the items to the current array instead of setting it whole; a missing key starts from an empty array, a key that holds a non-array value is replaced by the appended list, and an empty append on a key with no array to grow changes nothing — it does not materialize an empty array. It exists so a growing list does not have to be re-emitted in full on every step.
+- An array key may instead carry the remove operator `{"$remove": [items]}`, which removes every item matching a listed item, by value, from the current array, leaving the rest and their order untouched; an item that is not present matches nothing, removing every item leaves an empty array, and a remove against a missing key or a key that holds a non-array value changes nothing — it does not materialize a key. It exists so retiring a known item does not have to re-emit the rest of the list.
 - A nested null under a key absent from `t` deletes into nothing: no object holding nulls is created.
 
 This is the paper's dictionary merge with null-deletion semantics, and it is what makes the model's most common failure mode — omitting a key it meant to keep — harmless.
@@ -137,8 +138,8 @@ This is the paper's dictionary merge with null-deletion semantics, and it is wha
 Validation, on every patch, before merge:
 
 - Valid JSON object, or the patch is rejected.
-- Every key present in the schema validates against its declared type — null excepted, per the deletion rule above — or the patch is rejected. Null is a deletion only at the key level: an array element's null is a value and must satisfy the `items` schema like any other element. An `$append` payload validates item-wise against the array's `items` schema.
-- The `$append` operator is legal only against array-typed keys; an object-typed key rejects it. An op object carries nothing but `$append` — members riding it would be dropped by the merge, so they reject — and its payload is an array, at every depth, declared or not: a malformed op under an unknown key rejects instead of merging literally.
+- Every key present in the schema validates against its declared type — null excepted, per the deletion rule above — or the patch is rejected. Null is a deletion only at the key level: an array element's null is a value and must satisfy the `items` schema like any other element. An `$append` or `$remove` payload validates item-wise against the array's `items` schema.
+- The `$append` and `$remove` operators are legal only against array-typed keys; an object-typed key rejects them. An op object carries nothing but its operator — members riding it would be dropped by the merge, so they reject — and its payload is an array: on an array-typed key and under an unknown key a malformed payload rejects instead of merging literally.
 - Unknown keys are accepted when `additionalProperties` is true; their values are not type-checked, but the banned shapes below still hold inside them.
 - The keys `__proto__`, `constructor` and `prototype` are rejected outright, at every depth — declared or not.
 - A schema type this runtime does not read (for example an array-valued `type`, or a bogus value in hand-written JSON) rejects the patch with an unsupported-type error rather than passing silently.
@@ -346,7 +347,7 @@ Dependency: `@oh-my-pi/pi-coding-agent` for types, pinned to the installed omp v
 
 Unit, no harness needed:
 
-- merge operator: set, null-delete (any declared type), nested object merge, array replace, `$append` onto existing, missing and non-array keys, absent-key preservation.
+- merge operator: set, null-delete (any declared type), nested object merge, array replace, `$append` onto existing, missing and non-array keys, `$remove` onto existing, missing and non-array keys, removal of an absent item, absent-key preservation.
 - the state split: explicit `x-state.volatile` parsing (non-string entries dropped), the unannotated-schema heuristic (array-typed and planning keys volatile), and the disjoint core/scratch partition.
 - schema validation: each type, unknown keys under both `additionalProperties` values, non-object top level.
 - projection assembly: exact message order and roles; each dropped block type; the observation window; the byte cap and its marker.
@@ -372,7 +373,7 @@ Against a real session (run G and the nudge probe in `docs/verification.md`; the
 - Automatic schema discovery for skills that do not declare one.
 - Any change under the harness source tree.
 - Multiple concurrent procedures per session; retrieval or summarization of dropped history.
-- Whole-array append beyond the `$append` operator (no positional splices, no per-index edits).
+- Positional array editing beyond the value-keyed `$append` and `$remove` operators (no positional splices, no per-index edits, no pop-like removal of the head or tail).
 - JSON repair in any form; `setActiveTools` registration gymnastics.
 - Hard enforcement of the state cap (the nudge is the only sanction, by decision).
 

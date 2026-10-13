@@ -2,9 +2,8 @@ import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/
 import { Text } from "@oh-my-pi/pi-coding-agent";
 import { SKILL_PROMPT_MESSAGE_TYPE, contentText, scanBranch } from "./branch";
 import { STATE_UPDATE_TOOL_NAME, STATE_UPDATE_DESCRIPTION, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, announcedSkillNames, rulesMessage } from "./messages";
-import { commitStep, compactionFor, headMessages, newProcedure, noteProjected, pendingNudges, recordReply, stateMessages } from "./procedure";
+import { commitStep, compactionFor, headMessages, newProcedure, recordReply, stateMessages, stepPrompt } from "./procedure";
 import type { Procedure } from "./procedure";
-import { project } from "./projection";
 import { isPlainObject, loadStateSchema } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
 
@@ -275,18 +274,15 @@ export default function (pi: ExtensionAPI): void {
 
 	// The projection rewrites only the prompt; the stored transcript stays
 	// complete. undefined keeps the ordinary context: safe fallback when not
-	// engaged, in a subagent, or when the head is not in place yet.
+	// engaged, in a subagent, or when the head is not in place yet. Nudges
+	// ride on the per-call prompt only: never stored, never re-sent from
+	// history. A step whose prompt carries no head gets undefined back, so it
+	// neither counts nor warns.
 	pi.on("context", (event, ctx) => {
 		const procedure = current(ctx);
 		if (procedure === undefined) return undefined;
-		const messages = project(event.messages, procedure.params.observationBytes, procedure.params.observationWindow);
-		noteProjected(procedure, messages !== undefined);
-		if (messages === undefined) return undefined;
-		// Nudges ride on the per-call prompt only: never stored, never
-		// re-sent from history. A step whose prompt carries no head returned
-		// undefined above, so it neither counts nor warns.
-		const nudges = pendingNudges(procedure);
-		return nudges.length > 0 ? { messages: [...messages, ...nudges] } : { messages };
+		const messages = stepPrompt(procedure, event.messages);
+		return messages === undefined ? undefined : { messages };
 	});
 
 	// A switch, rewind or fork lands in a different session id, so the outgoing

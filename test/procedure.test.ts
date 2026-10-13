@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, scratchMessage } from "../src/messages";
-import { commitStep, compactionFor, headMessages, newProcedure, noteProjected, pendingNudges, recordReply, stateMessages } from "../src/procedure";
+import { commitStep, compactionFor, headMessages, newProcedure, recordReply, stateMessages, stepPrompt } from "../src/procedure";
 import type { Procedure } from "../src/procedure";
 import { DEFAULT_PARAMS } from "../src/state";
 import type { ExecutionState, StateParams, StateSchema } from "../src/state";
+import type { AgentMessage } from "../src/types";
 
 const schema: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
 
@@ -12,11 +13,18 @@ function procedure(params: Partial<StateParams> = {}, state: ExecutionState = {}
 	return newProcedure("recon", "Running skill recon", schema, { ...DEFAULT_PARAMS, ...params }, state);
 }
 
+// The head as the context event would carry it: the harness stores each sent
+// payload as a custom message, adding the role envelope the projection reads.
+function headContext(procedure: Procedure): AgentMessage[] {
+	return headMessages(procedure).map((payload) => ({ role: "custom" as const, timestamp: Date.now(), ...(payload as object) })) as unknown as AgentMessage[];
+}
+
 // A procedure whose latest prompt carried the head: the model saw the rules,
-// so a step without a state edit is idle.
+// so a step without a state edit is idle. The flag is set the only way
+// production sets it, through the stepPrompt seam.
 function projected(params: Partial<StateParams> = {}, state: ExecutionState = {}): Procedure {
 	const p = procedure(params, state);
-	noteProjected(p, true);
+	if (stepPrompt(p, headContext(p)) === undefined) throw new Error("head did not project");
 	return p;
 }
 
@@ -197,7 +205,7 @@ describe("recordReply and idle steps", () => {
 		for (let i = 0; i < 3; i++) expect(recordReply(p, empty())).toEqual({ kind: "none" });
 		expect(p.idle).toBe(0);
 
-		noteProjected(p, true);
+		if (stepPrompt(p, headContext(p)) === undefined) throw new Error("head did not project");
 		expect(recordReply(p, empty())).toEqual({ kind: "none" });
 		expect(recordReply(p, empty())).toEqual({ kind: "none" });
 		expect(recordReply(p, empty())).toEqual({ kind: "none" });
@@ -238,11 +246,11 @@ describe("recordReply and idle steps", () => {
 	test("a step whose prompt lost the head pauses the count without resetting it", () => {
 		const p = projected();
 		recordReply(p, empty());
-		noteProjected(p, false);
+		if (stepPrompt(p, []) !== undefined) throw new Error("headless prompt projected");
 		recordReply(p, empty());
 		expect(p.idle).toBe(1);
 
-		noteProjected(p, true);
+		if (stepPrompt(p, headContext(p)) === undefined) throw new Error("head did not project");
 		recordReply(p, empty());
 		recordReply(p, empty());
 		recordReply(p, empty());
@@ -296,52 +304,60 @@ describe("commitStep", () => {
 	});
 });
 
-describe("pendingNudges", () => {
+describe("stepPrompt nudges", () => {
+	// The tail a projected prompt carries beyond its head: the turn's nudges.
+	function nudgesFor(procedure: Procedure): AgentMessage[] {
+		const head = headContext(procedure);
+		const out = stepPrompt(procedure, head);
+		if (out === undefined) throw new Error("head did not project");
+		return out.slice(head.length);
+	}
+
 	test("returns nothing while the state is under the cap and leaves the latch off", () => {
 		const p = projected();
 
-		expect(pendingNudges(p)).toEqual([]);
+		expect(nudgesFor(p)).toEqual([]);
 		expect(p.capNudged).toBe(false);
 	});
 
 	test("hands the consolidation nudge out once per over-cap episode and is idempotent within the step", () => {
 		const p = projected({ stateBytes: 100 }, { blob: "x".repeat(200) });
 
-		const nudges = pendingNudges(p);
-		expect(nudges).toEqual([consolidationNudgeMessage()]);
+		// The ask rode on the first projected prompt and latched.
+		expect(nudgesFor(p)).toEqual([consolidationNudgeMessage()]);
 		expect(p.capNudged).toBe(true);
 		// A repeated call in the same step re-serves the same set, never a duplicate.
-		expect(pendingNudges(p)).toEqual(nudges);
+		expect(nudgesFor(p)).toEqual([consolidationNudgeMessage()]);
 
 		// The next step re-evaluates: the latch holds, so nothing rides again.
 		recordReply(p, empty());
-		expect(pendingNudges(p)).toEqual([]);
+		expect(nudgesFor(p)).toEqual([]);
 	});
 
 	test("re-arms when a commit lands the state back under the cap, and fires once more", () => {
 		const p = projected({ stateBytes: 200 }, { blob: "x".repeat(200) });
-		expect(pendingNudges(p)).toHaveLength(1);
+		expect(nudgesFor(p)).toHaveLength(1);
 
 		// The commit lands in a later step, the way the tool execute does it.
 		const shrink = commitStep(p, { blob: "x" });
 		if ("error" in shrink) throw new Error(shrink.error);
 		recordReply(p, empty());
-		expect(pendingNudges(p)).toEqual([]);
+		expect(nudgesFor(p)).toEqual([]);
 		expect(p.capNudged).toBe(false);
 
 		const grow = commitStep(p, { blob: "x".repeat(200) });
 		if ("error" in grow) throw new Error(grow.error);
 		recordReply(p, empty());
-		expect(pendingNudges(p)).toEqual([consolidationNudgeMessage()]);
+		expect(nudgesFor(p)).toEqual([consolidationNudgeMessage()]);
 	});
 
 	test("the idle warning rides exactly at threshold minus one and resets with a patch", () => {
 		const p = projected({ idleSteps: 3 });
 		recordReply(p, empty());
-		expect(pendingNudges(p)).toEqual([]);
+		expect(nudgesFor(p)).toEqual([]);
 
 		recordReply(p, empty());
-		const nudged = pendingNudges(p);
+		const nudged = nudgesFor(p);
 		expect(nudged).toHaveLength(1);
 		const [nudge] = nudged;
 		if (nudge === undefined || !("content" in nudge) || typeof nudge.content !== "string") throw new Error("nudge without text content");
@@ -349,46 +365,52 @@ describe("pendingNudges", () => {
 		expect(nudge.content).toContain("unchanged for 2 consecutive steps");
 
 		recordReply(p, step({ goal: "x" }));
-		expect(pendingNudges(p)).toEqual([]);
+		expect(nudgesFor(p)).toEqual([]);
 	});
 
-	test("a cap nudge and the idle warning ride on the same step, consolidation first", () => {
-		const p = projected({ stateBytes: 100 }, { blob: "x".repeat(200) });
-		recordReply(p, empty());
-		recordReply(p, empty());
-		recordReply(p, empty());
-		recordReply(p, empty());
-		expect(p.idle).toBe(4);
+	test("a fresh cap ask and the idle warning ride on the same step, consolidation first", () => {
+		const p = projected({ stateBytes: 200, idleSteps: 3 }, { blob: "x".repeat(200) });
+		expect(p.capNudged).toBe(true);
 
-		const nudges = pendingNudges(p);
+		// Under the cap the latch re-arms; over it again the ask is fresh, and
+		// a commit resets the idle run.
+		const shrink = commitStep(p, { blob: "x" });
+		if ("error" in shrink) throw new Error(shrink.error);
+		recordReply(p, empty());
+		expect(nudgesFor(p)).toEqual([]);
+		expect(p.capNudged).toBe(false);
+		const grow = commitStep(p, { blob: "x".repeat(200) });
+		if ("error" in grow) throw new Error(grow.error);
+
+		// Two quiet projected steps bring idle to threshold minus one.
+		recordReply(p, empty());
+		recordReply(p, empty());
+
+		const nudges = nudgesFor(p);
 		expect(nudges).toHaveLength(2);
 		const [capAsk, idleWarn] = nudges;
-		if (capAsk === undefined || idleWarn === undefined || !("content" in capAsk) || !("content" in idleWarn) || typeof capAsk.content !== "string" || typeof idleWarn.content !== "string") {
+		if (capAsk === undefined || idleWarn === undefined || !("content" in idleWarn) || typeof idleWarn.content !== "string") {
 			throw new Error("nudges without text content");
 		}
-		expect(capAsk.role).toBe("developer");
-		expect(capAsk.content).toContain("size cap");
-		expect(idleWarn.role).toBe("developer");
-		expect(idleWarn.content).toContain("unchanged for 4 consecutive steps");
+		expect(capAsk).toEqual(consolidationNudgeMessage());
+		expect(idleWarn.content).toContain("unchanged for 2 consecutive steps");
 	});
 
 	test("a step whose prompt carried no head neither nudges nor latches", () => {
-		const p = projected({ stateBytes: 100 }, { blob: "x".repeat(200) });
-		noteProjected(p, false);
+		const p = procedure({ stateBytes: 100 }, { blob: "x".repeat(200) });
 
-		expect(pendingNudges(p)).toEqual([]);
+		expect(stepPrompt(p, [])).toBeUndefined();
 		expect(p.capNudged).toBe(false);
 
 		// From the next step, with the head back, the ask rides.
 		recordReply(p, empty());
-		noteProjected(p, true);
-		expect(pendingNudges(p)).toEqual([consolidationNudgeMessage()]);
+		expect(nudgesFor(p)).toEqual([consolidationNudgeMessage()]);
 	});
 
 	test("a cap of zero disables the nudge at any state size", () => {
 		const p = projected({}, { blob: "x".repeat(1000) });
 
-		expect(pendingNudges(p)).toEqual([]);
+		expect(nudgesFor(p)).toEqual([]);
 		expect(p.capNudged).toBe(false);
 	});
 
@@ -396,13 +418,13 @@ describe("pendingNudges", () => {
 		// Each partition alone renders under the 250-byte cap; only the sum is over it.
 		const p = projected({ stateBytes: 250 }, { goal: "x".repeat(100), blob: "y".repeat(100) });
 
-		expect(pendingNudges(p)).toEqual([consolidationNudgeMessage()]);
+		expect(nudgesFor(p)).toEqual([consolidationNudgeMessage()]);
 
 		// Dropping the scratch key lands in a later step, the way a commit does.
 		const drop = commitStep(p, { blob: null });
 		if ("error" in drop) throw new Error(drop.error);
 		recordReply(p, empty());
-		expect(pendingNudges(p)).toEqual([]);
+		expect(nudgesFor(p)).toEqual([]);
 	});
 });
 

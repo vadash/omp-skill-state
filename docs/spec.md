@@ -284,7 +284,7 @@ Every mechanism above is public extension API. Nothing else is touched.
 | Need | Surface |
 | --- | --- |
 | per-step rewrite | `context` event; receives `AgentMessage[]` before `convertToLlm`, so `customType` is still visible, and its replacement never rewrites stored history |
-| nudge at the policy thresholds | the `context` handler appending `pendingNudges(procedure)` after the projected messages: the consolidation ask latched once per over-cap episode (`capNudged`, re-armed when a commit lands back under `stateBytes`) and the idle warning one step before the idle disengage, consolidation first, idle last; the nudges ride the event's replacement, are never stored and never re-sent from history (sections 9 and 11) |
+| nudge at the policy thresholds | `stepPrompt`, the `context` handler's one call: it projects the prompt, notes whether the stored head reached it, and appends the turn's nudges — the consolidation ask latched once per over-cap episode (`capNudged`, re-armed when a commit lands back under `stateBytes`) and the idle warning one step before the idle disengage, consolidation first, idle last; the nudges ride the event's replacement, are never stored and never re-sent from history (sections 9 and 11) |
 | validate before tools run | `assistant_message`, awaited before tool dispatch |
 | block a batch | `tool_call`, may block with a reason |
 | offer the state-write channel | `registerTool` with the strict, zero-approval `state_update` definition, registered once at factory load (section 8) |
@@ -333,7 +333,7 @@ Unit, no harness needed:
 - schema validation: each type, unknown keys under both `additionalProperties` values, non-object top level.
 - projection assembly: exact message order and roles; each dropped block type; the observation window; the byte cap and its marker.
 - branch reads: the re-derive scan (latest invocation wins, an incomplete head is inert) and the compaction cut.
-- step policy: each reply outcome (none, ok, block, ended by degrade or idle), the counters and their resets, the fold-versus-per-call-commit equivalence, the head and the compaction result.
+- step policy: each reply outcome (none, ok, block, ended by degrade or idle), the counters and their resets, the fold-versus-per-call-commit equivalence, the nudge seam (project, note and nudge in one call, with cap episode, re-arm and idle warning by direct calls), the head and the compaction result.
 - first-step rules delivery on engage, and its absence for non-procedure prompts, agent-attributed invocations, subagents and mid-procedure batches.
 
 `test/index.test.ts` drives the factory through a fake omp session (`test/fake-session.ts`): one factory with N sessions keyed by id, each owning its branch, sends, notices and idle flag. The fake auto-dispatches the harness event order inside one verb, assembles the context of each provider call from its branch, captures `registerTool` definitions, and models delivery timing: messages sent while busy flush at the end of the current step (so the stored head after engage lands at the first step boundary, while the first step's rules come from the `before_agent_start` delivery on the batch itself), messages sent while idle are appended at once, a reply with no tool call ends the run, and a call whose name has a captured definition runs that definition inside the step, recording its own result. The delivery model is the fake interface contract; `docs/verification.md` remains the real-session ground truth.

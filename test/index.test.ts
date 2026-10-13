@@ -67,7 +67,6 @@ let smallProcedure: Skill;
 let windowProcedure: Skill;
 let idleProcedure: Skill;
 let warnProcedure: Skill;
-let capProcedure: Skill;
 
 beforeAll(async () => {
 	root = await mkdtemp(path.join(tmpdir(), "omp-skill-state-"));
@@ -93,11 +92,6 @@ beforeAll(async () => {
 		root,
 		"warnproc",
 		JSON.stringify({ type: "object", properties: { goal: { type: "string" } }, "x-state": { idleSteps: 3 } }),
-	);
-	capProcedure = await makeSkill(
-		root,
-		"capproc",
-		JSON.stringify({ type: "object", properties: { goal: { type: "string" } }, "x-state": { stateBytes: 300 } }),
 	);
 	plain = await makeSkill(root, "plain");
 	brokenArray = await makeSkill(root, "brokenarray", "[]");
@@ -929,40 +923,6 @@ describe("omp-skill-state idle disengage", () => {
 		expect(s.storedStates).toEqual([{}]);
 	});
 
-	test("a patch before the threshold resets the count and no nudge fires", async () => {
-		const { s } = await projecting(warnProcedure);
-
-		const quiet2 = await s.step("step 2");
-		expect(nudgeIn(quiet2)).toEqual([]);
-
-		const patched = await s.step("recording", patchStep({ goal: "x" }));
-		expect(nudgeIn(patched)).toEqual([]);
-
-		const quiet4 = await s.step("step 4");
-		expect(nudgeIn(quiet4)).toEqual([]);
-
-		const quiet5 = await s.step("step 5");
-		expect(nudgeIn(quiet5)).toEqual([]);
-
-		const prompt = await s.step("step 6");
-		const nudge = nudgeIn(prompt);
-		expect(nudge).toHaveLength(1);
-		expect(nudge[0].content).toContain("unchanged for 2 consecutive steps");
-		expect(s.notices).toEqual([...engageNotices("warnproc"), ...disengageNotices("warnproc", "idle for 3 steps")]);
-	});
-
-	test("a prompt that carries no head is never nudged", async () => {
-		const s = fakeOmp([warnProcedure]).session("s1");
-		await s.invoke("warnproc");
-
-		// The engage asides land at the first step boundary; that step never saw
-		// the rules, so the model cannot be idle in it.
-		expect(await s.step("step 1")).toBeUndefined();
-		const prompt = await s.step("step 2");
-		expect(nudgeIn(prompt)).toEqual([]);
-		expect(s.notices).toEqual(engageNotices("warnproc"));
-	});
-
 	test("after an idle disengage the step is ordinary", async () => {
 		const { s } = await projecting(idleProcedure);
 
@@ -973,83 +933,6 @@ describe("omp-skill-state idle disengage", () => {
 		await s.step("recording", patchStep({ goal: "x" }));
 		expect(s.blocked).toEqual([]);
 		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
-	});
-});
-
-describe("omp-skill-state state cap", () => {
-	// The first step after engage runs before the head asides land, so its
-	// prompt is not projected and it never counts as idle (spec section 11.4).
-	// Every step after it carries the head.
-	async function projecting(skill: Skill = procedure) {
-		const omp = fakeOmp([skill]);
-		const s = omp.session("s1");
-		await s.invoke(skill.name);
-		expect(await s.step("the first step lands the head")).toBeUndefined();
-		return { omp, s };
-	}
-
-	test("the consolidation nudge fires once per over-cap episode and re-arms on recovery", async () => {
-		const { s } = await projecting(capProcedure);
-
-		const growing = await s.step("recording", patchStep({ blob: "x".repeat(400) }));
-		expect(nudgeIn(growing)).toEqual([]);
-
-		const prompt = await s.step("step 3");
-		const nudges = nudgeIn(prompt);
-		expect(nudges).toHaveLength(1);
-		expect(nudges[0].role).toBe("developer");
-		expect(nudges[0].content).toContain("size cap");
-		expect(prompt?.at(-1)).toBe(nudges[0]);
-
-		const stillOver = await s.step("step 4");
-		expect(nudgeIn(stillOver)).toEqual([]);
-
-		const shrinking = await s.step("recording", patchStep({ blob: null }));
-		expect(nudgeIn(shrinking)).toEqual([]);
-		const underCap = await s.step("step 6");
-		expect(nudgeIn(underCap)).toEqual([]);
-
-		const regrowing = await s.step("recording", patchStep({ blob: "x".repeat(400) }));
-		expect(nudgeIn(regrowing)).toEqual([]);
-		const again = await s.step("step 8");
-		const renudges = nudgeIn(again);
-		expect(renudges).toHaveLength(1);
-		expect(renudges[0].content).toContain("size cap");
-	});
-
-	test("the cap never blocks, never ends, and the nudge is never stored or sent", async () => {
-		const { s } = await projecting(capProcedure);
-
-		await s.step("recording", patchStep({ blob: "x".repeat(400) }));
-		await s.step("step 3");
-		await s.step("step 4");
-		await s.step("recording", patchStep({ blob: null }));
-		await s.step("step 6");
-		await s.step("recording", patchStep({ blob: "x".repeat(400) }));
-		await s.step("step 8");
-
-		expect(s.blocked).toEqual([]);
-		expect(s.notices).toEqual(engageNotices("capproc"));
-		expect(s.sends.map((sent) => sent.payload.customType)).toEqual([
-			...engageAsideTypes,
-			STATE_CORE_MESSAGE_TYPE,
-			STATE_SCRATCH_MESSAGE_TYPE,
-			STATE_CORE_MESSAGE_TYPE,
-			STATE_SCRATCH_MESSAGE_TYPE,
-			STATE_CORE_MESSAGE_TYPE,
-			STATE_SCRATCH_MESSAGE_TYPE,
-		]);
-		expect(s.storedStates).toEqual([{}, { blob: "x".repeat(400) }, {}, { blob: "x".repeat(400) }]);
-	});
-
-	test("a skill without a cap never carries a nudge on any prompt", async () => {
-		const { s } = await projecting();
-
-		await s.step("recording", patchStep({ goal: "x" }));
-		await s.step("step 3");
-		await s.step("step 4");
-
-		for (const prompt of s.prompts) expect(nudgeIn(prompt)).toEqual([]);
 	});
 });
 

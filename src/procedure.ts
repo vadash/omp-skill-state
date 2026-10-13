@@ -2,6 +2,7 @@ import type { CustomMessagePayload, SessionBeforeCompactEvent, SessionBeforeComp
 import { currentStepCut } from "./branch";
 import type { AgentMessage } from "./types";
 import { PROCEDURE_SPEC_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, nudgeMessage, renderStateContent, rulesMessage, scratchMessage } from "./messages";
+import { project } from "./projection";
 import { applyPatch, splitState } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
 
@@ -110,10 +111,6 @@ function invalidPatch(procedure: Procedure, error: string): StepOutcome {
 	return { kind: "block" };
 }
 
-export function noteProjected(procedure: Procedure, projected: boolean): void {
-	procedure.projected = projected;
-}
-
 // The one write path for a merged state: every commit goes through this, so
 // the state/idle reset policy has a single home and can never diverge between
 // call sites.
@@ -155,7 +152,7 @@ function overCap(procedure: Procedure): boolean {
 // whose prompt carries the stored head. Idempotent within a step: repeated
 // calls before the next reply re-serve the memo, so a re-run context handler
 // cannot duplicate nudges or re-latch the cap ask.
-export function pendingNudges(procedure: Procedure): AgentMessage[] {
+function pendingNudges(procedure: Procedure): AgentMessage[] {
 	if (procedure.nudgedAt === procedure.step) return procedure.nudgesMemo;
 	const nudges: AgentMessage[] = [];
 	if (procedure.projected && overCap(procedure)) {
@@ -175,6 +172,21 @@ export function pendingNudges(procedure: Procedure): AgentMessage[] {
 	procedure.nudgedAt = procedure.step;
 	procedure.nudgesMemo = nudges;
 	return nudges;
+}
+
+// The context handler's whole job: project the step's prompt, note whether
+// the stored head reached it — the fold counts only steps that saw the rules
+// — and append the turn's nudges. undefined keeps the ordinary context: the
+// safe fallback when the head is not in place yet. The projected flag, the
+// nudge memo and its step key are private machinery: a caller cannot note
+// without nudging or nudge without noting, so the note-before-nudge ordering
+// the two-call seam needed is unstateable from outside.
+export function stepPrompt(procedure: Procedure, messages: AgentMessage[]): AgentMessage[] | undefined {
+	const projected = project(messages, procedure.params.observationBytes, procedure.params.observationWindow);
+	procedure.projected = projected !== undefined;
+	if (projected === undefined) return undefined;
+	const nudges = pendingNudges(procedure);
+	return nudges.length > 0 ? [...projected, ...nudges] : projected;
 }
 
 // The current state split into its two stored partitions, derived from the

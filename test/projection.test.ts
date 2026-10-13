@@ -80,6 +80,13 @@ function asToolResult(message: AgentMessage): Extract<AgentMessage, { role: "too
 	return message;
 }
 
+// The success branch of project: the projected prompt itself.
+function projected(messages: AgentMessage[], observationBytes = 32768, observationWindow?: number): AgentMessage[] {
+	const out = observationWindow === undefined ? project(messages, observationBytes) : project(messages, observationBytes, observationWindow);
+	if (typeof out === "string") throw new Error(`unexpected fallback: ${out}`);
+	return out;
+}
+
 function textBytes(messages: readonly AgentMessage[]): number {
 	let total = 0;
 	for (const message of messages) {
@@ -134,7 +141,7 @@ describe("project assembly", () => {
 			custom("ttsr-injection"),
 			result2,
 		];
-		const out = project(messages, 32768)!;
+		const out = projected(messages, 32768);
 
 		expect(out.map((m) => m.role)).toEqual(["custom", "custom", "custom", "custom", "assistant", "toolResult", "toolResult"]);
 		expect(out.slice(0, 4).map((m) => (m.role === "custom" ? m.customType : m.role))).toEqual([
@@ -152,7 +159,7 @@ describe("project assembly", () => {
 		const h = head();
 		const first = userMsg("first");
 		const second = userMsg("second");
-		const out = project([...h.all, custom("todo-error-reminder"), first, developerMsg("nudge"), second], 32768)!;
+		const out = projected([...h.all, custom("todo-error-reminder"), first, developerMsg("nudge"), second], 32768);
 
 		expect(out).toHaveLength(6);
 		expect(out[4]).toBe(first);
@@ -164,7 +171,7 @@ describe("project assembly", () => {
 		const promptAssistant = assistantText("Which candidate: (A) or (B)? I recommend (A).");
 		const userReply = userMsg("Agree with recommendations.");
 
-		const out = project([...h.all, promptAssistant, userReply], 32768)!;
+		const out = projected([...h.all, promptAssistant, userReply], 32768);
 
 		// Head (4) + Preceding Assistant (1) + User Reply (1) = 6
 		expect(out).toHaveLength(6);
@@ -178,7 +185,7 @@ describe("project assembly", () => {
 		const user1 = userMsg("Yes.");
 		const user2 = userMsg("Also remember to check tests.");
 
-		const out = project([...h.all, promptAssistant, user1, user2], 32768)!;
+		const out = projected([...h.all, promptAssistant, user1, user2], 32768);
 
 		expect(out).toHaveLength(7);
 		expect(out[4]).toBe(promptAssistant);
@@ -190,7 +197,7 @@ describe("project assembly", () => {
 		const h = head();
 		const user = userMsg("First instruction");
 
-		const out = project([...h.all, user], 32768)!;
+		const out = projected([...h.all, user], 32768);
 
 		expect(out).toHaveLength(5);
 		expect(out[4]).toBe(user);
@@ -200,7 +207,7 @@ describe("project assembly", () => {
 		const h = head();
 		const promptAssistant = assistantText("Ready to proceed?");
 		const reply = userMsg("Yes.");
-		const out = project([...h.all, promptAssistant, custom("todo-error-reminder"), reply], 32768)!;
+		const out = projected([...h.all, promptAssistant, custom("todo-error-reminder"), reply], 32768);
 
 		expect(out).toHaveLength(6);
 		expect(out[4]).toBe(promptAssistant);
@@ -212,7 +219,7 @@ describe("project assembly", () => {
 		const call = assistantToolCall("t1");
 		const result = toolResult("t1", "ok");
 		const reply = userMsg("now widen the search");
-		const out = project([...h.all, call, result, reply], 32768)!;
+		const out = projected([...h.all, call, result, reply], 32768);
 
 		expect(out).toHaveLength(5);
 		expect(out[4]).toBe(reply);
@@ -222,7 +229,7 @@ describe("project assembly", () => {
 		const h = head();
 		const call = assistantToolCall("t1");
 		const result = toolResult("t1", "ok");
-		const out = project([...h.all, call, result], 32768)!;
+		const out = projected([...h.all, call, result], 32768);
 
 		expect(out[0]).toBe(h.rules);
 		expect(out[1]).toBe(h.procedureSpec);
@@ -233,7 +240,7 @@ describe("project assembly", () => {
 
 	test("the projected scratch is a per-call copy: unequal to the stored message, same model-visible bytes", () => {
 		const h = head();
-		const out = project([...h.all, assistantToolCall("t1"), toolResult("t1", "ok")], 32768)!;
+		const out = projected([...h.all, assistantToolCall("t1"), toolResult("t1", "ok")], 32768);
 		const copy = out[3]!;
 
 		expect(copy).not.toEqual(h.scratch);
@@ -259,14 +266,14 @@ describe("project assembly", () => {
 
 		// Returning the stored object itself is what keeps the bytes identical:
 		// the projected core is the reference, never a re-rendering.
-		const out = project([rulesMsg(), procedureSpecMsg(), first, scratchMsg(), ...step], 32768)!;
+		const out = projected([rulesMsg(), procedureSpecMsg(), first, scratchMsg(), ...step], 32768);
 		expect(out[2]).toBe(first);
 
-		const resaved = project([rulesMsg(), procedureSpecMsg(), first, second, scratchMsg(), ...step], 32768)!;
+		const resaved = projected([rulesMsg(), procedureSpecMsg(), first, second, scratchMsg(), ...step], 32768);
 		expect(resaved[2]).toBe(second);
 		expect(resaved[2]?.role === "custom" ? resaved[2].content : undefined).toBe(first.content);
 
-		const moved = project([rulesMsg(), procedureSpecMsg(), first, changed, scratchMsg(), ...step], 32768)!;
+		const moved = projected([rulesMsg(), procedureSpecMsg(), first, changed, scratchMsg(), ...step], 32768);
 		expect(moved[2]).toBe(changed);
 		expect(moved[2]?.role === "custom" ? moved[2].content : undefined).not.toBe(first.content);
 	});
@@ -275,14 +282,14 @@ describe("project assembly", () => {
 		const h = head();
 		const olderScratch = scratchMsg({ plan: ["old"] });
 		const latestScratch = scratchMsg({ plan: ["new"] });
-		const out = project([h.rules, olderScratch, h.procedureSpec, latestScratch, h.core, assistantToolCall("t1"), toolResult("t1", "ok")], 32768)!;
+		const out = projected([h.rules, olderScratch, h.procedureSpec, latestScratch, h.core, assistantToolCall("t1"), toolResult("t1", "ok")], 32768);
 
 		expect(out[3]).toEqual(perCall(latestScratch));
 		expect(out[3]).not.toEqual(perCall(olderScratch));
 
 		const olderCore = coreMsg({ goal: "old" });
 		const latestCore = coreMsg({ goal: "new" });
-		const out2 = project([h.rules, olderCore, latestCore, h.procedureSpec, h.scratch, assistantToolCall("t1"), toolResult("t1", "ok")], 32768)!;
+		const out2 = projected([h.rules, olderCore, latestCore, h.procedureSpec, h.scratch, assistantToolCall("t1"), toolResult("t1", "ok")], 32768);
 
 		expect(out2[2]).toBe(latestCore);
 	});
@@ -316,7 +323,7 @@ describe("project assembly", () => {
 				call,
 				result,
 			];
-			expect(project(messages, 32768)).toEqual(expected);
+			expect(projected(messages, 32768)).toEqual(expected);
 		}
 	});
 
@@ -324,7 +331,7 @@ describe("project assembly", () => {
 		const h = head();
 		const call = assistantToolCall("t1");
 		const result = toolResult("t1", "ok");
-		const out = project([...h.all, call, developerMsg("interleave"), result], 32768)!;
+		const out = projected([...h.all, call, developerMsg("interleave"), result], 32768);
 
 		expect(out).toHaveLength(6);
 		expect(out[4]).toBe(call);
@@ -332,49 +339,49 @@ describe("project assembly", () => {
 		expect(asToolResult(out[5]!).toolCallId).toBe("t1");
 	});
 
-	test("missing rules, procedure spec, core or scratch leaves the call unprojected", () => {
+	test("a dropped head message fails the projection as incomplete-head", () => {
 		const complete = [...head().all, assistantToolCall("t1"), toolResult("t1", "ok")];
 		for (const drop of [0, 1, 2, 3]) {
-			expect(project(complete.filter((_, i) => i !== drop), 32768)).toBeUndefined();
+			expect(project(complete.filter((_, i) => i !== drop), 32768)).toBe("incomplete-head");
 		}
 	});
 
-	test("a branch holding only the legacy single state message is inert, never a two-message head", () => {
+	test("a legacy single state message never completes the head: the projection reports incomplete-head", () => {
 		const h = head();
 		const legacy = [...h.all.slice(0, 2), custom("sh.omp.skill-state.state", "{}", { state: { goal: "x" } })];
-		expect(project([...legacy, assistantToolCall("t1"), toolResult("t1", "ok")], 32768)).toBeUndefined();
-		expect(project([...h.all.slice(0, 2), h.core, legacy[2]!, assistantToolCall("t1"), toolResult("t1", "ok")], 32768)).toBeUndefined();
+		expect(project([...legacy, assistantToolCall("t1"), toolResult("t1", "ok")], 32768)).toBe("incomplete-head");
+		expect(project([...h.all.slice(0, 2), h.core, legacy[2]!, assistantToolCall("t1"), toolResult("t1", "ok")], 32768)).toBe("incomplete-head");
 	});
 
-	test("trailing tool results without a preceding assistant tool call leave the call unprojected", () => {
+	test("trailing tool results without a preceding assistant tool call fail as unmatched-tool-pair", () => {
 		const h = head();
-		expect(project([...h.all, userMsg("hi"), toolResult("t1", "orphan")], 32768)).toBeUndefined();
-		expect(project([...h.all, assistantText("no calls"), toolResult("t1", "orphan")], 32768)).toBeUndefined();
+		expect(project([...h.all, userMsg("hi"), toolResult("t1", "orphan")], 32768)).toBe("unmatched-tool-pair");
+		expect(project([...h.all, assistantText("no calls"), toolResult("t1", "orphan")], 32768)).toBe("unmatched-tool-pair");
 	});
 
-	test("a result that answers no toolCall in the pinned assistant leaves the call unprojected", () => {
+	test("a result that answers no toolCall in the pinned assistant fails as unmatched-tool-pair", () => {
 		const h = head();
-		expect(project([...h.all, assistantToolCall("t1"), toolResult("t1", "ok"), toolResult("t2", "stray")], 32768)).toBeUndefined();
-		expect(project([...h.all, assistantToolCall("t1"), toolResult("other", "mismatch")], 32768)).toBeUndefined();
+		expect(project([...h.all, assistantToolCall("t1"), toolResult("t1", "ok"), toolResult("t2", "stray")], 32768)).toBe("unmatched-tool-pair");
+		expect(project([...h.all, assistantToolCall("t1"), toolResult("other", "mismatch")], 32768)).toBe("unmatched-tool-pair");
 	});
 
 	test("a trailing text-only assistant projects to the head only", () => {
 		const h = head();
-		const out = project([...h.all, assistantText("thinking out loud")], 32768)!;
+		const out = projected([...h.all, assistantText("thinking out loud")], 32768);
 
 		expect(out).toEqual([h.rules, h.procedureSpec, h.core, perCall(h.scratch)]);
 	});
 
 	test("a fresh procedure with only the skill prompt and the head projects to the head only", () => {
 		const h = head();
-		const out = project([custom("skill-prompt"), ...h.all, developerMsg("note")], 32768)!;
+		const out = projected([custom("skill-prompt"), ...h.all, developerMsg("note")], 32768);
 
 		expect(out).toEqual([h.rules, h.procedureSpec, h.core, perCall(h.scratch)]);
 	});
 
 	test("a trailing assistant tool call with no result yet projects to the head only", () => {
 		const h = head();
-		const out = project([...h.all, assistantToolCall("t1")], 32768)!;
+		const out = projected([...h.all, assistantToolCall("t1")], 32768);
 
 		expect(out).toEqual([h.rules, h.procedureSpec, h.core, perCall(h.scratch)]);
 	});
@@ -382,12 +389,12 @@ describe("project assembly", () => {
 	test("project never mutates its input, including under truncation", () => {
 		const truncated = [...head().all, assistantToolCall("t1"), toolResult("t1", "y".repeat(500))];
 		const snapshot = structuredClone(truncated);
-		project(truncated, 200);
+		projected(truncated, 200);
 		expect(truncated).toEqual(snapshot);
 
 		const untouched = [...head().all, userMsg("keep")];
 		const snapshot2 = structuredClone(untouched);
-		project(untouched, 10);
+		projected(untouched, 10);
 		expect(untouched).toEqual(snapshot2);
 	});
 });
@@ -396,7 +403,7 @@ describe("project observation cap", () => {
 	test("over the cap the largest result is cut from the end and carries the marker", () => {
 		const h = head();
 		const result = toolResult("call-9", "a".repeat(400), "bash");
-		const out = project([...h.all, assistantToolCall("call-9", "bash"), result], 300)!;
+		const out = projected([...h.all, assistantToolCall("call-9", "bash"), result], 300);
 		const capped = asToolResult(out[5]!);
 		const marker = capped.content.at(-1)!;
 
@@ -417,7 +424,7 @@ describe("project observation cap", () => {
 	test("under the cap results pass through untouched", () => {
 		const h = head();
 		const result = toolResult("t1", "small");
-		const out = project([...h.all, assistantToolCall("t1"), result], 32768)!;
+		const out = projected([...h.all, assistantToolCall("t1"), result], 32768);
 
 		expect(out[5]).toBe(result);
 	});
@@ -425,7 +432,7 @@ describe("project observation cap", () => {
 	test("multi-byte UTF-8 is cut on code point boundaries without replacement chars", () => {
 		const h = head();
 		const result = toolResult("t1", "€".repeat(200));
-		const out = project([...h.all, assistantToolCall("t1"), result], 300)!;
+		const out = projected([...h.all, assistantToolCall("t1"), result], 300);
 		const capped = asToolResult(out[5]!);
 		const text = capped.content
 			.map((b) => (b.type === "text" ? b.text : ""))
@@ -439,7 +446,7 @@ describe("project observation cap", () => {
 		const h = head();
 		const r1 = toolResult("t1", "1".repeat(300));
 		const r2 = toolResult("t2", "2".repeat(300), "bash");
-		const out = project([...h.all, assistant([
+		const out = projected([...h.all, assistant([
 			{ type: "toolCall", id: "t1", name: "read", arguments: {} },
 			{ type: "toolCall", id: "t2", name: "read", arguments: {} },
 		]), r1, r2], 350)!;
@@ -459,7 +466,7 @@ describe("project observation cap", () => {
 		const h = head();
 		const r1 = toolResult("t1", "1".repeat(300));
 		const r2 = toolResult("t2", "2".repeat(300), "bash");
-		const out = project([...h.all, assistant([
+		const out = projected([...h.all, assistant([
 			{ type: "toolCall", id: "t1", name: "read", arguments: {} },
 			{ type: "toolCall", id: "t2", name: "read", arguments: {} },
 		]), r1, r2], 100)!;
@@ -476,7 +483,7 @@ describe("project observation cap", () => {
 	test("the user turn is never truncated", () => {
 		const h = head();
 		const turn = userMsg("u".repeat(5000));
-		const out = project([...h.all, turn], 100)!;
+		const out = projected([...h.all, turn], 100);
 
 		expect(out[4]).toBe(turn);
 	});
@@ -484,7 +491,7 @@ describe("project observation cap", () => {
 	test("a total exactly at the cap passes through untouched", () => {
 		const h = head();
 		const result = toolResult("t1", "x".repeat(300));
-		const out = project([...h.all, assistantToolCall("t1"), result], 300)!;
+		const out = projected([...h.all, assistantToolCall("t1"), result], 300);
 
 		expect(out[5]).toBe(result);
 	});
@@ -500,7 +507,7 @@ describe("project observation cap", () => {
 			timestamp: seq++,
 		};
 		const text = toolResult("t2", "y".repeat(400), "bash");
-		const out = project([...h.all, assistant([
+		const out = projected([...h.all, assistant([
 			{ type: "toolCall", id: "t1", name: "read", arguments: {} },
 			{ type: "toolCall", id: "t2", name: "bash", arguments: {} },
 		]), image, text], 300)!;
@@ -522,7 +529,7 @@ describe("project observation window", () => {
 		const result2 = toolResult("t2", "second", "bash");
 		const call3 = assistantToolCall("t3");
 		const result3 = toolResult("t3", "third");
-		const out = project(
+		const out = projected(
 			[...h.all, droppedCall, droppedResult, call1, result1, call2, result2, call3, result3],
 			32768,
 			3,
@@ -543,7 +550,7 @@ describe("project observation window", () => {
 		const result1 = toolResult("t1", "first");
 		const call2 = assistantToolCall("t2");
 		const result2 = toolResult("t2", "second");
-		const out = project(
+		const out = projected(
 			[...h.all, assistantToolCall("t0"), toolResult("tZ", "mismatch"), call1, result1, call2, result2],
 			32768,
 			3,
@@ -562,7 +569,7 @@ describe("project observation window", () => {
 		const result1 = toolResult("t1", "first");
 		const call2 = assistantToolCall("t2");
 		const result2 = toolResult("t2", "second");
-		const out = project([...h.all, userMsg("plain turn"), call1, result1, call2, result2], 32768, 3)!;
+		const out = projected([...h.all, userMsg("plain turn"), call1, result1, call2, result2], 32768, 3);
 
 		expect(out).toHaveLength(8);
 		expect(out[4]).toBe(call1);
@@ -573,7 +580,7 @@ describe("project observation window", () => {
 		const h = head();
 		const call2 = assistantToolCall("t2");
 		const result2 = toolResult("t2", "second");
-		const out = project([...h.all, assistantToolCall("t1"), call2, result2], 32768, 3)!;
+		const out = projected([...h.all, assistantToolCall("t1"), call2, result2], 32768, 3);
 
 		expect(out).toHaveLength(6);
 		expect(out[4]).toBe(call2);
@@ -586,7 +593,7 @@ describe("project observation window", () => {
 		const result1 = toolResult("t1", "first");
 		const call2 = assistantToolCall("t2");
 		const result2 = toolResult("t2", "second");
-		const out = project([...h.all, call1, result1, call2, result2], 32768, 5)!;
+		const out = projected([...h.all, call1, result1, call2, result2], 32768, 5);
 
 		expect(out).toHaveLength(8);
 		expect(out[4]).toBe(call1);
@@ -597,7 +604,7 @@ describe("project observation window", () => {
 		const h = head();
 		const r1 = toolResult("t1", "1".repeat(300));
 		const r2 = toolResult("t2", "2".repeat(300), "bash");
-		const out = project(
+		const out = projected(
 			[...h.all, assistantToolCall("t1"), r1, assistantToolCall("t2", "bash"), r2],
 			350,
 			2,
@@ -616,7 +623,7 @@ describe("project observation window", () => {
 		const h = head();
 		const r1 = toolResult("t1", "1".repeat(300));
 		const r2 = toolResult("t2", "2".repeat(300), "bash");
-		const out = project(
+		const out = projected(
 			[...h.all, assistantToolCall("t1"), r1, assistantToolCall("t2", "bash"), r2],
 			100,
 			2,
@@ -642,7 +649,7 @@ describe("project observation window", () => {
 			toolResult("t3", "w".repeat(500)),
 		];
 		const snapshot = structuredClone(messages);
-		project(messages, 200, 3);
+		projected(messages, 200, 3);
 		expect(messages).toEqual(snapshot);
 	});
 });
@@ -663,8 +670,8 @@ describe("project flat band", () => {
 			messages.push(assistantToolCall(`t${step}`));
 			messages.push(toolResult(`t${step}`, "x".repeat(2048)));
 			if (step % 3 === 0) messages.push(scratchMsg({ step }));
-			if (step === 5) early = project(messages, 8192);
-			if (step === 30) late = project(messages, 8192);
+			if (step === 5) early = projected(messages, 8192);
+			if (step === 30) late = projected(messages, 8192);
 		}
 
 		// Four head messages plus the pinned pair, at every step.

@@ -44,13 +44,15 @@ export async function engagedSession(skills: Skill[], id = "s1") {
 
 // An engaged session whose first step has landed the head, so every step
 // after it carries a projected prompt. The first step after engage runs
-// before the head asides land, so its prompt is not projected and it never
-// counts as idle (spec section 11.4).
+// before the head asides land, so its prompt is not projected, never counts
+// as idle (spec section 11.4) and carries exactly one fallback notice.
 export async function projectingSession(skill: Skill, id = "s1") {
 	const omp = fakeOmp([skill]);
 	const s = omp.session(id);
 	await s.invoke(skill.name);
-	expect(await s.step("the first step lands the head")).toBeUndefined();
+	const first = await s.step("the first step lands the head");
+	if (first === undefined) throw new Error("the first step returned no prompt");
+	expect(nudgeIn(first)).toHaveLength(1);
 	return { omp, s };
 }
 
@@ -71,8 +73,8 @@ export const patchStep = (patch: unknown, extraTools: string[] = []) => ({
 	arguments: [{ patch }, ...extraTools.map(() => ({}))],
 });
 
-// The developer messages a returned prompt carries; the per-call nudges are
-// the consolidation ask and the idle warning.
+// The developer messages a returned prompt carries: the per-call nudges on a
+// projected step, the fallback notice on an unprojected one.
 export function nudgeIn(prompt: unknown[] | undefined): { role: unknown; content: unknown }[] {
 	const nudges: { role: unknown; content: unknown }[] = [];
 	for (const message of prompt ?? []) {

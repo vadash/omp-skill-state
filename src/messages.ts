@@ -1,7 +1,7 @@
 import type { CustomMessagePayload } from "@oh-my-pi/pi-coding-agent";
 import { isPlainObject } from "./types";
 import type { ExecutionState } from "./state";
-import type { AgentMessage } from "./types";
+import type { AgentMessage, ProjectionFailure } from "./types";
 
 export const STATE_CORE_MESSAGE_TYPE = "sh.omp.skill-state.core";
 export const STATE_SCRATCH_MESSAGE_TYPE = "sh.omp.skill-state.scratch";
@@ -144,6 +144,22 @@ export function consolidationNudgeMessage(): AgentMessage {
 	return {
 		role: "developer",
 		content: `The execution state has grown past its size cap. Consolidate it with a state_update patch: drop superseded findings — delete keys that no longer matter (null deletes a key) and rewrite values to only what the rest of the run needs. The cap never blocks anything; it only asks for this cleanup.`,
+		timestamp: Date.now(),
+	};
+}
+
+// The notice the model sees when the projection could not be built and the
+// step runs on ordinary context instead. Per-call by construction, like the
+// nudges: appended to the prompt only, never stored, never re-sent from
+// history. The step policy latches it, so one unprojected episode stays one
+// notice no matter how many steps it spans.
+export function fallbackNoticeMessage(reason: ProjectionFailure): AgentMessage {
+	const why = reason === "incomplete-head"
+		? "the stored head is incomplete"
+		: "a tool result does not answer the tool call before it";
+	return {
+		role: "developer",
+		content: `The state projection could not be built this step (${why}); the ordinary conversation is used instead. The projection resumes automatically once the head messages and tool pairing are back.`,
 		timestamp: Date.now(),
 	};
 }

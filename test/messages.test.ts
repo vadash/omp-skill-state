@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { announcedSkillNames, consolidationNudgeMessage, extractStatePayload, isStateCoreMessage, isStateScratchMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, SKILL_PROMPT_MESSAGE_TYPE, skillInvocationName, STATE_UPDATE_TOOL_NAME, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage } from "../src/messages";
+import { announcedSkillNames, consolidationNudgeMessage, extractStatePayload, fallbackNoticeMessage, isStateCoreMessage, isStateScratchMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, SKILL_PROMPT_MESSAGE_TYPE, skillInvocationName, STATE_UPDATE_TOOL_NAME, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage } from "../src/messages";
 
 describe("consolidationNudgeMessage", () => {
 	test("is a developer message asking for a state_update consolidation, with no fence, so it never becomes an elide target", () => {
@@ -14,6 +14,28 @@ describe("consolidationNudgeMessage", () => {
 		if (!("content" in nudge) || typeof nudge.content !== "string") throw new Error("developer message without text content");
 		expect(nudge.content).toContain(STATE_UPDATE_TOOL_NAME);
 		expect(nudge.content.split("\n").some((line) => line.trimStart().startsWith("```"))).toBe(false);
+	});
+});
+
+describe("fallbackNoticeMessage", () => {
+	test("is a developer message naming the projection failure reason and the ordinary-context fallback", () => {
+		const head = fallbackNoticeMessage("incomplete-head");
+		expect(head).toEqual({
+			role: "developer",
+			content: expect.stringContaining("the stored head is incomplete"),
+			timestamp: expect.any(Number),
+		});
+		if (!("content" in head) || typeof head.content !== "string") throw new Error("developer message without text content");
+		expect(head.content).toContain("projection");
+
+		const pair = fallbackNoticeMessage("unmatched-tool-pair");
+		expect(pair).toEqual({
+			role: "developer",
+			content: expect.stringContaining("a tool result does not answer the tool call before it"),
+			timestamp: expect.any(Number),
+		});
+		if (!("content" in pair) || typeof pair.content !== "string") throw new Error("developer message without text content");
+		expect(pair.content).toContain("projection");
 	});
 });
 

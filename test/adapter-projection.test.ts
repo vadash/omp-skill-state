@@ -3,7 +3,7 @@ import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { loadStateSchema } from "../src/state";
 import { fakeOmp } from "./fake-session";
-import { makeSkillSet, procedureSchema, smallcapSchema } from "./harness";
+import { engageAsideTypes, engagedSession, makeSkillSet, nudgeIn, procedureSchema, smallcapSchema } from "./harness";
 
 // The real bundled schema, loaded from the repo so a change to its x-state
 // window flows into this suite.
@@ -24,6 +24,26 @@ describe("omp-skill-state projection (context seam)", () => {
 		const sub = omp.session("s2", { kind: "sub" });
 		await sub.invoke("procedure");
 		expect(await sub.step("ordinary")).toBeUndefined();
+	});
+
+	test("engaged: the unprojected first step carries one fallback notice, never stored", async () => {
+		const { s } = await engagedSession([procedure]);
+
+		// The head asides land at the first boundary, so step 1 falls back to
+		// ordinary context with exactly one developer notice riding it.
+		const first = await s.step("first");
+		if (first === undefined) throw new Error("the first step returned no prompt");
+		const notices = nudgeIn(first);
+		// The notice's wording is the unit suites' claim (messages, procedure);
+		// here the wiring is the claim: one developer message rides, nothing else.
+		expect(notices).toHaveLength(1);
+
+		// The notice is per-call: only the four engage asides were stored.
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
+
+		// The next step projects: the episode is over, no developer message rides.
+		const second = await s.step("second");
+		expect(nudgeIn(second)).toEqual([]);
 	});
 
 	test("engaged: honours x-state observationBytes on real step results", async () => {

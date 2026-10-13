@@ -5,7 +5,7 @@ import type { Procedure } from "../src/procedure";
 import { DEFAULT_PARAMS } from "../src/state";
 import type { ExecutionState, StateParams, StateSchema } from "../src/state";
 import type { AgentMessage } from "../src/types";
-import { assistantEntry } from "./entries";
+import { assistantEntry, ZERO_USAGE } from "./entries";
 
 const schema: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
 
@@ -58,6 +58,7 @@ describe("newProcedure", () => {
 			invalidPatches: 0,
 			idle: 0,
 			capNudged: false,
+			fallbackNoticed: false,
 			projected: false,
 			step: 0,
 			nudgedAt: -1,
@@ -227,6 +228,9 @@ describe("recordReply and idle steps", () => {
 	test("a step whose prompt lost the head pauses the count without resetting it", () => {
 		const p = projected();
 		recordReply(p, empty());
+		// The first unprojected step carries the fallback notice; the repeat
+		// keeps the ordinary context untouched.
+		if (stepPrompt(p, []) === undefined) throw new Error("notice step returned nothing");
 		if (stepPrompt(p, []) !== undefined) throw new Error("headless prompt projected");
 		recordReply(p, empty());
 		expect(p.idle).toBe(1);
@@ -383,6 +387,13 @@ describe("stepPrompt nudges", () => {
 	test("a step whose prompt carried no head neither nudges nor latches", () => {
 		const p = procedure({ stateBytes: 100 }, { blob: "x".repeat(200) });
 
+		// The first unprojected step carries the fallback notice...
+		const first = stepPrompt(p, []);
+		if (first === undefined) throw new Error("first unprojected step returned nothing");
+		expect(first.filter((message) => message.role === "developer")).toHaveLength(1);
+		expect(p.capNudged).toBe(false);
+
+		// ...and the second keeps the ordinary context untouched.
 		expect(stepPrompt(p, [])).toBeUndefined();
 		expect(p.capNudged).toBe(false);
 
@@ -409,6 +420,88 @@ describe("stepPrompt nudges", () => {
 		if ("error" in drop) throw new Error(drop.error);
 		recordReply(p, empty());
 		expect(nudgesFor(p)).toEqual([]);
+	});
+});
+
+describe("stepPrompt fallback notice", () => {
+	// The developer messages an unprojected step's prompt carries: the fallback
+	// notice, at most one per episode.
+	function noticesIn(prompt: AgentMessage[] | undefined): AgentMessage[] {
+		if (prompt === undefined) throw new Error("unprojected step returned nothing");
+		return prompt.filter((message) => message.role === "developer");
+	}
+
+	function noticeText(notice: AgentMessage | undefined): string {
+		if (notice === undefined || !("content" in notice) || typeof notice.content !== "string") throw new Error("notice without text content");
+		return notice.content;
+	}
+
+	test("the first unprojected step carries exactly one developer notice naming the reason", () => {
+		const p = procedure();
+
+		const notices = noticesIn(stepPrompt(p, []));
+		expect(notices).toHaveLength(1);
+		expect(notices[0]!.role).toBe("developer");
+		expect(noticeText(notices[0])).toContain("the stored head is incomplete");
+		expect(p.projected).toBe(false);
+	});
+
+	test("an immediate repeat keeps the ordinary context untouched, never a second notice", () => {
+		const p = procedure();
+
+		expect(noticesIn(stepPrompt(p, []))).toHaveLength(1);
+		expect(stepPrompt(p, [])).toBeUndefined();
+	});
+
+	test("a projected step ends the episode and re-arms the notice", () => {
+		const p = procedure();
+
+		expect(noticesIn(stepPrompt(p, []))).toHaveLength(1);
+		if (stepPrompt(p, headContext(p)) === undefined) throw new Error("head did not project");
+		expect(p.projected).toBe(true);
+
+		// Fallback again: a fresh notice, latched anew for the new episode.
+		const notices = noticesIn(stepPrompt(p, []));
+		expect(notices).toHaveLength(1);
+		expect(noticeText(notices[0])).toContain("the stored head is incomplete");
+	});
+
+	test("an unmatched tool pair falls back with the notice naming that reason", () => {
+		const p = procedure();
+		const call: AgentMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "t1", name: "read", arguments: {} }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "m",
+			usage: ZERO_USAGE,
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+		const mismatched: AgentMessage = {
+			role: "toolResult",
+			toolCallId: "other",
+			toolName: "read",
+			content: [{ type: "text", text: "mismatch" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+
+		const notices = noticesIn(stepPrompt(p, [...headContext(p), call, mismatched]));
+		expect(notices).toHaveLength(1);
+		expect(noticeText(notices[0])).toContain("a tool result does not answer the tool call before it");
+		expect(p.projected).toBe(false);
+	});
+
+	test("fallback steps neither latch the cap ask nor move the idle count", () => {
+		const p = procedure({ stateBytes: 100 }, { blob: "x".repeat(200) });
+
+		expect(noticesIn(stepPrompt(p, []))).toHaveLength(1);
+		expect(stepPrompt(p, [])).toBeUndefined();
+		expect(p.capNudged).toBe(false);
+
+		recordReply(p, empty());
+		expect(p.idle).toBe(0);
 	});
 });
 

@@ -300,8 +300,9 @@ export default function (pi: ExtensionAPI): void {
 	// complete. undefined keeps the ordinary context: safe fallback when not
 	// engaged, in a subagent, or when the head is not in place yet. Nudges
 	// ride on the per-call prompt only: never stored, never re-sent from
-	// history. A step whose prompt carries no head gets undefined back, so it
-	// neither counts nor warns.
+	// history. The fallback notice rides the same way, once per unprojected
+	// episode. A step whose prompt carries no head gets undefined back (after
+	// its notice step), so it neither counts nor warns.
 	pi.on("context", (event, ctx) => {
 		const procedure = current(ctx);
 		if (procedure === undefined) return undefined;

@@ -1,7 +1,7 @@
 import type { CustomMessagePayload, SessionBeforeCompactEvent, SessionBeforeCompactResult } from "@oh-my-pi/pi-coding-agent";
 import { currentStepCut } from "./branch";
 import type { AgentMessage } from "./types";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, nudgeMessage, renderStateContent, rulesMessage, scratchMessage } from "./messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, fallbackNoticeMessage, nudgeMessage, renderStateContent, rulesMessage, scratchMessage } from "./messages";
 import { project } from "./projection";
 import { applyPatch, splitState } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
@@ -25,6 +25,10 @@ export interface Procedure {
 	// episode. pendingNudges latches it when it hands the nudge out; a commit
 	// that lands the state back under the cap re-arms it there.
 	capNudged: boolean;
+	// Whether the fallback notice already fired in the current unprojected
+	// episode. stepPrompt latches it when it hands the notice out; a projected
+	// step ends the episode and re-arms it there.
+	fallbackNoticed: boolean;
 	// One up-counter of replies seen: each recordReply is one step.
 	step: number;
 	// The step the nudge memo was computed for, and the set it returned, so
@@ -43,7 +47,7 @@ export interface Procedure {
 // Every procedure starts with fresh counters, from a new invocation and from a
 // re-derive alike.
 export function newProcedure(name: string, spec: string, schema: StateSchema, params: StateParams, state: ExecutionState): Procedure {
-	return { name, spec, schema, params, state, invalidPatches: 0, idle: 0, capNudged: false, projected: false, step: 0, nudgedAt: -1, nudgesMemo: [] };
+	return { name, spec, schema, params, state, invalidPatches: 0, idle: 0, capNudged: false, fallbackNoticed: false, projected: false, step: 0, nudgedAt: -1, nudgesMemo: [] };
 }
 
 // What one reply did to the procedure. The factory acts on it: an ok step's
@@ -176,15 +180,26 @@ function pendingNudges(procedure: Procedure): AgentMessage[] {
 
 // The context handler's whole job: project the step's prompt, note whether
 // the stored head reached it — the fold counts only steps that saw the rules
-// — and append the turn's nudges. undefined keeps the ordinary context: the
-// safe fallback when the head is not in place yet. The projected flag, the
-// nudge memo and its step key are private machinery: a caller cannot note
-// without nudging or nudge without noting, so the note-before-nudge ordering
-// the two-call seam needed is unstateable from outside.
+// — and append the turn's nudges. An unprojected step keeps the ordinary
+// context and carries the fallback notice once per episode: the first
+// unprojected step latches fallbackNoticed and rides the notice, later ones
+// return undefined untouched, and a projected step re-arms the latch. The
+// whole prompt is never memoized because a same-step context re-run after a
+// compaction must rebuild from the new messages; only the nudge memo, which
+// is not stale-prone, is. The projected flag, the notice latch, the nudge
+// memo and its step key are private machinery: a caller cannot note without
+// nudging or nudge without noting, so the note-before-nudge ordering the
+// two-call seam needed is unstateable from outside.
 export function stepPrompt(procedure: Procedure, messages: AgentMessage[]): AgentMessage[] | undefined {
 	const projected = project(messages, procedure.params.observationBytes, procedure.params.observationWindow);
-	procedure.projected = projected !== undefined;
-	if (projected === undefined) return undefined;
+	if (typeof projected === "string") {
+		procedure.projected = false;
+		if (procedure.fallbackNoticed) return undefined;
+		procedure.fallbackNoticed = true;
+		return [...messages, fallbackNoticeMessage(projected)];
+	}
+	procedure.projected = true;
+	procedure.fallbackNoticed = false;
 	const nudges = pendingNudges(procedure);
 	return nudges.length > 0 ? [...projected, ...nudges] : projected;
 }

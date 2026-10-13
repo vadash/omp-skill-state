@@ -9,3 +9,8 @@ export type AgentMessage = ContextEvent["messages"][number];
 export function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
+
+// Why the projection fell back to ordinary context: the stored head is
+// incomplete, or the newest tool pair cannot be matched to its assistant
+// message. project returns one of these instead of a projected prompt.
+export type ProjectionFailure = "incomplete-head" | "unmatched-tool-pair";

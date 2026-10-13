@@ -420,7 +420,11 @@ describe("omp-skill-state first-step rules", () => {
 	test("step 1 sees the rules on ordinary context, before any projected head exists", async () => {
 		const { s } = await engagedSession([procedure]);
 
-		expect(await s.step("first")).toBeUndefined();
+		// The unprojected step runs on ordinary context plus one fallback notice.
+		const first = await s.step("first");
+		if (first === undefined) throw new Error("the first step returned no prompt");
+		const notices = nudgeIn(first);
+		expect(notices).toHaveLength(1);
 		const rules = s.lastContextMessages?.find(
 			(message): message is Record<string, unknown> =>
 				typeof message === "object" && message !== null && "customType" in message && message.customType === RULES_MESSAGE_TYPE,

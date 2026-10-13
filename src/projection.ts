@@ -1,6 +1,6 @@
 import { RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE } from "./messages";
 import { isPlainObject } from "./types";
-import type { AgentMessage } from "./types";
+import type { AgentMessage, ProjectionFailure } from "./types";
 
 type ToolResult = Extract<AgentMessage, { role: "toolResult" }>;
 type ResultContent = ToolResult["content"];
@@ -35,10 +35,11 @@ function isSkippable(message: AgentMessage): boolean {
 // differing copy: one extra field in details, outside the model-visible role
 // and content, makes the harness mark it per-call so the durable breakpoint
 // anchors on the newest stable message before it, the last core message.
-// undefined means no projection: the call gets ordinary context. That is the
-// safe fallback whenever the head is incomplete or provider pairing cannot be
-// established; a wrong prompt is worse than a plain one.
-export function project(messages: readonly AgentMessage[], observationBytes: number, observationWindow = 1): AgentMessage[] | undefined {
+// A ProjectionFailure return means no projection: the call gets ordinary
+// context. That is the safe fallback whenever the head is incomplete or
+// provider pairing cannot be established; a wrong prompt is worse than a
+// plain one, and the named reason is what the fallback notice quotes.
+export function project(messages: readonly AgentMessage[], observationBytes: number, observationWindow = 1): AgentMessage[] | ProjectionFailure {
 	const rules = lastCustom(messages, RULES_MESSAGE_TYPE);
 	const procedureSpec = lastCustom(messages, PROCEDURE_SPEC_MESSAGE_TYPE);
 	const core = lastCustom(messages, STATE_CORE_MESSAGE_TYPE);
@@ -47,7 +48,7 @@ export function project(messages: readonly AgentMessage[], observationBytes: num
 	// its one home in branch.ts (statePairs) — this is the presence check over
 	// the projected message list, a different shape, not a second walker.
 	if (rules === undefined || procedureSpec === undefined || core === undefined || scratchStored === undefined || scratchStored.role !== "custom") {
-		return undefined;
+		return "incomplete-head";
 	}
 	const storedDetails = scratchStored.details;
 	const scratchCopy: AgentMessage = {
@@ -88,12 +89,12 @@ export function project(messages: readonly AgentMessage[], observationBytes: num
 			// a result is a history condition the harness handles on its own, so
 			// it is not checked.
 			if (results.length === 0 || pinned?.role !== "assistant") {
-				if (collected === 0) return undefined;
+				if (collected === 0) return "unmatched-tool-pair";
 				break;
 			}
 			const callIds = new Set(pinned.content.flatMap((block) => (block.type === "toolCall" ? [block.id] : [])));
 			if (results.some((result) => !callIds.has(result.toolCallId))) {
-				if (collected === 0) return undefined;
+				if (collected === 0) return "unmatched-tool-pair";
 				break;
 			}
 			pairs.push([pinned, ...results]);

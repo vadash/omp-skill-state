@@ -1,6 +1,8 @@
 import { afterAll, describe, expect, jest, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import { STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, STATE_UPDATE_DESCRIPTION, STATE_UPDATE_TOOL_NAME, coreMessage, renderStateContent } from "../src/messages";
+import { newProcedure, recordReply } from "../src/procedure";
+import { DEFAULT_PARAMS } from "../src/state";
 import type { ExecutionState } from "../src/state";
 import { fakeOmp } from "./fake-session";
 import type { FakeOmp } from "./fake-session";
@@ -75,6 +77,44 @@ describe("omp-skill-state patch loop", () => {
 		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
 		expect(s.blocked.map((call) => call.toolName)).toEqual([STATE_UPDATE_TOOL_NAME, "read", "bash"]);
 		for (const call of s.blocked) expect(call.reason).toBe('state key "goal" must be a string (was number)');
+	});
+
+	test("a reply carrying two valid patches commits both, in declaration order, landing on one fold of the two", async () => {
+		const { s } = await engagedSession([procedure]);
+		// Parked on goal "z" so the two patches y then z fold and commit back
+		// to where they started: the fold leaves the record's own state
+		// untouched, which is what makes it comparable to the commits' landing.
+		await s.step("parking", patchStep({ goal: "z" }));
+
+		// The fold witness: the same two patches folded once by the step
+		// policy, on a twin procedure over the same schema and the same
+		// parked state.
+		const fold = newProcedure("procedure", "invoked", procedureSchema, DEFAULT_PARAMS, { goal: "z" });
+		expect(recordReply(fold, { patches: [{ goal: "y" }, { goal: "z" }], hasPatch: true })).toEqual({ kind: "ok" });
+
+		await s.step("recording", { tools: [STATE_UPDATE_TOOL_NAME, STATE_UPDATE_TOOL_NAME], arguments: [{ patch: { goal: "y" } }, { patch: { goal: "z" } }] });
+
+		// One commit per patch, in declaration order: the second patch lands
+		// against the state the first commit left (re-reading the parked state
+		// instead would make z no change: no commit, no send).
+		expect(s.storedStates).toEqual([{}, { goal: "z" }, { goal: "y" }, { goal: "z" }]);
+		expect(s.sends.slice(6)).toEqual([...stateSends({ goal: "y" }, "aside"), ...stateSends({ goal: "z" }, "aside")]);
+		expect(s.blocked).toEqual([]);
+		// The commits land where the one fold landed (CONTEXT.md "Fold"/"Commit" equivalence).
+		expect(s.storedStates.at(-1)).toEqual(fold.state);
+	});
+
+	test("a reply whose second patch is invalid commits nothing and blocks the whole batch", async () => {
+		const { s } = await engagedSession([procedure]);
+
+		await s.step("recording", { tools: [STATE_UPDATE_TOOL_NAME, STATE_UPDATE_TOOL_NAME], arguments: [{ patch: { goal: "y" } }, { patch: { goal: 42 } }] });
+
+		// The fold refused the step, so the tool_call handler blocks every
+		// call and no execute runs: nothing commits, nothing sends.
+		expect(s.blocked.map((call) => call.toolName)).toEqual([STATE_UPDATE_TOOL_NAME, STATE_UPDATE_TOOL_NAME]);
+		for (const call of s.blocked) expect(call.reason).toBe('state key "goal" must be a string (was number)');
+		expect(s.storedStates).toEqual([{}]);
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
 	});
 
 	test("a state_update call without a patch argument blocks with the shape error", async () => {
@@ -221,6 +261,18 @@ describe("omp-skill-state state_update registration", () => {
 
 		expect(omp.tool(STATE_UPDATE_TOOL_NAME)!.loadMode).toBe("essential");
 	});
+
+	test("the definition declares exclusive scheduling: one reply's state_update calls run one at a time, in declaration order (spec section 8)", async () => {
+		const omp = fakeOmp([procedure]);
+
+		// concurrency is not on the extension-facing ToolDefinition type; it
+		// reaches the harness scheduler as a forwarded extra property, the
+		// untyped surface this assertion pins.
+		const def = omp.tool(STATE_UPDATE_TOOL_NAME)! as { concurrency?: unknown };
+
+		expect(def.concurrency).toBe("exclusive");
+	});
+
 	test("a direct execute applies a valid patch: commits and sends the core+scratch asides", async () => {
 		const omp = fakeOmp([procedure]);
 		const s = omp.session("s1");

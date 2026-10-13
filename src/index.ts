@@ -81,6 +81,14 @@ export default function (pi: ExtensionAPI): void {
 		parameters: z.object({ patch: z.record(z.unknown()) }),
 		strict: true,
 		approval: { tier: "read", policy: "allow" } as const,
+		// Two halves keep one reply's patch commits in declaration order and
+		// uninterleaved (CONTEXT.md "Fold" and "Commit"): the harness schedules a
+		// reply's tool calls concurrently by default (mode "shared"), so this
+		// declaration pins "exclusive", meaning each state_update call runs alone,
+		// after everything before it has finished. The execute body below commits
+		// synchronously, with no await between the defensive re-validation and
+		// the asides, so once a call starts, nothing can interleave with its commit.
+		concurrency: "exclusive" as const,
 		async execute(_toolCallId: string, params: { patch: Record<string, unknown> }, _signal: AbortSignal | undefined, _onUpdate: undefined, ctx: ExtensionContext): Promise<AgentToolResult> {
 			const procedure = current(ctx);
 			// The definition stays registered after disengage (no unregister

@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { announcedSkillNames, consolidationNudgeMessage, extractStatePayload, fallbackNoticeMessage, isStateCoreMessage, isStateScratchMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, SKILL_PROMPT_MESSAGE_TYPE, skillInvocationName, STATE_UPDATE_TOOL_NAME, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage } from "../src/messages";
+import { announcedSkillNames, consolidationNudgeMessage, extractStatePayload, fallbackNoticeMessage, isStateCoreMessage, isStateScratchMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, rulesMessage, SKILL_PROMPT_MESSAGE_TYPE, skillInvocationName, STATE_UPDATE_TOOL_NAME, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage, windowNoticeMessage } from "../src/messages";
+import { DEFAULT_PARAMS } from "../src/state";
 
 describe("consolidationNudgeMessage", () => {
 	test("is a developer message asking for a state_update consolidation, with no fence, so it never becomes an elide target", () => {
@@ -43,6 +44,52 @@ describe("OPERATING_RULES", () => {
 	test("names the state_update tool and carries no fence, so the stored rules message is never an elide target", () => {
 		expect(OPERATING_RULES).toContain(STATE_UPDATE_TOOL_NAME);
 		expect(OPERATING_RULES.split("\n").some((line) => line.trimStart().startsWith("```"))).toBe(false);
+	});
+});
+
+describe("rulesMessage with the procedure's params", () => {
+	test("interpolates the procedure's observation window count into the appended window rules", () => {
+		const message = rulesMessage({ ...DEFAULT_PARAMS, observationWindow: 6 });
+		if (typeof message !== "object" || typeof message.content !== "string") throw new Error("rules payload without text content");
+		const content = message.content;
+
+		expect(content).toContain("Your observation window holds the last 6 tool pairs, oldest first; older pairs leave the prompt as new results arrive.");
+		expect(content).toContain("Each windowed tool result carries a pair tag like [#a3f2 read]; the window notice after the window lists the tags oldest first — the first tags drop soonest.");
+		expect(content).toContain("The state is a working record, not a log: keep entries short, drop what later facts supersede, null deletes a key you no longer need.");
+	});
+
+	test("appends the three additions after the shared rules body, in order", () => {
+		const message = rulesMessage(DEFAULT_PARAMS);
+		if (typeof message !== "object" || typeof message.content !== "string") throw new Error("rules payload without text content");
+		const content = message.content;
+
+		expect(content.startsWith(OPERATING_RULES)).toBe(true);
+		const windowRule = content.indexOf("Your observation window holds the last 3 tool pairs");
+		const tagRule = content.indexOf("Each windowed tool result carries a pair tag");
+		const hygieneRule = content.indexOf("The state is a working record, not a log");
+		expect(windowRule).toBeGreaterThan(-1);
+		expect(tagRule).toBeGreaterThan(windowRule);
+		expect(hygieneRule).toBeGreaterThan(tagRule);
+	});
+
+	test("carries no fence, so the stored rules message is never an elide target", () => {
+		const message = rulesMessage(DEFAULT_PARAMS);
+		if (typeof message !== "object" || typeof message.content !== "string") throw new Error("rules payload without text content");
+
+		expect(message.content.split("\n").some((line: string) => line.trimStart().startsWith("```"))).toBe(false);
+	});
+});
+
+describe("windowNoticeMessage", () => {
+	test("is one developer line listing the window's tags oldest first with the drop rule", () => {
+		const notice = windowNoticeMessage([
+			{ tag: "a3f2", toolName: "read" },
+			{ tag: "b71c", toolName: "grep" },
+		]);
+
+		expect(notice.role).toBe("developer");
+		if (!("content" in notice) || typeof notice.content !== "string") throw new Error("notice without text content");
+		expect(notice.content).toBe("window oldest→newest: #a3f2 read, #b71c grep — oldest drop first as new results arrive");
 	});
 });
 

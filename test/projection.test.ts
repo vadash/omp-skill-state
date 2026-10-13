@@ -151,8 +151,12 @@ describe("project assembly", () => {
 			STATE_SCRATCH_MESSAGE_TYPE,
 		]);
 		expect(out[4]).toBe(call);
-		expect(out[5]).toBe(result1);
-		expect(out[6]).toBe(result2);
+		// Windowed results project as tagged copies; the stored objects pass
+		// through untouched (asserted in "project pair tags").
+		expect(out[5]).not.toBe(result1);
+		expect(asToolResult(out[5]!).content[0]).toEqual({ type: "text", text: "[#ecd6 read]\n" });
+		expect(out[6]).not.toBe(result2);
+		expect(asToolResult(out[6]!).content[0]).toEqual({ type: "text", text: "[#eb43 bash]\n" });
 	});
 
 	test("user step projects head plus trailing user batch, interleaved customs skipped", () => {
@@ -225,7 +229,7 @@ describe("project assembly", () => {
 		expect(out[4]).toBe(reply);
 	});
 
-	test("returns the stored head and tail objects themselves when under the cap", () => {
+	test("the head and the pinned assistant stay identity references under the cap; windowed results are tagged copies", () => {
 		const h = head();
 		const call = assistantToolCall("t1");
 		const result = toolResult("t1", "ok");
@@ -235,7 +239,7 @@ describe("project assembly", () => {
 		expect(out[1]).toBe(h.procedureSpec);
 		expect(out[2]).toBe(h.core);
 		expect(out[4]).toBe(call);
-		expect(out[5]).toBe(result);
+		expect(out[5]).not.toBe(result);
 	});
 
 	test("the projected scratch is a per-call copy: unequal to the stored message, same model-visible bytes", () => {
@@ -315,13 +319,17 @@ describe("project assembly", () => {
 			// legacy single state message is never a head message: it only
 			// ever vanishes.
 			const lastInjected = messages[10]!;
+			// The windowed result projects as its tagged copy: the tag line is
+			// content's first text block, the stored blocks follow it.
+			if (result.role !== "toolResult") throw new Error("fixture is not a tool result");
+			const tagged = { ...result, content: [{ type: "text" as const, text: "[#ecd6 read]\n" }, ...result.content] };
 			const expected = [
 				type === RULES_MESSAGE_TYPE ? lastInjected : h.rules,
 				type === PROCEDURE_SPEC_MESSAGE_TYPE ? lastInjected : h.procedureSpec,
 				type === STATE_CORE_MESSAGE_TYPE ? lastInjected : h.core,
 				type === STATE_SCRATCH_MESSAGE_TYPE ? perCall(lastInjected) : perCall(h.scratch),
 				call,
-				result,
+				tagged,
 			];
 			expect(projected(messages, 32768)).toEqual(expected);
 		}
@@ -335,7 +343,7 @@ describe("project assembly", () => {
 
 		expect(out).toHaveLength(6);
 		expect(out[4]).toBe(call);
-		expect(out[5]).toBe(result);
+		expect(out[5]).not.toBe(result);
 		expect(asToolResult(out[5]!).toolCallId).toBe("t1");
 	});
 
@@ -415,18 +423,20 @@ describe("project observation cap", () => {
 			/^\[skill-state: observation cap 300 bytes exceeded; cut \d+ bytes from the end of this bash result \(call-9\); re-run the tool on a narrower range to read the rest\]$/,
 		);
 		const cut = Number(markerText.match(/cut (\d+) bytes/)![1]);
-		const kept = capped.content[0]!;
+		// The tag line is content[0]; the trimmed original text follows it.
+		const kept = capped.content[1]!;
 		expect(kept.type).toBe("text");
 		expect(cut).toBe(400 - Buffer.byteLength(kept.type === "text" ? kept.text : ""));
 		expect(textBytes(out.filter((m) => m.role === "toolResult"))).toBeLessThanOrEqual(300);
 	});
 
-	test("under the cap results pass through untouched", () => {
+	test("under the cap the stored text passes through behind the tag line", () => {
 		const h = head();
 		const result = toolResult("t1", "small");
 		const out = projected([...h.all, assistantToolCall("t1"), result], 32768);
 
-		expect(out[5]).toBe(result);
+		expect(out[5]).not.toBe(result);
+		expect(asToolResult(out[5]!).content).toEqual([{ type: "text", text: "[#ecd6 read]\n" }, { type: "text", text: "small" }]);
 	});
 
 	test("multi-byte UTF-8 is cut on code point boundaries without replacement chars", () => {
@@ -473,9 +483,14 @@ describe("project observation cap", () => {
 		const capped = [asToolResult(out[5]!), asToolResult(out[6]!)];
 
 		for (const [i, result] of capped.entries()) {
-			expect(result.content).toHaveLength(1);
-			const marker = result.content[0]!;
-			expect(marker.type === "text" && marker.text).toContain(`cut 300 bytes from the end of this ${i === 0 ? "read" : "bash"} result`);
+			expect(result.content).toHaveLength(2);
+			const tag = result.content[0]!;
+			const tool = i === 0 ? "read" : "bash";
+			// The tag line survives the floor: it is what still identifies the
+			// result and what the window notice names.
+			expect(tag.type === "text" && tag.text).toMatch(new RegExp(`^\\[#\\w{4} ${tool}\\]`));
+			const marker = result.content[1]!;
+			expect(marker.type === "text" && marker.text).toMatch(new RegExp(`cut \\d+ bytes from the end of this ${tool} result`));
 		}
 		expect(textBytes(capped)).toBeGreaterThan(100);
 	});
@@ -488,12 +503,13 @@ describe("project observation cap", () => {
 		expect(out[4]).toBe(turn);
 	});
 
-	test("a total exactly at the cap passes through untouched", () => {
+	test("a total exactly at the cap is over it once the tag line is counted", () => {
 		const h = head();
 		const result = toolResult("t1", "x".repeat(300));
 		const out = projected([...h.all, assistantToolCall("t1"), result], 300);
 
-		expect(out[5]).toBe(result);
+		expect(out[5]).not.toBe(result);
+		expect(asToolResult(out[5]!).content.at(-1)).toMatchObject({ type: "text", text: expect.stringContaining("observation cap 300 bytes exceeded") });
 	});
 
 	test("non-text blocks are neither counted nor cut", () => {
@@ -512,7 +528,11 @@ describe("project observation cap", () => {
 			{ type: "toolCall", id: "t2", name: "bash", arguments: {} },
 		]), image, text], 300)!;
 
-		expect(out[5]).toBe(image);
+		// The image result is windowed too: its projected copy gains the tag
+		// line, the image block itself rides uncounted and uncut behind it.
+		expect(out[5]).not.toBe(image);
+		expect(asToolResult(out[5]!).content[0]).toEqual({ type: "text", text: "[#ecd6 read]\n" });
+		expect(asToolResult(out[5]!).content[1]).toEqual({ type: "image", data: "A".repeat(1000), mimeType: "image/png" });
 		expect(out[6]).not.toBe(text);
 		expect(textBytes([out[6]!])).toBeLessThanOrEqual(300);
 	});
@@ -537,11 +557,13 @@ describe("project observation window", () => {
 
 		expect(out).toHaveLength(10);
 		expect(out[4]).toBe(call1);
-		expect(out[5]).toBe(result1);
+		expect(out[5]).not.toBe(result1);
+		expect(asToolResult(out[5]!).content[0]).toEqual({ type: "text", text: "[#ecd6 read]\n" });
 		expect(out[6]).toBe(call2);
-		expect(out[7]).toBe(result2);
+		expect(out[7]).not.toBe(result2);
+		expect(asToolResult(out[7]!).content[0]).toEqual({ type: "text", text: "[#eb43 bash]\n" });
 		expect(out[8]).toBe(call3);
-		expect(out[9]).toBe(result3);
+		expect(out[9]).not.toBe(result3);
 	});
 
 	test("a mismatched older pair stops the walk and keeps the newer pairs", () => {
@@ -558,9 +580,9 @@ describe("project observation window", () => {
 
 		expect(out).toHaveLength(8);
 		expect(out[4]).toBe(call1);
-		expect(out[5]).toBe(result1);
+		expect(asToolResult(out[5]!).toolCallId).toBe("t1");
 		expect(out[6]).toBe(call2);
-		expect(out[7]).toBe(result2);
+		expect(asToolResult(out[7]!).toolCallId).toBe("t2");
 	});
 
 	test("an older pair whose nearest message is not an assistant stops the walk", () => {
@@ -573,7 +595,7 @@ describe("project observation window", () => {
 
 		expect(out).toHaveLength(8);
 		expect(out[4]).toBe(call1);
-		expect(out[7]).toBe(result2);
+		expect(asToolResult(out[7]!).toolCallId).toBe("t2");
 	});
 
 	test("an older assistant with no results of its own stops the walk", () => {
@@ -584,7 +606,7 @@ describe("project observation window", () => {
 
 		expect(out).toHaveLength(6);
 		expect(out[4]).toBe(call2);
-		expect(out[5]).toBe(result2);
+		expect(asToolResult(out[5]!).toolCallId).toBe("t2");
 	});
 
 	test("a window wider than the available pairs projects the pairs that exist", () => {
@@ -597,7 +619,7 @@ describe("project observation window", () => {
 
 		expect(out).toHaveLength(8);
 		expect(out[4]).toBe(call1);
-		expect(out[7]).toBe(result2);
+		expect(asToolResult(out[7]!).toolCallId).toBe("t2");
 	});
 
 	test("the cap covers the whole window: both pairs are cut, largest first", () => {
@@ -631,9 +653,14 @@ describe("project observation window", () => {
 		const capped = [asToolResult(out[5]!), asToolResult(out[7]!)];
 
 		for (const [i, result] of capped.entries()) {
-			expect(result.content).toHaveLength(1);
-			const marker = result.content[0]!;
-			expect(marker.type === "text" && marker.text).toContain(`cut 300 bytes from the end of this ${i === 0 ? "read" : "bash"} result`);
+			expect(result.content).toHaveLength(2);
+			const tag = result.content[0]!;
+			const tool = i === 0 ? "read" : "bash";
+			// The tag line survives the floor: it is what still identifies the
+			// result and what the window notice names.
+			expect(tag.type === "text" && tag.text).toMatch(new RegExp(`^\\[#\\w{4} ${tool}\\]`));
+			const marker = result.content[1]!;
+			expect(marker.type === "text" && marker.text).toMatch(new RegExp(`cut \\d+ bytes from the end of this ${tool} result`));
 		}
 		expect(textBytes(capped)).toBeGreaterThan(100);
 	});
@@ -651,6 +678,67 @@ describe("project observation window", () => {
 		const snapshot = structuredClone(messages);
 		projected(messages, 200, 3);
 		expect(messages).toEqual(snapshot);
+	});
+});
+
+describe("project pair tags", () => {
+	test("every windowed result's projected text starts with its pair-tag line", () => {
+		const h = head();
+		const out = projected(
+			[...h.all, assistantToolCall("t1"), toolResult("t1", "first"), assistantToolCall("t2", "bash"), toolResult("t2", "second", "bash")],
+			32768,
+			3,
+		)!;
+		const r1 = asToolResult(out[5]!);
+		const r2 = asToolResult(out[7]!);
+
+		expect(r1.content[0]).toEqual({ type: "text", text: "[#ecd6 read]\n" });
+		expect(r1.content[1]).toEqual({ type: "text", text: "first" });
+		expect(r2.content[0]).toEqual({ type: "text", text: "[#eb43 bash]\n" });
+	});
+
+	test("stored tool results pass through untouched: the projection copies, never mutates", () => {
+		const h = head();
+		const stored = toolResult("t1", "x");
+		const snapshot = structuredClone(stored);
+
+		projected([...h.all, assistantToolCall("t1"), stored], 32768)!;
+
+		expect(stored).toEqual(snapshot);
+	});
+
+	test("the tag line composes with truncation: tag stays the first line, marker at the cut end", () => {
+		const h = head();
+		const out = projected([...h.all, assistantToolCall("call-9", "bash"), toolResult("call-9", "a".repeat(400), "bash")], 300)!;
+		const capped = asToolResult(out[5]!);
+
+		expect(capped.content[0]).toEqual({ type: "text", text: "[#82af bash]\n" });
+		const marker = capped.content.at(-1)!;
+		expect(marker.type === "text" && marker.text).toContain("observation cap 300 bytes exceeded");
+	});
+
+	test("tag bytes count toward the cap: content under the cap alone is over it once tagged", () => {
+		const h = head();
+		// 290 bytes sits under the 300 cap; the 13-byte tag line pushes it over.
+		const out = projected([...h.all, assistantToolCall("t1"), toolResult("t1", "x".repeat(290))], 300)!;
+		const capped = asToolResult(out[5]!);
+
+		expect(capped.content[0]).toEqual({ type: "text", text: "[#ecd6 read]\n" });
+		expect(capped.content.at(-1)).toMatchObject({ type: "text", text: expect.stringContaining("observation cap 300 bytes exceeded") });
+	});
+
+	test("no window means no tags: a user-turn step and a head-only step carry no pair tag", () => {
+		const h = head();
+		const userOut = projected([...h.all, assistantText("ask"), userMsg("answer")], 32768)!;
+		const headOut = projected([...h.all, assistantText("thinking")], 32768)!;
+
+		for (const out of [userOut, headOut]) {
+			expect(out.some((m) => m.role === "toolResult")).toBe(false);
+			for (const message of out) {
+				if (message.role !== "toolResult") continue;
+				expect(message.content[0]).not.toMatch(/^\[#/);
+			}
+		}
 	});
 });
 

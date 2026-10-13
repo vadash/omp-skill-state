@@ -10,7 +10,7 @@ This skill defines no task. It engages the skill-state runtime and tells you how
 
 The task is the `User:` line at the end of this prompt. In your first `state_update` call, copy it verbatim into `goal`, set `working_dir`, and set `next_step` to your first action. If there is no `User:` line, there is no task: say so and stop.
 
-Past conversation is hidden from you while this runs. The execution state is the only record of the past; the runtime's operating rules say how to edit it. A tool result stays in the observation window a few steps and is then gone from the prompt, so anything that must outlive the window goes into the state in that same step.
+Past conversation is hidden from you while this runs. The execution state is the only record of the past; the runtime's operating rules say how to edit it. The operating rules state exactly how many tool pairs the observation window holds and when its oldest pairs leave, so commit anything that must outlive the window in the same step that observed it.
 
 Anything the task names, you read once and keep in the state: another skill through `read skill://<name>`, a file, an issue. Copy the requirements that bind this run into `constraints`, phrased so they stand alone.
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, scratchMessage } from "../src/messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, rulesMessage, scratchMessage } from "../src/messages";
 import { commitStep, compactionFor, headMessages, newProcedure, recordReply, stateMessages, stepPrompt } from "../src/procedure";
 import type { Procedure } from "../src/procedure";
 import { DEFAULT_PARAMS } from "../src/state";
@@ -518,12 +518,101 @@ describe("stepPrompt fallback notice", () => {
 	});
 });
 
+describe("stepPrompt window notice", () => {
+	// The pair messages one step's reply leaves behind, as the harness stores them.
+	function callMsg(id: string, name = "read"): AgentMessage {
+		return { role: "assistant", content: [{ type: "toolCall", id, name, arguments: {} }], api: "anthropic-messages", provider: "anthropic", model: "m", usage: ZERO_USAGE, stopReason: "toolUse", timestamp: Date.now() };
+	}
+	function resultMsg(id: string, text: string, name = "read"): AgentMessage {
+		return { role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text }], isError: false, timestamp: Date.now() };
+	}
+	function devTexts(prompt: AgentMessage[]): string[] {
+		return prompt
+			.filter((message) => message.role === "developer")
+			.map((message) => ("content" in message && typeof message.content === "string" ? message.content : ""));
+	}
+
+	test("a tool-result step carries the window notice before the nudges", () => {
+		const p = procedure({ stateBytes: 100 }, { blob: "x".repeat(200) });
+		const h = headContext(p);
+
+		const out = stepPrompt(p, [...h, callMsg("t1"), resultMsg("t1", "a")]);
+		if (out === undefined) throw new Error("head did not project");
+
+		const texts = devTexts(out);
+		expect(texts).toHaveLength(2);
+		expect(texts[0]).toBe("window oldest→newest: #ecd6 read — oldest drop first as new results arrive");
+		expect(texts[1]).toContain("grown past its size cap");
+	});
+
+	test("the notice lists the whole projected window oldest first, tags re-minted from the call ids", () => {
+		const p = procedure();
+		const h = headContext(p);
+
+		const out = stepPrompt(p, [...h, callMsg("t1"), resultMsg("t1", "a"), callMsg("t2"), resultMsg("t2", "b"), callMsg("t3"), resultMsg("t3", "c")]);
+		if (out === undefined) throw new Error("head did not project");
+
+		expect(devTexts(out)).toEqual(["window oldest→newest: #ecd6 read, #eb43 read, #e9b0 read — oldest drop first as new results arrive"]);
+	});
+
+	test("the notice rides before the idle warning at the threshold step", () => {
+		const p = procedure({ idleSteps: 3 });
+		const h = headContext(p);
+		stepPrompt(p, [...h, callMsg("t1"), resultMsg("t1", "a")]);
+		recordReply(p, empty());
+		stepPrompt(p, [...h, callMsg("t2"), resultMsg("t2", "b")]);
+		recordReply(p, empty());
+
+		const out = stepPrompt(p, [...h, callMsg("t3"), resultMsg("t3", "c")]);
+		if (out === undefined) throw new Error("head did not project");
+
+		const texts = devTexts(out);
+		expect(texts).toHaveLength(2);
+		expect(texts[0]).toMatch(/^window oldest→newest: /);
+		expect(texts[1]).toContain("unchanged for 2 consecutive steps");
+	});
+
+	test("absent on a user-turn step", () => {
+		const p = procedure();
+		const h = headContext(p);
+
+		const out = stepPrompt(p, [...h, { role: "user", content: "go on", timestamp: Date.now() }]);
+		if (out === undefined) throw new Error("head did not project");
+
+		expect(devTexts(out)).toEqual([]);
+	});
+
+	test("absent on an unprojected step and when the head never reaches the seam", () => {
+		const p = procedure();
+
+		const first = stepPrompt(p, [callMsg("t1"), resultMsg("t1", "a")]);
+		if (first === undefined) throw new Error("the first unprojected step returned nothing");
+		const texts = devTexts(first);
+		expect(texts).toHaveLength(1);
+		expect(texts[0]).toContain("the stored head is incomplete");
+
+		expect(stepPrompt(p, [callMsg("t1"), resultMsg("t1", "a")])).toBeUndefined();
+	});
+
+	test("absent when the projection falls back on an unmatched pair", () => {
+		const p = procedure();
+		const h = headContext(p);
+
+		const out = stepPrompt(p, [...h, callMsg("t1"), resultMsg("other", "mismatch")]);
+		if (out === undefined) throw new Error("the fallback step returned nothing");
+
+		const texts = devTexts(out);
+		expect(texts).toHaveLength(1);
+		expect(texts[0]).toContain("a tool result does not answer the tool call before it");
+	});
+});
+
 describe("headMessages", () => {
 	test("headMessages is the rules, P, state core and scratch state, in order", () => {
 		const p = procedure({}, { goal: "x", plan: ["a"] });
 
 		expect(headMessages(p)).toEqual([
-			{ customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false },
+			rulesMessage(DEFAULT_PARAMS),
 			{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: "Running skill recon", display: false, details: { name: "recon" } },
 			coreMessage({ goal: "x" }),
 			scratchMessage({ plan: ["a"] }),

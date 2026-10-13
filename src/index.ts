@@ -192,9 +192,11 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (ctx.agent.kind !== "main") return undefined;
 		for (const name of announcedSkillNames(event.prompt)) {
-			if ((await loadStateSchema(name, pi.pi.getActiveSkills())).ok) {
-				return { message: rulesMessage() };
-			}
+			const loaded = await loadStateSchema(name, pi.pi.getActiveSkills());
+			// Byte-equal to the head's rules because both deliveries build from
+			// params loaded from the same schema file: deterministic reload, not
+			// one shared object — engage loads independently.
+			if (loaded.ok) return { message: rulesMessage(loaded.params) };
 		}
 		return undefined;
 	});

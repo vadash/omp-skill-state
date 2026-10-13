@@ -1,8 +1,8 @@
 import type { CustomMessagePayload, SessionBeforeCompactEvent, SessionBeforeCompactResult } from "@oh-my-pi/pi-coding-agent";
 import { currentStepCut } from "./branch";
 import type { AgentMessage } from "./types";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, fallbackNoticeMessage, nudgeMessage, renderStateContent, rulesMessage, scratchMessage } from "./messages";
-import { project } from "./projection";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, fallbackNoticeMessage, nudgeMessage, renderStateContent, rulesMessage, scratchMessage, windowNoticeMessage } from "./messages";
+import { pairTag, project } from "./projection";
 import { applyPatch, splitState } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
 
@@ -200,8 +200,17 @@ export function stepPrompt(procedure: Procedure, messages: AgentMessage[]): Agen
 	}
 	procedure.projected = true;
 	procedure.fallbackNoticed = false;
+	// The window notice rides this seam ahead of the nudges: data about the
+	// model's window precedes the policy asks built on it. The projected
+	// prompt's tool results are exactly the projected window, and the tags
+	// re-mint from the tool call ids, so no window state crosses the seam.
+	const windowed = projected.filter((message): message is Extract<AgentMessage, { role: "toolResult" }> => message.role === "toolResult");
+	const notice = windowed.length > 0
+		? [windowNoticeMessage(windowed.map((result) => ({ tag: pairTag(result.toolCallId), toolName: result.toolName })))]
+		: [];
 	const nudges = pendingNudges(procedure);
-	return nudges.length > 0 ? [...projected, ...nudges] : projected;
+	const tail = [...notice, ...nudges];
+	return tail.length > 0 ? [...projected, ...tail] : projected;
 }
 
 // The current state split into its two stored partitions, derived from the
@@ -226,7 +235,7 @@ export function stateMessages(procedure: Procedure): CustomMessagePayload[] {
 // with all four.
 export function headMessages(procedure: Procedure): CustomMessagePayload[] {
 	return [
-		rulesMessage(),
+		rulesMessage(procedure.params),
 		{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: procedure.spec, display: false, details: { name: procedure.name } },
 		...stateMessages(procedure),
 	];

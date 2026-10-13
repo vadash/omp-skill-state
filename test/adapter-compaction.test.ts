@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
-import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent } from "../src/messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, rulesMessage } from "../src/messages";
+import { DEFAULT_PARAMS } from "../src/state";
 import { procedureBranch } from "./entries";
 import { fakeOmp } from "./fake-session";
 import { disengageNotices, engageAsideTypes, engageNotices, makeSkillSet, patchStep, procedureSchema } from "./harness";
@@ -40,7 +41,8 @@ describe("omp-skill-state compaction ownership", () => {
 		expect(projected?.[1] as Record<string, unknown>).toMatchObject(s.sends[1]!.payload);
 		expect(projected?.[2] as Record<string, unknown>).toMatchObject(s.sends[4]!.payload);
 		expect(projected?.[3] as Record<string, unknown>).toMatchObject(s.sends[5]!.payload);
-		expect(projected?.slice(4)).toHaveLength(2);
+		// The pinned pair plus the window notice.
+		expect(projected?.slice(4)).toHaveLength(3);
 
 		// The copies flushed at that step boundary, so the next provider call
 		// carries them: the head is complete again after the cut.
@@ -50,8 +52,8 @@ describe("omp-skill-state compaction ownership", () => {
 		expect(after?.[2] as Record<string, unknown>).toMatchObject(s.sends[8]!.payload);
 		expect(after?.[3] as Record<string, unknown>).toMatchObject(s.sends[9]!.payload);
 		// The default window pins both stored pairs: the pre-cut step and the
-		// step right after the compaction.
-		expect(after?.slice(4)).toHaveLength(4);
+		// step right after the compaction, plus the window notice.
+		expect(after?.slice(4)).toHaveLength(5);
 	});
 
 	test("a compaction while idle re-sends the head as next-turn messages, which wake no turn", async () => {
@@ -73,8 +75,10 @@ describe("omp-skill-state compaction ownership", () => {
 
 		await s.compact();
 
+		const rules = rulesMessage(DEFAULT_PARAMS);
+		if (typeof rules !== "object" || typeof rules.content !== "string") throw new Error("rules payload without text content");
 		expect(s.sends.map((sent) => sent.payload)).toEqual([
-			{ customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false },
+			{ customType: RULES_MESSAGE_TYPE, content: rules.content, display: false },
 			{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: "Running skill procedure", display: false, details: { name: "procedure" } },
 			{ customType: STATE_CORE_MESSAGE_TYPE, content: renderStateContent({ goal: "x" }), display: true, details: { state: { goal: "x" } } },
 			{ customType: STATE_SCRATCH_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {} } },

@@ -2,7 +2,8 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import path from "node:path";
 import type { Skill } from "@oh-my-pi/pi-coding-agent";
-import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent } from "../src/messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, rulesMessage } from "../src/messages";
+import { DEFAULT_PARAMS } from "../src/state";
 import { coreStateEntry, invocationEntry, procedureBranch, specEntry, stateEntries } from "./entries";
 import { fakeOmp } from "./fake-session";
 import { disengageNotices, engagedSession, engageAsideTypes, engageNotices, makeSkillSet, nudgeIn, patchStep, procedureSchema, projectingSession, smallcapSchema } from "./harness";
@@ -37,9 +38,11 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 
 	test("engage sends the rules, the procedure spec and the initial state core and scratch as four asides", async () => {
 		const { s } = await engagedSession([procedure]);
+		const rules = rulesMessage(DEFAULT_PARAMS);
+		if (typeof rules !== "object" || typeof rules.content !== "string") throw new Error("rules payload without text content");
 
 		expect(s.sends.map((sent) => sent.payload)).toEqual([
-			{ customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false },
+			{ customType: RULES_MESSAGE_TYPE, content: rules.content, display: false },
 			{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: "Running skill procedure", display: false, details: { name: "procedure" } },
 			{ customType: STATE_CORE_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {} } },
 			{ customType: STATE_SCRATCH_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {} } },
@@ -395,10 +398,18 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 });
 
 describe("omp-skill-state first-step rules", () => {
+	// The `procedure` fixture declares no x-state, so the delivered copy and
+	// the head copy both carry the default window count.
+	const rulesContent = (() => {
+		const rules = rulesMessage(DEFAULT_PARAMS);
+		if (typeof rules !== "object" || typeof rules.content !== "string") throw new Error("rules payload without text content");
+		return rules.content;
+	})();
+
 	test("delivers the rules message on the engage batch, byte-equal to the stored head copy", async () => {
 		const { s } = await engagedSession([procedure]);
 
-		expect(s.injected).toEqual([{ customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false }]);
+		expect(s.injected).toEqual([{ customType: RULES_MESSAGE_TYPE, content: rulesContent, display: false }]);
 		expect(s.injected[0]).toEqual(s.sends[0].payload);
 	});
 
@@ -429,7 +440,7 @@ describe("omp-skill-state first-step rules", () => {
 			(message): message is Record<string, unknown> =>
 				typeof message === "object" && message !== null && "customType" in message && message.customType === RULES_MESSAGE_TYPE,
 		);
-		expect(rules).toEqual({ role: "custom", customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false, details: undefined, timestamp: expect.any(Number) });
+		expect(rules).toEqual({ role: "custom", customType: RULES_MESSAGE_TYPE, content: rulesContent, display: false, details: undefined, timestamp: expect.any(Number) });
 	});
 
 	test("step 2 projects from the stored head: the last rules copy wins", async () => {
@@ -440,7 +451,7 @@ describe("omp-skill-state first-step rules", () => {
 		const head = s.prompts.at(-1)?.[0];
 		if (typeof head !== "object" || head === null || !("customType" in head) || !("content" in head)) throw new Error("step 2 ran without a projected head");
 		expect(head.customType).toBe(RULES_MESSAGE_TYPE);
-		expect(head.content).toBe(OPERATING_RULES);
+		expect(head.content).toBe(rulesContent);
 	});
 
 	test("no delivery for a skill without a state schema", async () => {
@@ -488,7 +499,13 @@ describe("omp-skill-state idle disengage", () => {
 		await s.step("step 2");
 		await s.step("step 3");
 		const prompt = await s.step("step 4");
-		expect(nudgeIn(prompt)).toHaveLength(1);
+		const notices = nudgeIn(prompt);
+		// The window notice rides first, the idle cutoff last.
+		expect(notices).toHaveLength(2);
+		expect(notices.map((notice) => String(notice.content))).toEqual([
+			expect.stringContaining("window oldest→newest"),
+			expect.stringContaining("unchanged for 2 consecutive steps"),
+		]);
 		expect(s.notices).toEqual([...engageNotices("warnproc"), ...disengageNotices("warnproc", "idle for 3 steps")]);
 		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
 		expect(s.storedStates).toEqual([{}]);

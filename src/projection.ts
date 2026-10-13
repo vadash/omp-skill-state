@@ -22,6 +22,24 @@ function lastCustom(messages: readonly AgentMessage[], customType: string): Agen
 	return undefined;
 }
 
+// Pair tag (CONTEXT.md): four lowercase hex digits, FNV-1a over the tool call
+// id's UTF-8 bytes. A pure function of the id alone, so a re-derive or rewind
+// recomputes identical tags with no memo state.
+export function pairTag(toolCallId: string): string {
+	let hash = 0x811c9dc5;
+	for (const byte of Buffer.from(toolCallId, "utf8")) {
+		hash ^= byte;
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return (hash & 0xffff).toString(16).padStart(4, "0");
+}
+
+// The pair-tag line prepended to each projected windowed result. Only the
+// projected copy is modified; the stored result never carries the tag.
+function taggedResult(result: ToolResult): ToolResult {
+	return { ...result, content: [{ type: "text", text: `[#${pairTag(result.toolCallId)} ${result.toolName}]\n` }, ...result.content] };
+}
+
 // Customs and developer messages are either head messages, the skill prompt or
 // live-state blocks; none belong to the current step's tail.
 function isSkippable(message: AgentMessage): boolean {
@@ -101,7 +119,9 @@ export function project(messages: readonly AgentMessage[], observationBytes: num
 		}
 		const window: AgentMessage[] = [];
 		for (let i = pairs.length - 1; i >= 0; i--) window.push(...pairs[i]!);
-		return [...head, ...capObservation(window, observationBytes)];
+		// Tag bytes ride before the cap: the projected windowed results are the
+		// tagged copies, and the cap sees the tag line as part of each result.
+		return [...head, ...capObservation(window.map((message) => (message.role === "toolResult" ? taggedResult(message) : message)), observationBytes)];
 	}
 	if (last.role === "user") {
 		// Human answers are anaphoric ("agree with your recommendation"), so
@@ -128,18 +148,24 @@ export function project(messages: readonly AgentMessage[], observationBytes: num
 
 // The cap bounds the step's combined observation text, tool results only. The
 // user turn and the pinned assistant message are never cut; non-text blocks are
-// neither counted nor cut. Under the cap nothing changes, so results keep their
-// identity. Over it, the largest result is cut from the end, then the next
-// largest, until the total including the markers fits.
+// neither counted nor cut. Under the cap nothing changes except that the
+// results are the tagged copies taggedResult built. Over it, the largest
+// result is cut from the end, then the next largest, until the total including
+// the markers fits.
 function capObservation(tail: AgentMessage[], cap: number): AgentMessage[] {
 	const plans: CutPlan[] = [];
 	let total = 0;
 	for (let i = 0; i < tail.length; i++) {
 		const message = tail[i]!;
 		if (message.role !== "toolResult") continue;
-		const remaining = textBlockBytes(message.content);
+		// taggedResult ran before the cap, so content[0] is the pair-tag line.
+		// Its bytes count toward the cap but are never cut: at the marker floor
+		// the tag is what still identifies the result and what the window
+		// notice names.
+		const bytes = textBlockBytes(message.content);
+		const remaining = bytes - firstBlockBytes(message.content);
 		plans.push({ position: i, result: message, remaining, cut: 0 });
-		total += remaining;
+		total += bytes;
 	}
 	if (total <= cap) return tail;
 
@@ -153,9 +179,10 @@ function capObservation(tail: AgentMessage[], cap: number): AgentMessage[] {
 		for (const plan of plans) {
 			if (plan.remaining > 0 && (pick === undefined || plan.remaining > pick.remaining)) pick = plan;
 		}
-		// Only markers are left. They are the whole observation now and the only
-		// record of what was cut, so they are never cut themselves: the floor of
-		// the cap is one marker per result.
+		// Only tag lines and markers are left. They are the whole observation
+		// now and the only record of what was cut, so they are never cut
+		// themselves: the floor of the cap is one tag line plus one marker per
+		// result.
 		if (pick === undefined) break;
 		const markerBytes = Buffer.byteLength(cutMarker(cap, pick.remaining, pick.result));
 		const cut = Math.min(pick.remaining, total - cap + markerBytes);
@@ -167,7 +194,7 @@ function capObservation(tail: AgentMessage[], cap: number): AgentMessage[] {
 	const capped = [...tail];
 	for (const { position, result, cut } of plans) {
 		if (cut === 0) continue;
-		const trimmed = cutTextEnd(result.content, cut);
+		const trimmed = cutTextEnd(result.content, cut, 1);
 		const marker = cutMarker(cap, trimmed.cut, result);
 		capped[position] = { ...result, content: [...trimmed.content, { type: "text", text: marker }] };
 	}
@@ -182,18 +209,26 @@ function textBlockBytes(content: ResultContent): number {
 	return total;
 }
 
+// Byte length of the result's first content block when it is text — the
+// pair-tag line taggedResult prepended. The cap never cuts it.
+function firstBlockBytes(content: ResultContent): number {
+	const block = content[0];
+	return block !== undefined && block.type === "text" ? Buffer.byteLength(block.text) : 0;
+}
+
 // Model-facing marker: names what was cut and how to re-read it.
 function cutMarker(cap: number, cut: number, result: ToolResult): string {
 	return `[skill-state: observation cap ${cap} bytes exceeded; cut ${cut} bytes from the end of this ${result.toolName} result (${result.toolCallId}); re-run the tool on a narrower range to read the rest]`;
 }
 
 // Remove up to cutBytes of UTF-8 text from the end of the content blocks, last
-// block first. Cuts land on code point boundaries, so the kept text never ends
-// in a replacement character. Returns a new array; never mutates the input.
-function cutTextEnd(content: ResultContent, cutBytes: number): { content: ResultContent; cut: number } {
+// block first. Blocks before protectedBlocks are never cut. Cuts land on code
+// point boundaries, so the kept text never ends in a replacement character.
+// Returns a new array; never mutates the input.
+function cutTextEnd(content: ResultContent, cutBytes: number, protectedBlocks = 0): { content: ResultContent; cut: number } {
 	const blocks = [...content];
 	let remaining = cutBytes;
-	for (let i = blocks.length - 1; i >= 0 && remaining > 0; i--) {
+	for (let i = blocks.length - 1; i >= protectedBlocks && remaining > 0; i--) {
 		const block = blocks[i]!;
 		if (block.type !== "text") continue;
 		const bytes = Buffer.byteLength(block.text);

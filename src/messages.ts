@@ -1,6 +1,6 @@
 import type { CustomMessagePayload } from "@oh-my-pi/pi-coding-agent";
 import { isPlainObject } from "./types";
-import type { ExecutionState } from "./state";
+import type { ExecutionState, StateParams } from "./state";
 import type { AgentMessage, ProjectionFailure } from "./types";
 
 export const STATE_CORE_MESSAGE_TYPE = "sh.omp.skill-state.core";
@@ -50,9 +50,23 @@ export const STATE_UPDATE_DESCRIPTION =
 // One rules message, the same object shape everywhere the rules are delivered:
 // the first-step copy from before_agent_start and the stored head asides are
 // built here so they are byte-equal by construction and the provider's cache
-// prefix never sees a difference between them.
-export function rulesMessage(): CustomMessagePayload {
-	return { customType: RULES_MESSAGE_TYPE, content: OPERATING_RULES, display: false };
+// prefix never sees a difference between them. Both call sites pass the same
+// loaded params object — the one engage hands to the procedure — so the
+// interpolated window count cannot drift between the two deliveries.
+export function rulesMessage(params: StateParams): CustomMessagePayload {
+	return { customType: RULES_MESSAGE_TYPE, content: operatingRules(params.observationWindow), display: false };
+}
+
+// The window awareness appended to the shared rules body: the exact window
+// count from the procedure's own params, the pair-tag convention and the
+// state-hygiene line, in that order. The count is interpolated so a skill's
+// schema and its instructions cannot drift apart.
+export function operatingRules(observationWindow: number): string {
+	return `${OPERATING_RULES}\
+Your observation window holds the last ${observationWindow} tool pairs, oldest first; older pairs leave the prompt as new results arrive.
+Each windowed tool result carries a pair tag like [#a3f2 read]; the window notice after the window lists the tags oldest first — the first tags drop soonest.
+The state is a working record, not a log: keep entries short, drop what later facts supersede, null deletes a key you no longer need.
+`;
 }
 
 // The skill invocation, one spelling of what starts a procedure (CONTEXT.md
@@ -145,6 +159,21 @@ export function consolidationNudgeMessage(): AgentMessage {
 	return {
 		role: "developer",
 		content: `The execution state has grown past its size cap. Consolidate it with a state_update patch: drop superseded findings — delete keys that no longer matter (null deletes a key) and rewrite values to only what the rest of the run needs. The cap never blocks anything; it only asks for this cleanup.`,
+		timestamp: Date.now(),
+	};
+}
+
+// The window notice (CONTEXT.md): one per-call developer line after the
+// observation window, listing the projected pairs' tags and tools oldest
+// first with the drop rule. Data only: it never predicts which pair expires,
+// because the drop count equals the next step's result count. The step policy
+// appends it before the nudges, so the data about the window precedes the
+// policy asks built on it.
+export function windowNoticeMessage(window: readonly { tag: string; toolName: string }[]): AgentMessage {
+	const list = window.map((pair) => `#${pair.tag} ${pair.toolName}`).join(", ");
+	return {
+		role: "developer",
+		content: `window oldest→newest: ${list} — oldest drop first as new results arrive`,
 		timestamp: Date.now(),
 	};
 }

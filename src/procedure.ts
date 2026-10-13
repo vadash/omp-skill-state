@@ -45,12 +45,13 @@ export function newProcedure(name: string, spec: string, schema: StateSchema, pa
 	return { name, spec, schema, params, state, invalidPatches: 0, idle: 0, capNudged: false, projected: false, step: 0, nudgedAt: -1, nudgesMemo: [] };
 }
 
-// What one reply did to the procedure. The factory acts on it: a stored patch
-// is committed by the state_update execute later in the same step, an ended
-// procedure is dropped and announced, and the other two need nothing from it.
+// What one reply did to the procedure. The factory acts on it: an ok step's
+// patches are committed by the state_update executes later in the same step,
+// an ended procedure is dropped and announced, and the other two need nothing
+// from it.
 export type StepOutcome =
 	| { kind: "none" }
-	| { kind: "store"; state: ExecutionState }
+	| { kind: "ok" }
 	| { kind: "block" }
 	| { kind: "ended"; cause: "degrade" | "idle" };
 
@@ -58,8 +59,9 @@ export type StepOutcome =
 // decide what the reply means for the counters. The reply may carry several
 // state_update calls; their patches fold in declaration order, each applying
 // to the previous one's result, and the first invalid patch refuses the whole
-// batch. The merged state rides on the store outcome; the tool's execute
-// commits it, so the record's own state is untouched here. A reply with no
+// batch. The fold is the step's verdict only: the record's own state is
+// untouched here, and each execute commits its own patch through commitStep
+// against the state the previous one left. A reply with no
 // state_update call, or whose fold leaves the state as it was, is an idle
 // step; an invalid patch blocks the step and counts toward degrade; a patch
 // of any kind, valid or not, breaks an idle run.
@@ -82,10 +84,10 @@ export function recordReply(procedure: Procedure, reply: { patches: unknown[]; h
 	procedure.pendingError = undefined;
 	procedure.invalidPatches = 0;
 	// A fold that leaves the state as it was is an empty patch: there is
-	// nothing to store, and the model did not edit its state this step.
+	// nothing to commit, and the model did not edit its state this step.
 	if (!anyChanged) return idleStep(procedure);
 	procedure.idle = 0;
-	return { kind: "store", state: candidateState };
+	return { kind: "ok" };
 }
 
 // A step the model spent without editing its state. A step whose prompt
@@ -112,12 +114,28 @@ export function noteProjected(procedure: Procedure, projected: boolean): void {
 	procedure.projected = projected;
 }
 
-// The one write path for a merged state: the tool execute commits through
-// this, and so do the tests, so the state/idle reset policy has a single home
-// and can never diverge between call sites.
-export function commitPatch(procedure: Procedure, state: ExecutionState): void {
+// The one write path for a merged state: every commit goes through this, so
+// the state/idle reset policy has a single home and can never diverge between
+// call sites.
+function commitPatch(procedure: Procedure, state: ExecutionState): void {
 	procedure.state = state;
 	procedure.idle = 0;
+}
+
+// The state_update execute's whole policy: apply the call's patch to the
+// committed state and, on a real change, commit it and build the two stored
+// state messages to send. The fold in recordReply validated this patch
+// against the same intermediate state, so the repeat here is defensive only
+// (spec section 8.4): an impossible failure comes back as the exact error in
+// a failed tool result.
+export function commitStep(procedure: Procedure, patch: unknown): { result: string; sends: CustomMessagePayload[] } | { error: string } {
+	const applied = applyPatch(procedure.state, patch, procedure.schema);
+	if (!applied.ok) return { error: applied.error };
+	// A patch that leaves the state as it was is an empty patch: no commit,
+	// no send.
+	if (!applied.changed) return { result: "no change to the execution state", sends: [] };
+	commitPatch(procedure, applied.state);
+	return { result: "execution state updated", sends: stateMessages(procedure) };
 }
 
 // Over the soft state cap, the consolidation ask rides once per episode:

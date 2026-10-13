@@ -2,10 +2,10 @@ import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/
 import { Text } from "@oh-my-pi/pi-coding-agent";
 import { SKILL_PROMPT_MESSAGE_TYPE, contentText, scanBranch } from "./branch";
 import { STATE_UPDATE_TOOL_NAME, STATE_UPDATE_DESCRIPTION, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, announcedSkillNames, rulesMessage } from "./messages";
-import { commitPatch, compactionFor, headMessages, newProcedure, noteProjected, pendingNudges, recordReply, stateMessages } from "./procedure";
+import { commitStep, compactionFor, headMessages, newProcedure, noteProjected, pendingNudges, recordReply, stateMessages } from "./procedure";
 import type { Procedure } from "./procedure";
 import { project } from "./projection";
-import { applyPatch, isPlainObject, loadStateSchema } from "./state";
+import { isPlainObject, loadStateSchema } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
 
 // The final state waits for the session to go idle before it is stored; the
@@ -69,21 +69,15 @@ export default function (pi: ExtensionAPI): void {
 			// The definition stays registered after disengage (no unregister
 			// exists), so a late call meets a graceful error, not a crash.
 			if (procedure === undefined) return { content: [{ type: "text", text: "no active procedure" }], isError: true };
-			// Validation already ran in assistant_message and blocked this call
-			// when the patch was invalid; this repeat is defensive only.
-			const applied = applyPatch(procedure.state, params.patch, procedure.schema);
-			if (!applied.ok) return { content: [{ type: "text", text: applied.error }], isError: true };
-			// A patch that leaves the state as it was is an empty patch: no
-			// commit, no send.
-			if (!applied.changed) {
-				return { content: [{ type: "text", text: "no change to the execution state" }] };
-			}
-			commitPatch(procedure, applied.state);
+			// The fold validated this patch in assistant_message and blocked the
+			// call when it was invalid; commitStep's repeat is defensive only.
+			const step = commitStep(procedure, params.patch);
+			if ("error" in step) return { content: [{ type: "text", text: step.error }], isError: true };
 			// Aside delivery lands the state at the next step boundary, before
 			// the next provider call, without interrupting the in-flight batch.
 			// A commit stores both partitions, state core first.
-			for (const payload of stateMessages(procedure)) pi.sendMessage(payload, { deliverAs: "aside" });
-			return { content: [{ type: "text", text: "execution state updated" }] };
+			for (const payload of step.sends) pi.sendMessage(payload, { deliverAs: "aside" });
+			return { content: [{ type: "text", text: step.result }] };
 		},
 	};
 	pi.registerTool(stateUpdate);
@@ -196,17 +190,14 @@ export default function (pi: ExtensionAPI): void {
 		}
 		const outcome = recordReply(procedure, { patches, hasPatch: patches.length > 0 });
 		switch (outcome.kind) {
-			case "store":
-				// Nothing to do here: the commit and the aside send live in the
-				// state_update execute, which runs after this handler; this
-				// outcome only clears the step's counters and arms the block.
-				break;
 			case "ended":
 				if (outcome.cause === "degrade") end(ctx, procedure, `degraded after ${procedure.params.retries} invalid patches; running ordinarily`, "warning");
 				else end(ctx, procedure, `disengaged (idle for ${procedure.params.idleSteps} steps)`);
 				break;
 			default:
-				// none needs nothing; a blocked step is refused at tool_call.
+				// ok and none need nothing here: the state_update executes commit
+				// their patches through commitStep after this handler; a blocked
+				// step is refused at tool_call.
 				break;
 		}
 		return undefined;

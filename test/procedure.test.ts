@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
-import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, scratchMessage } from "../src/messages";
-import { commitPatch, compactionFor, headMessages, newProcedure, noteProjected, pendingNudges, recordReply } from "../src/procedure";
-import type { Procedure, StepOutcome } from "../src/procedure";
+import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, scratchMessage } from "../src/messages";
+import { commitStep, compactionFor, headMessages, newProcedure, noteProjected, pendingNudges, recordReply, stateMessages } from "../src/procedure";
+import type { Procedure } from "../src/procedure";
 import { DEFAULT_PARAMS } from "../src/state";
 import type { ExecutionState, StateParams, StateSchema } from "../src/state";
 
@@ -27,10 +27,16 @@ const step = (...patches: unknown[]) => ({ patches, hasPatch: patches.length > 0
 // A reply with no state_update call is an empty patch.
 const empty = () => ({ patches: [], hasPatch: false });
 
-// Commits a store outcome the way the state_update execute does, for tests
-// that read the record's state after the reply.
-function commit(procedure: Procedure, outcome: StepOutcome): void {
-	if (outcome.kind === "store") commitPatch(procedure, outcome.state);
+// Commits an ok step the way the state_update executes do: one commitStep
+// call per patch, in declaration order. Every test that reads the record's
+// state after the reply walks the execute road, so the fold's verdict and the
+// commits must land on the same state.
+function commit(procedure: Procedure, reply: { patches: unknown[]; hasPatch: boolean }): void {
+	if (!reply.hasPatch) return;
+	for (const patch of reply.patches) {
+		const committed = commitStep(procedure, patch);
+		if ("error" in committed) throw new Error(`patch rejected: ${committed.error}`);
+	}
 }
 
 function assistantEntry(id: string): SessionEntry {
@@ -72,13 +78,13 @@ describe("newProcedure", () => {
 });
 
 describe("recordReply with a patch", () => {
-	test("a valid patch merges into the store outcome and leaves the record's state untouched", () => {
+	test("a valid patch folds into an ok step and leaves the record's state untouched", () => {
 		const p = procedure();
 
 		const outcome = recordReply(p, step({ goal: "x" }));
 
-		expect(outcome).toEqual({ kind: "store", state: { goal: "x" } });
-		// The state_update execute commits; the policy only validates and merges.
+		expect(outcome).toEqual({ kind: "ok" });
+		// The state_update executes commit; the policy only validates and merges.
 		expect(p.state).toEqual({});
 		expect(p.pendingError).toBeUndefined();
 	});
@@ -90,7 +96,7 @@ describe("recordReply with a patch", () => {
 		expect(p.pendingError).toBe("state patch must be a JSON object");
 	});
 
-	test("a patch that leaves the state as it was stores nothing", () => {
+	test("a patch that leaves the state as it was is an empty patch", () => {
 		const p = procedure({}, { goal: "x" });
 
 		expect(recordReply(p, step({ goal: "x" }))).toEqual({ kind: "none" });
@@ -107,11 +113,10 @@ describe("recordReply with a patch", () => {
 	test("a null patch on an existing declared key clears it without blocking", () => {
 		const p = procedure({}, { goal: "obsolete", kept: "yes" });
 
-		const outcome = recordReply(p, step({ goal: null }));
-
-		expect(outcome).toEqual({ kind: "store", state: { kept: "yes" } });
+		const reply = step({ goal: null });
+		expect(recordReply(p, reply)).toEqual({ kind: "ok" });
 		expect(p.pendingError).toBeUndefined();
-		commit(p, outcome);
+		commit(p, reply);
 		expect(p.state).toEqual({ kept: "yes" });
 	});
 
@@ -162,14 +167,17 @@ describe("recordReply with a patch", () => {
 		expect(recordReply(p, step({ goal: 42 }))).toEqual({ kind: "block" });
 	});
 
-	test("a batch of valid patches folds in order into one store outcome", () => {
+	test("a batch of valid patches folds in order into one ok step", () => {
 		const p = procedure({}, { findings: ["old"] });
 
-		const outcome = recordReply(p, step({ findings: { $append: ["a"] } }, { next_step: "b" }));
-
-		expect(outcome).toEqual({ kind: "store", state: { findings: ["old", "a"], next_step: "b" } });
+		const reply = step({ findings: { $append: ["a"] } }, { next_step: "b" });
+		expect(recordReply(p, reply)).toEqual({ kind: "ok" });
 		expect(p.pendingError).toBeUndefined();
 		expect(p.invalidPatches).toBe(0);
+
+		// The execute road lands where the fold landed.
+		commit(p, reply);
+		expect(p.state).toEqual({ findings: ["old", "a"], next_step: "b" });
 	});
 
 	test("an invalid patch anywhere in a batch blocks the step with that patch's error", () => {
@@ -242,17 +250,49 @@ describe("recordReply and idle steps", () => {
 	});
 });
 
-describe("commitPatch", () => {
-	test("moves the state and resets the idle counter", () => {
+describe("commitStep", () => {
+	test("moves the state, resets the idle counter, and hands back the two state messages to send", () => {
 		const p = projected();
 		recordReply(p, empty());
 		recordReply(p, empty());
 		expect(p.idle).toBe(2);
 
-		commitPatch(p, { goal: "x" });
+		const committed = commitStep(p, { goal: "x" });
 
+		if ("error" in committed) throw new Error(committed.error);
+		expect(committed.result).toBe("execution state updated");
+		expect(committed.sends).toEqual(stateMessages(p));
 		expect(p.state).toEqual({ goal: "x" });
 		expect(p.idle).toBe(0);
+	});
+
+	test("an invalid patch returns the exact error and commits nothing", () => {
+		const p = procedure({}, { goal: "keep" });
+
+		const committed = commitStep(p, { goal: 42 });
+
+		if ("result" in committed) throw new Error("invalid patch accepted");
+		expect(committed.error).toContain("goal");
+		expect(p.state).toEqual({ goal: "keep" });
+	});
+
+	test("a patch that changes nothing reports no change and sends nothing", () => {
+		const p = procedure({}, { goal: "x" });
+
+		expect(commitStep(p, { goal: "x" })).toEqual({ result: "no change to the execution state", sends: [] });
+	});
+
+	test("sequential per-call commits land where the fold landed, even across a change and its revert", () => {
+		const fold = procedure({}, { goal: "x" });
+		const calls = procedure({}, { goal: "x" });
+
+		const reply = step({ goal: "y" }, { goal: "z" }, { goal: "x" });
+		expect(recordReply(fold, reply)).toEqual({ kind: "ok" });
+
+		commit(calls, reply);
+
+		expect(calls.state).toEqual(fold.state);
+		expect(fold.state).toEqual({ goal: "x" });
 	});
 });
 
@@ -283,12 +323,14 @@ describe("pendingNudges", () => {
 		expect(pendingNudges(p)).toHaveLength(1);
 
 		// The commit lands in a later step, the way the tool execute does it.
-		commitPatch(p, {});
+		const shrink = commitStep(p, { blob: "x" });
+		if ("error" in shrink) throw new Error(shrink.error);
 		recordReply(p, empty());
 		expect(pendingNudges(p)).toEqual([]);
 		expect(p.capNudged).toBe(false);
 
-		commitPatch(p, { blob: "x".repeat(200) });
+		const grow = commitStep(p, { blob: "x".repeat(200) });
+		if ("error" in grow) throw new Error(grow.error);
 		recordReply(p, empty());
 		expect(pendingNudges(p)).toEqual([consolidationNudgeMessage()]);
 	});
@@ -357,7 +399,8 @@ describe("pendingNudges", () => {
 		expect(pendingNudges(p)).toEqual([consolidationNudgeMessage()]);
 
 		// Dropping the scratch key lands in a later step, the way a commit does.
-		commitPatch(p, { goal: "x".repeat(100) });
+		const drop = commitStep(p, { blob: null });
+		if ("error" in drop) throw new Error(drop.error);
 		recordReply(p, empty());
 		expect(pendingNudges(p)).toEqual([]);
 	});
@@ -394,7 +437,9 @@ describe("headMessages", () => {
 		const p = procedure({}, { goal: "x" });
 		const coreBefore = headMessages(p)[2];
 
-		commit(p, recordReply(p, step({ plan: ["next"] })));
+		const reply = step({ plan: ["next"] });
+		recordReply(p, reply);
+		commit(p, reply);
 
 		expect(headMessages(p)[2]).toEqual(coreBefore);
 		expect(headMessages(p)[3]).toEqual(scratchMessage({ plan: ["next"] }));
@@ -404,7 +449,9 @@ describe("headMessages", () => {
 		const p = procedure({}, { goal: "x" });
 		const coreBefore = headMessages(p)[2];
 
-		commit(p, recordReply(p, step({ goal: "y" })));
+		const reply = step({ goal: "y" });
+		recordReply(p, reply);
+		commit(p, reply);
 
 		expect(headMessages(p)[2]).not.toEqual(coreBefore);
 		expect(headMessages(p)[2]).toEqual(coreMessage({ goal: "y" }));
@@ -436,7 +483,9 @@ describe("compactionFor", () => {
 
 	test("a later compaction carries the live partitions", () => {
 		const p = procedure({}, { goal: "g" });
-		commit(p, recordReply(p, step({ step: 2 })));
+		const reply = step({ step: 2 });
+		recordReply(p, reply);
+		commit(p, reply);
 
 		expect(compactionFor(p, preparation, []).compaction?.preserveData).toEqual({ core: { goal: "g" }, scratch: { step: 2 } });
 	});

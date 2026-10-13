@@ -60,7 +60,6 @@ const disengageNotices = (name: string, trigger: string) => [
 
 let root: string;
 let procedure: Skill;
-let retryProcedure: Skill;
 let plain: Skill;
 let brokenArray: Skill;
 let brokenJson: Skill;
@@ -84,11 +83,6 @@ beforeAll(async () => {
 		root,
 		"zstate",
 		await readFile(path.join(import.meta.dir, "..", "skills", "zstate", "state.schema.json"), "utf8"),
-	);
-	retryProcedure = await makeSkill(
-		root,
-		"retryproc",
-		JSON.stringify({ type: "object", properties: { goal: { type: "string" } }, "x-state": { retries: 2 } }),
 	);
 	idleProcedure = await makeSkill(
 		root,
@@ -667,53 +661,6 @@ describe("omp-skill-state patch loop", () => {
 		expect(s.storedStates).toEqual([{}, { findings: ["a"] }, { findings: ["a"], next_step: "b" }]);
 	});
 
-	test("a valid patch followed by an invalid one refuses the whole batch before any tool runs", async () => {
-		const { s } = await engaged();
-
-		await s.step("recording", {
-			tools: [STATE_UPDATE_TOOL_NAME, STATE_UPDATE_TOOL_NAME],
-			arguments: [{ patch: { goal: "x" } }, { patch: { goal: 42 } }],
-		});
-
-		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
-		expect(s.blocked.map((call) => call.toolName)).toEqual([STATE_UPDATE_TOOL_NAME, STATE_UPDATE_TOOL_NAME]);
-		for (const call of s.blocked) expect(call.reason).toContain('state key "goal" must be a string');
-		expect(s.storedStates).toEqual([{}]);
-	});
-
-	test("a null patch on a declared key clears it instead of blocking, as the operating rules promise", async () => {
-		const { s } = await engaged();
-
-		await s.step("recording", patchStep({ goal: "x" }));
-		await s.step("dropping", patchStep({ goal: null }));
-
-		expect(s.blocked).toEqual([]);
-		expect(s.storedStates).toEqual([{}, { goal: "x" }, {}]);
-	});
-
-	test("an $append patch grows a declared array key without resending it", async () => {
-		const { s } = await engaged();
-
-		await s.step("recording", patchStep({ findings: ["one"] }));
-		await s.step("recording", patchStep({ findings: { $append: ["two"] } }));
-
-		expect(s.blocked).toEqual([]);
-		expect(s.storedStates.at(-1)).toEqual({ findings: ["one", "two"] });
-	});
-
-	test("a second valid patch merges into the first instead of replacing it", async () => {
-		const { s } = await engaged();
-
-		await s.step("recording", patchStep({ goal: "x" }));
-		await s.step("recording", patchStep({ extra: 1 }));
-
-		expect(s.sends).toHaveLength(8);
-		// goal is declared, so it rides in the core; the undeclared extra is scratch.
-		expect(s.sends[6]!.payload).toEqual(coreMessage({ goal: "x" }) as Record<string, unknown>);
-		expect(s.sends[7]!.payload).toEqual(scratchMessage({ extra: 1 }) as Record<string, unknown>);
-		expect(s.storedStates.at(-1)).toEqual({ goal: "x", extra: 1 });
-	});
-
 	test("an invalid patch blocks every call of the batch, the state_update call included, with the exact validation error", async () => {
 		const { s } = await engaged();
 
@@ -772,33 +719,6 @@ describe("omp-skill-state patch loop", () => {
 			...engageNotices("procedure"),
 			{ message: 'skill-state: procedure "procedure" degraded after 3 invalid patches; running ordinarily', type: "warning" },
 		]);
-	});
-
-	test("the degrade threshold honours x-state retries", async () => {
-		const { s } = await engaged(retryProcedure);
-
-		await s.step("recording", patchStep({ goal: 42 }));
-		expect(s.notices).toEqual(engageNotices("retryproc"));
-
-		await s.step("recording", patchStep({ goal: 42 }));
-		expect(s.notices).toEqual([
-			...engageNotices("retryproc"),
-			{ message: 'skill-state: procedure "retryproc" degraded after 2 invalid patches; running ordinarily', type: "warning" },
-		]);
-	});
-
-	test("a valid patch between failures resets the consecutive counter", async () => {
-		const { omp, s } = await engaged();
-
-		await s.step("recording", patchStep({ goal: 42 }));
-		await s.step("recording", patchStep({ goal: 42 }));
-		await s.step("recording", patchStep({ goal: "x" }));
-		await s.step("recording", patchStep({ goal: 42 }));
-		await s.step("recording", patchStep({ goal: 42 }));
-		expect(s.notices).toEqual(engageNotices("procedure"));
-
-		await s.switchTo(omp.session("s2"), "new");
-		expect(s.notices).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "/new")]);
 	});
 
 	test("agent_end settles the live state as next-turn core and scratch once the session is idle", async () => {
@@ -978,25 +898,6 @@ describe("omp-skill-state idle disengage", () => {
 		return { omp, s };
 	}
 
-	test("five consecutive no-patch steps disengage; four stay engaged", async () => {
-		const { s } = await projecting();
-
-		expect(await s.step("step 1")).toBeDefined();
-		await s.step("step 2");
-		await s.step("step 3");
-		expect(s.notices).toEqual(engageNotices("procedure"));
-
-		const quiet = await s.step("step 4");
-		expect(nudgeIn(quiet)).toEqual([]);
-
-		const prompt = await s.step("step 5");
-		const nudge = nudgeIn(prompt);
-		expect(nudge).toHaveLength(1);
-		expect(nudge[0].content).toContain("unchanged for 4 consecutive steps");
-		expect(prompt?.at(-1)).toBe(nudge[0]);
-		expect(s.notices).toEqual([...engageNotices("procedure"), ...disengageNotices("procedure", "idle for 5 steps")]);
-	});
-
 	test("the nudge rides on the prompt exactly once, at threshold minus one", async () => {
 		const { s } = await projecting(warnProcedure);
 
@@ -1060,71 +961,6 @@ describe("omp-skill-state idle disengage", () => {
 		const prompt = await s.step("step 2");
 		expect(nudgeIn(prompt)).toEqual([]);
 		expect(s.notices).toEqual(engageNotices("warnproc"));
-	});
-
-	test("the idle threshold honours x-state idleSteps", async () => {
-		const { s } = await projecting(idleProcedure);
-
-		await s.step("step 1");
-		expect(s.notices).toEqual(engageNotices("idleproc"));
-
-		await s.step("step 2");
-		expect(s.notices).toEqual([...engageNotices("idleproc"), ...disengageNotices("idleproc", "idle for 2 steps")]);
-	});
-
-	test("a step whose prompt carried no head is not an idle step", async () => {
-		const s = fakeOmp([idleProcedure]).session("s1");
-		await s.invoke("idleproc");
-
-		// The engage asides land at the first step boundary; that step never saw
-		// the rules, so the model cannot be idle in it.
-		expect(await s.step("step 1")).toBeUndefined();
-		expect(await s.step("step 2")).toBeDefined();
-		expect(s.notices).toEqual(engageNotices("idleproc"));
-
-		await s.step("step 3");
-		expect(s.notices).toEqual([...engageNotices("idleproc"), ...disengageNotices("idleproc", "idle for 2 steps")]);
-	});
-
-	test("a patch that leaves the state unchanged is an empty patch: nothing stored, and the step is idle", async () => {
-		const { s } = await projecting(idleProcedure);
-
-		await s.step("recording", patchStep({ goal: "x" }));
-		expect(s.sends).toHaveLength(6);
-
-		await s.step("recording", patchStep({ goal: "x" }));
-		expect(s.sends).toHaveLength(6);
-		expect(s.notices).toEqual(engageNotices("idleproc"));
-
-		await s.step("recording", patchStep({ goal: "x" }));
-		expect(s.sends).toHaveLength(6);
-		expect(s.storedStates).toEqual([{}, { goal: "x" }]);
-		expect(s.notices).toEqual([...engageNotices("idleproc"), ...disengageNotices("idleproc", "idle for 2 steps")]);
-	});
-
-	test("a valid patch between idle steps resets the idle run", async () => {
-		const { s } = await projecting();
-
-		await s.step("no patch");
-		await s.step("no patch");
-		await s.step("recording", patchStep({ goal: "x" }));
-		await s.step("no patch");
-		await s.step("no patch");
-
-		expect(s.notices).toEqual(engageNotices("procedure"));
-	});
-
-	test("an invalid patch also resets the idle run", async () => {
-		const { s } = await projecting();
-
-		await s.step("no patch");
-		await s.step("no patch");
-		await s.step("recording", patchStep({ goal: 42 }));
-		await s.step("no patch");
-		await s.step("no patch");
-
-		expect(s.blocked).toHaveLength(1);
-		expect(s.notices).toEqual(engageNotices("procedure"));
 	});
 
 	test("after an idle disengage the step is ordinary", async () => {

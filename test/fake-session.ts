@@ -1,8 +1,8 @@
 import type { ExtensionAPI, ExtensionContext, SessionEntry, Skill, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { zod } from "@oh-my-pi/pi-coding-agent";
-import extension from "./index";
-import { extractStatePayload, isStateCoreMessage, isStateScratchMessage, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement } from "./messages";
-import type { ExecutionState } from "./state";
+import extension from "../src/index";
+import { extractStatePayload, isStateCoreMessage, isStateScratchMessage, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement } from "../src/messages";
+import type { ExecutionState } from "../src/state";
 
 // A fake omp session for the adapter tests: one factory (one handler map) with
 // N sessions keyed by id. Each session owns its branch, sends, notices, idle

@@ -8,13 +8,13 @@ Status: implemented and verified against a long real session (`docs/verification
 
 | Path | Role |
 | --- | --- |
-| `package.json` | Plugin manifest: `"omp": { "extensions": ["./index.ts"] }` |
-| `index.ts` | The extension: a thin harness adapter over the modules below. omp imports the TypeScript directly; there is no build step. |
-| `branch.ts` | Pure reads over the stored branch: the re-derive scan and the compaction cut. |
-| `procedure.ts` | The procedure record and the step policy: patch outcomes, idle and retry counters, head and compaction construction. |
-| `messages.ts` | The message vocabulary: the head message types (rules, procedure spec, state core, scratch), the state renderer, the core and scratch state builders, and the two nudge message builders. |
-| `fake-session.ts` | The fake omp session the adapter tests drive: branch, delivery timing, sends and notices. |
-| `index.test.ts`, `*.test.ts` | Unit tests for the factory contract, the step policy, the branch reads, the state merge and the projection |
+| `package.json` | Plugin manifest: `"omp": { "extensions": ["./src/index.ts"] }` |
+| `src/index.ts` | The extension: a thin harness adapter over the modules below. omp imports the TypeScript directly; there is no build step. |
+| `src/branch.ts` | Pure reads over the stored branch: the re-derive scan and the compaction cut. |
+| `src/procedure.ts` | The procedure record and the step policy: patch outcomes, idle and retry counters, head and compaction construction. |
+| `src/messages.ts` | The message vocabulary: the head message types (rules, procedure spec, state core, scratch), the state renderer, the core and scratch state builders, and the two nudge message builders. |
+| `test/fake-session.ts` | The fake omp session the adapter tests drive: branch, delivery timing, sends and notices. |
+| `test/*.test.ts` | Unit tests for the factory contract, the step policy, the branch reads, the state merge and the projection |
 | `skills/zstate/` | Bundled mode-entry procedure skill (`SKILL.md` + `state.schema.json`): it carries no task of its own; the task is the text given with the invocation, and `disable-model-invocation` keeps it user-invoked only |
 | `docs/spec.md`, `docs/adr/`, `CONTEXT.md` | Design, decisions, glossary |
 | `docs/verification.md`, `verification/` | Run G's acceptance evidence: the session analyzer, the compact-early compaction config, and the `capture/` plugin that records provider request bodies when `SKILL_STATE_CAPTURE_DIR` is set |
@@ -41,7 +41,7 @@ omp plugin list     # omp-skill-state, enabled
 omp plugin doctor   # 0 errors
 ```
 
-`link` creates a junction at `~/.omp/plugins/node_modules/omp-skill-state` and an enabled entry in `~/.omp/plugins/omp-plugins.lock.json`. Changes to `index.ts` take effect at the next session start. Remove the link with `omp plugin uninstall omp-skill-state`.
+`link` creates a junction at `~/.omp/plugins/node_modules/omp-skill-state` and an enabled entry in `~/.omp/plugins/omp-plugins.lock.json`. Changes to `src/index.ts` take effect at the next session start. Remove the link with `omp plugin uninstall omp-skill-state`.
 
 Invoke a procedure skill (a skill with a `state.schema.json`) in the main agent and it engages. The bundled `zstate` skill takes its task from the invocation text, e.g. `/skill:zstate read skill://implement and work on issue 67`:
 
@@ -60,7 +60,7 @@ Skills without a state schema, model-initiated skill reads, and subagent session
 
 ## Extension types
 
-`index.ts` imports `ExtensionAPI` and friends as types only, plus two value imports: `Text` from `@oh-my-pi/pi-coding-agent` (the state message renderer) and `InternalUrlRouter` from `@oh-my-pi/pi-coding-agent/internal-urls` (in `state.ts`, to resolve `skill://` paths). At load time omp rewrites every `@oh-my-pi/pi-coding-agent/*` import from a plugin onto its own bundled copy (the plugin compat layer in the harness, `legacy-pi-compat`), so there is still no separate runtime dependency to install.
+`src/index.ts` imports `ExtensionAPI` and friends as types only, plus two value imports: `Text` from `@oh-my-pi/pi-coding-agent` (the state message renderer) and `InternalUrlRouter` from `@oh-my-pi/pi-coding-agent/internal-urls` (in `src/state.ts`, to resolve `skill://` paths). At load time omp rewrites every `@oh-my-pi/pi-coding-agent/*` import from a plugin onto its own bundled copy (the plugin compat layer in the harness, `legacy-pi-compat`), so there is still no separate runtime dependency to install.
 
 The types come from the published `@oh-my-pi/pi-coding-agent` package, pinned to the version of the installed omp (`omp --version`). The published package ships `dist/types/*.d.ts`, which keeps `tsc` fast and independent of the harness source.
 

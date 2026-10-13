@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
-import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, scratchMessage } from "./messages";
-import { commitPatch, compactionFor, headMessages, newProcedure, noteProjected, pendingNudges, recordReply } from "./procedure";
-import type { Procedure, StepOutcome } from "./procedure";
-import { DEFAULT_PARAMS } from "./state";
-import type { ExecutionState, StateParams, StateSchema } from "./state";
+import { OPERATING_RULES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, scratchMessage } from "../src/messages";
+import { commitPatch, compactionFor, headMessages, newProcedure, noteProjected, pendingNudges, recordReply } from "../src/procedure";
+import type { Procedure, StepOutcome } from "../src/procedure";
+import { DEFAULT_PARAMS } from "../src/state";
+import type { ExecutionState, StateParams, StateSchema } from "../src/state";
 
 const schema: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
 

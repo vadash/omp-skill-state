@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { SessionEntry, Skill } from "@oh-my-pi/pi-coding-agent";
 import { fakeOmp, coreStateEntry, invocationEntry, procedureBranch, scratchStateEntry, specEntry, stateEntries } from "./fake-session";
-import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_UPDATE_TOOL_NAME, STATE_UPDATE_DESCRIPTION, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, coreMessage, scratchMessage } from "./messages";
-import type { ExecutionState, StateSchema } from "./state";
-import { loadStateSchema, splitState } from "./state";
+import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_UPDATE_TOOL_NAME, STATE_UPDATE_DESCRIPTION, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, coreMessage, scratchMessage } from "../src/messages";
+import type { ExecutionState, StateSchema } from "../src/state";
+import { loadStateSchema, splitState } from "../src/state";
 import { makeSkill } from "./skill-fixtures";
 
 // Engage sends exactly these four asides; the patch loop must add nothing else.
@@ -83,7 +83,7 @@ beforeAll(async () => {
 	windowProcedure = await makeSkill(
 		root,
 		"zstate",
-		await readFile(path.join(import.meta.dir, "skills", "zstate", "state.schema.json"), "utf8"),
+		await readFile(path.join(import.meta.dir, "..", "skills", "zstate", "state.schema.json"), "utf8"),
 	);
 	retryProcedure = await makeSkill(
 		root,
@@ -473,7 +473,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 	});
 
 	test("the bundled zstate skill engages end to end", async () => {
-		const baseDir = path.join(import.meta.dir, "skills", "zstate");
+		const baseDir = path.join(import.meta.dir, "..", "skills", "zstate");
 		const zstate: Skill = {
 			name: "zstate",
 			description: "bundled sample procedure skill",

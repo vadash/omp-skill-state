@@ -304,21 +304,16 @@ Every mechanism above is public extension API. Nothing else is touched.
 
 ```
 omp-skill-state/
-  package.json          "omp": { "extensions": ["./index.ts"] }
-  index.ts              the harness adapter: event registrations, sends, blocks, notices
-  index.test.ts         unit tests (bun test)
-  projection.ts         the projection (pure message assembly)
-  projection.test.ts    projection unit tests (bun test)
-  branch.ts             pure reads over the stored branch (re-derive scan, compaction cut)
-  branch.test.ts        branch read unit tests (bun test)
-  procedure.ts          the procedure record and the step policy (patch outcomes, head, compaction)
-  procedure.test.ts     step policy unit tests (bun test)
-  state.ts              the execution state module: schema and params loading, patch validation, merge and apply, the core/scratch split (volatileKeys, splitState)
-  state.test.ts         execution state unit tests (bun test)
-  messages.ts           the message vocabulary: the head message types, the state renderer and the core and scratch state builders
-  messages.test.ts      message vocabulary unit tests (bun test)
-  fake-session.ts       the fake omp session for the adapter tests (branch, delivery timing, sends)
-  skill-fixtures.ts     the shared test fixture writing skill directories for the adapter and state tests (makeSkill)
+  package.json          "omp": { "extensions": ["./src/index.ts"] }
+  src/index.ts          the harness adapter: event registrations, sends, blocks, notices
+  src/projection.ts     the projection (pure message assembly)
+  src/branch.ts         pure reads over the stored branch (re-derive scan, compaction cut)
+  src/procedure.ts      the procedure record and the step policy (patch outcomes, head, compaction)
+  src/state.ts          the execution state module: schema and params loading, patch validation, merge and apply, the core/scratch split (volatileKeys, splitState)
+  src/messages.ts       the message vocabulary: the head message types, the state renderer and the core and scratch state builders
+  test/*.test.ts        unit tests (bun test), one per source module
+  test/fake-session.ts  the fake omp session for the adapter tests (branch, delivery timing, sends)
+  test/skill-fixtures.ts the shared test fixture writing skill directories for the adapter and state tests (makeSkill)
   tsconfig.json         typecheck config (tsc --noEmit)
   skills/               optional bundled procedure skills, discovered from the plugin root
   CONTEXT.md            glossary
@@ -341,7 +336,7 @@ Unit, no harness needed:
 - step policy: each reply outcome (none, store, block, ended by degrade or idle), the counters and their resets, the head and the compaction result.
 - first-step rules delivery on engage, and its absence for non-procedure prompts, agent-attributed invocations, subagents and mid-procedure batches.
 
-`index.test.ts` drives the factory through a fake omp session (`fake-session.ts`): one factory with N sessions keyed by id, each owning its branch, sends, notices and idle flag. The fake auto-dispatches the harness event order inside one verb, assembles the context of each provider call from its branch, captures `registerTool` definitions, and models delivery timing: messages sent while busy flush at the end of the current step (so the stored head after engage lands at the first step boundary, while the first step's rules come from the `before_agent_start` delivery on the batch itself), messages sent while idle are appended at once, a reply with no tool call ends the run, and a call whose name has a captured definition runs that definition inside the step, recording its own result. The delivery model is the fake interface contract; `docs/verification.md` remains the real-session ground truth.
+`test/index.test.ts` drives the factory through a fake omp session (`test/fake-session.ts`): one factory with N sessions keyed by id, each owning its branch, sends, notices and idle flag. The fake auto-dispatches the harness event order inside one verb, assembles the context of each provider call from its branch, captures `registerTool` definitions, and models delivery timing: messages sent while busy flush at the end of the current step (so the stored head after engage lands at the first step boundary, while the first step's rules come from the `before_agent_start` delivery on the batch itself), messages sent while idle are appended at once, a reply with no tool call ends the run, and a call whose name has a captured definition runs that definition inside the step, recording its own result. The delivery model is the fake interface contract; `docs/verification.md` remains the real-session ground truth.
 
 Against a real session (run G and the nudge probe in `docs/verification.md`; the invalid-patch refusal occurred in run G, the degrade path did not occur and rests on the unit tests, and the `/new`, `/clear` and rewind outcomes are in the doc's git history):
 

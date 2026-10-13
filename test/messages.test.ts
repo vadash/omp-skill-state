@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { announcedSkillNames, consolidationNudgeMessage, extractStatePayload, isStateCoreMessage, isStateScratchMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, STATE_UPDATE_TOOL_NAME, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage } from "./messages";
+import { announcedSkillNames, consolidationNudgeMessage, extractStatePayload, isStateCoreMessage, isStateScratchMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, STATE_UPDATE_TOOL_NAME, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage } from "../src/messages";
 
 describe("consolidationNudgeMessage", () => {
 	test("is a developer message asking for a state_update consolidation, with no fence, so it never becomes an elide target", () => {

@@ -4,7 +4,7 @@
 	"description": "Run a procedural skill against an explicit execution state instead of a growing transcript (omp plugin)",
 	"type": "module",
 	"omp": {
-		"extensions": ["./index.ts"]
+		"extensions": ["./src/index.ts"]
 	},
 	"scripts": {
 		"test": "bun test",

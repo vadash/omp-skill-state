@@ -3,8 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Skill } from "@oh-my-pi/pi-coding-agent";
-import { DEFAULT_PARAMS, applyPatch, loadStateSchema, mergeState, parseStateSchema, splitState, stateEquals, validatePatch, volatileKeys } from "./state";
-import type { ExecutionState, JsonSchema, StateSchema } from "./state";
+import { DEFAULT_PARAMS, applyPatch, loadStateSchema, mergeState, parseStateSchema, splitState, stateEquals, validatePatch, volatileKeys } from "../src/state";
+import type { ExecutionState, JsonSchema, StateSchema } from "../src/state";
 import { makeSkill } from "./skill-fixtures";
 
 let root: string;

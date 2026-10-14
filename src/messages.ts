@@ -1,7 +1,7 @@
 import type { CustomMessagePayload } from "@oh-my-pi/pi-coding-agent";
 import { isPlainObject } from "./types";
 import type { ExecutionState, StateParams } from "./state";
-import type { AgentMessage, ProjectionFailure } from "./types";
+import type { AgentMessage } from "./types";
 
 export const STATE_CORE_MESSAGE_TYPE = "sh.omp.skill-state.core";
 export const STATE_SCRATCH_MESSAGE_TYPE = "sh.omp.skill-state.scratch";
@@ -184,14 +184,29 @@ export function windowNoticeMessage(window: readonly { tag: string; toolName: st
 // step runs on ordinary context instead. Per-call by construction, like the
 // nudges: appended to the prompt only, never stored, never re-sent from
 // history. The step policy latches it, so one unprojected episode stays one
-// notice no matter how many steps it spans.
-export function fallbackNoticeMessage(reason: ProjectionFailure): AgentMessage {
-	const why = reason === "incomplete-head"
-		? "the stored head is incomplete"
-		: "a tool result does not answer the tool call before it";
+// notice no matter how many steps it spans. The only failure reason is an
+// incomplete head: an unpairable newest pair degrades in place instead
+// (ADR 0005).
+export function fallbackNoticeMessage(): AgentMessage {
 	return {
 		role: "developer",
-		content: `The state projection could not be built this step (${why}); the ordinary conversation is used instead. The projection resumes automatically once the head messages and tool pairing are back.`,
+		content: `The state projection could not be built this step (the stored head is incomplete); the ordinary conversation is used instead. The projection resumes automatically once the head messages are back.`,
+		timestamp: Date.now(),
+	};
+}
+
+// The notice a degraded step carries (ADR 0005): the head is intact but the
+// newest tool pair could not be built, so the step runs on the head alone
+// with an empty observation window. Per-call by construction, like the
+// nudges: appended to the prompt only, never stored, never re-sent from
+// history. It rides every degraded step with no latch, because a degraded
+// model sees only the head and cannot know why its window is empty. The
+// wording keeps this projection gap apart from the procedure's
+// retries-exhausted degrade, a different failure.
+export function degradationNoticeMessage(): AgentMessage {
+	return {
+		role: "developer",
+		content: `This step's observation window is empty: the newest tool results are missing (a blocked batch leaves no results) or none of them answers this step's tool calls. The execution state is intact and current; nothing was lost. Re-emit the tool call you intended, and the window fills again from its results.`,
 		timestamp: Date.now(),
 	};
 }

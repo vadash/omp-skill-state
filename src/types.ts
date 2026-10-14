@@ -11,6 +11,7 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
 }
 
 // Why the projection fell back to ordinary context: the stored head is
-// incomplete, or the newest tool pair cannot be matched to its assistant
-// message. project returns one of these instead of a projected prompt.
-export type ProjectionFailure = "incomplete-head" | "unmatched-tool-pair";
+// incomplete. This is the only fallback reason, because an unpairable newest
+// pair degrades in place instead (ADR 0005). project returns it instead of a
+// projected prompt.
+export type ProjectionFailure = "incomplete-head";

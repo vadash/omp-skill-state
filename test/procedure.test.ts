@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, rulesMessage, scratchMessage } from "../src/messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, rulesMessage, scratchMessage } from "../src/messages";
 import { commitStep, compactionFor, headMessages, newProcedure, recordReply, stateMessages, stepPrompt } from "../src/procedure";
 import type { Procedure } from "../src/procedure";
 import { DEFAULT_PARAMS } from "../src/state";
@@ -479,33 +479,6 @@ describe("stepPrompt fallback notice", () => {
 		expect(noticeText(notices[0])).toContain("the stored head is incomplete");
 	});
 
-	test("an unmatched tool pair falls back with the notice naming that reason", () => {
-		const p = procedure();
-		const call: AgentMessage = {
-			role: "assistant",
-			content: [{ type: "toolCall", id: "t1", name: "read", arguments: {} }],
-			api: "anthropic-messages",
-			provider: "anthropic",
-			model: "m",
-			usage: ZERO_USAGE,
-			stopReason: "toolUse",
-			timestamp: Date.now(),
-		};
-		const mismatched: AgentMessage = {
-			role: "toolResult",
-			toolCallId: "other",
-			toolName: "read",
-			content: [{ type: "text", text: "mismatch" }],
-			isError: false,
-			timestamp: Date.now(),
-		};
-
-		const notices = noticesIn(stepPrompt(p, [...headContext(p), call, mismatched]));
-		expect(notices).toHaveLength(1);
-		expect(noticeText(notices[0])).toContain("a tool result does not answer the tool call before it");
-		expect(p.projected).toBe(false);
-	});
-
 	test("fallback steps neither latch the cap ask nor move the idle count", () => {
 		const p = procedure({ stateBytes: 100 }, { blob: "x".repeat(200) });
 
@@ -594,16 +567,124 @@ describe("stepPrompt window notice", () => {
 		expect(stepPrompt(p, [callMsg("t1"), resultMsg("t1", "a")])).toBeUndefined();
 	});
 
-	test("absent when the projection falls back on an unmatched pair", () => {
+	test("absent on a degraded step: the degradation notice is the only developer signal", () => {
 		const p = procedure();
 		const h = headContext(p);
 
 		const out = stepPrompt(p, [...h, callMsg("t1"), resultMsg("other", "mismatch")]);
-		if (out === undefined) throw new Error("the fallback step returned nothing");
+		if (out === undefined) throw new Error("the degraded step returned nothing");
 
 		const texts = devTexts(out);
 		expect(texts).toHaveLength(1);
-		expect(texts[0]).toContain("a tool result does not answer the tool call before it");
+		expect(texts[0]).toContain("observation window is empty");
+		expect(out.some((message) => message.role === "toolResult")).toBe(false);
+	});
+});
+
+// A degraded step's context: the head followed by an assistant whose call
+// went unanswered, as a blocked batch leaves the branch. Returns the prompt
+// and its notice text.
+function degradedStep(procedure: Procedure): { prompt: AgentMessage[]; notice: string } {
+	const h = headContext(procedure);
+	const out = stepPrompt(procedure, [...h, ...healthyTail("t1", "other", "mismatch")]);
+	if (out === undefined) throw new Error("the degraded step returned nothing");
+	const notice = out.find((message) => message.role === "developer");
+	if (notice === undefined || !("content" in notice) || typeof notice.content !== "string") throw new Error("degraded step without its notice");
+	return { prompt: out, notice: notice.content };
+}
+
+// The pair messages one step leaves behind, as the harness stores them. A
+// mismatched result id makes the newest pair unbuildable: the blocked-batch
+// shape. A matching id is a healthy step.
+function healthyTail(callId: string, resultId = callId, text = "ok"): AgentMessage[] {
+	const call: AgentMessage = {
+		role: "assistant",
+		content: [{ type: "toolCall", id: callId, name: "read", arguments: {} }],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "m",
+		usage: ZERO_USAGE,
+		stopReason: "toolUse",
+		timestamp: Date.now(),
+	};
+	const result: AgentMessage = {
+		role: "toolResult",
+		toolCallId: resultId,
+		toolName: "read",
+		content: [{ type: "text", text }],
+		isError: false,
+		timestamp: Date.now(),
+	};
+	return [call, result];
+}
+
+describe("stepPrompt degradation notice", () => {
+	test("a degraded step's prompt is the head plus the notice, never ordinary history", () => {
+		const p = projected();
+
+		const { prompt } = degradedStep(p);
+
+		// Four head messages, one developer notice, no window, no transcript.
+		expect(prompt).toHaveLength(5);
+		expect(prompt.slice(0, 4).map((message) => (message.role === "custom" ? message.customType : message.role))).toEqual([
+			RULES_MESSAGE_TYPE,
+			PROCEDURE_SPEC_MESSAGE_TYPE,
+			STATE_CORE_MESSAGE_TYPE,
+			STATE_SCRATCH_MESSAGE_TYPE,
+		]);
+		expect(prompt[4]!.role).toBe("developer");
+		expect(prompt.some((message) => message.role === "toolResult" || message.role === "user")).toBe(false);
+		expect(p.projected).toBe(false);
+	});
+
+	test("the notice rides every degraded step: no once-latch", () => {
+		const p = projected();
+
+		degradedStep(p);
+		const second = degradedStep(p);
+
+		expect(second.notice).toContain("observation window is empty");
+	});
+
+	test("the first projected step carries no degradation notice, and a later degraded step rides it again", () => {
+		const p = projected();
+
+		degradedStep(p);
+		const clean = stepPrompt(p, [...headContext(p), ...healthyTail("t2")]);
+		if (clean === undefined) throw new Error("the projected step returned nothing");
+		const cleanDevs = clean.filter((message) => message.role === "developer");
+		expect(cleanDevs).toHaveLength(1); // the window notice only
+		expect(String("content" in cleanDevs[0]! ? cleanDevs[0]!.content : "")).toContain("window oldest");
+		expect(p.projected).toBe(true);
+
+		const again = degradedStep(p);
+		expect(again.notice).toContain("observation window is empty");
+	});
+
+	test("a degraded step is policy-neutral: no idle advance, no retry added, the reply judged as any reply", () => {
+		const p = projected({ idleSteps: 3 });
+		recordReply(p, empty());
+		recordReply(p, empty());
+		const idleBefore = p.idle;
+
+		// The degraded step itself moves nothing.
+		degradedStep(p);
+		expect(p.idle).toBe(idleBefore);
+		expect(p.invalidPatches).toBe(0);
+
+		// An idle reply on a degraded step does not advance the idle count...
+		recordReply(p, empty());
+		expect(p.idle).toBe(idleBefore);
+
+		// ...a patching reply is judged as any reply and resets the idle run...
+		expect(recordReply(p, step({ goal: "x" }))).toEqual({ kind: "ok" });
+		expect(p.idle).toBe(0);
+
+		// ...and an invalid patch still consumes a retry: the reply's own
+		// validity is never neutralised, only the degradation adds nothing.
+		degradedStep(p);
+		expect(recordReply(p, step({ goal: 42 }))).toEqual({ kind: "block" });
+		expect(p.invalidPatches).toBe(1);
 	});
 });
 

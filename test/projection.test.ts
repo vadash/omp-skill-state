@@ -84,6 +84,7 @@ function asToolResult(message: AgentMessage): Extract<AgentMessage, { role: "too
 function projected(messages: AgentMessage[], observationBytes = 32768, observationWindow?: number): AgentMessage[] {
 	const out = observationWindow === undefined ? project(messages, observationBytes) : project(messages, observationBytes, observationWindow);
 	if (typeof out === "string") throw new Error(`unexpected fallback: ${out}`);
+	if (!Array.isArray(out)) throw new Error("unexpected degraded projection");
 	return out;
 }
 
@@ -361,19 +362,7 @@ describe("project assembly", () => {
 		expect(project([...h.all.slice(0, 2), h.core, legacy[2]!, assistantToolCall("t1"), toolResult("t1", "ok")], 32768)).toBe("incomplete-head");
 	});
 
-	test("trailing tool results without a preceding assistant tool call fail as unmatched-tool-pair", () => {
-		const h = head();
-		expect(project([...h.all, userMsg("hi"), toolResult("t1", "orphan")], 32768)).toBe("unmatched-tool-pair");
-		expect(project([...h.all, assistantText("no calls"), toolResult("t1", "orphan")], 32768)).toBe("unmatched-tool-pair");
-	});
-
-	test("a result that answers no toolCall in the pinned assistant fails as unmatched-tool-pair", () => {
-		const h = head();
-		expect(project([...h.all, assistantToolCall("t1"), toolResult("t1", "ok"), toolResult("t2", "stray")], 32768)).toBe("unmatched-tool-pair");
-		expect(project([...h.all, assistantToolCall("t1"), toolResult("other", "mismatch")], 32768)).toBe("unmatched-tool-pair");
-	});
-
-	test("a trailing text-only assistant projects to the head only", () => {
+	test("the stored head with a text-only trailing assistant projects to the head only", () => {
 		const h = head();
 		const out = projected([...h.all, assistantText("thinking out loud")], 32768);
 
@@ -383,13 +372,6 @@ describe("project assembly", () => {
 	test("a fresh procedure with only the skill prompt and the head projects to the head only", () => {
 		const h = head();
 		const out = projected([custom("skill-prompt"), ...h.all, developerMsg("note")], 32768);
-
-		expect(out).toEqual([h.rules, h.procedureSpec, h.core, perCall(h.scratch)]);
-	});
-
-	test("a trailing assistant tool call with no result yet projects to the head only", () => {
-		const h = head();
-		const out = projected([...h.all, assistantToolCall("t1")], 32768);
 
 		expect(out).toEqual([h.rules, h.procedureSpec, h.core, perCall(h.scratch)]);
 	});
@@ -766,5 +748,51 @@ describe("project flat band", () => {
 		expect(early).toHaveLength(6);
 		expect(late).toHaveLength(6);
 		expect(textBytes(late!)).toBeLessThanOrEqual(textBytes(early!) + 64);
+	});
+});
+
+describe("project degradation", () => {
+	// The degraded branch of project: the head is intact but the newest tool
+	// pair cannot be built. The walk collects newest first, so no pair
+	// survives an unbuildable newest pair and the degraded window is empty.
+	function degraded(messages: AgentMessage[], observationBytes = 32768, observationWindow?: number): { head: AgentMessage[] } {
+		const out = observationWindow === undefined ? project(messages, observationBytes) : project(messages, observationBytes, observationWindow);
+		if (typeof out === "string") throw new Error(`expected a degraded projection, got the failure ${out}`);
+		if (Array.isArray(out)) throw new Error("expected a degraded projection, got a plain projection");
+		return out;
+	}
+
+	test("a result answering no toolCall in the pinned assistant degrades to the head instead of failing", () => {
+		const h = head();
+		const out = degraded([...h.all, assistantToolCall("t1"), toolResult("t1", "ok"), toolResult("t2", "stray")], 32768);
+
+		expect(out.head).toEqual([h.rules, h.procedureSpec, h.core, perCall(h.scratch)]);
+	});
+
+	test("trailing results without a preceding assistant call degrade to the head", () => {
+		const h = head();
+		const orphan = [h.rules, h.procedureSpec, h.core, perCall(h.scratch)];
+
+		expect(degraded([...h.all, userMsg("hi"), toolResult("t1", "orphan")], 32768).head).toEqual(orphan);
+		expect(degraded([...h.all, assistantText("no calls"), toolResult("t1", "orphan")], 32768).head).toEqual(orphan);
+	});
+
+	test("a blocked batch's tail, an assistant whose calls produced no results, degrades to the head", () => {
+		const h = head();
+		const out = degraded([...h.all, assistantToolCall("t1"), assistantToolCall("t2", "bash")], 32768);
+
+		expect(out.head).toEqual([h.rules, h.procedureSpec, h.core, perCall(h.scratch)]);
+	});
+
+	test("a degraded projection is never ordinary history: head messages only and the byte-stable head", () => {
+		const h = head();
+		const out = degraded([...h.all, assistantToolCall("t1"), toolResult("other", "mismatch")], 32768, 3);
+
+		expect(out.head).toHaveLength(4);
+		for (const message of out.head) expect(message.role).toBe("custom");
+		// The stored head is the byte-stable one: rules by reference, the
+		// scratch as its per-call copy, so the cache ceiling is unchanged.
+		expect(out.head[0]).toBe(h.rules);
+		expect(out.head[3]).toEqual(perCall(h.scratch));
 	});
 });

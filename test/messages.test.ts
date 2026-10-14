@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { announcedSkillNames, consolidationNudgeMessage, extractStatePayload, fallbackNoticeMessage, isStateCoreMessage, isStateScratchMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, rulesMessage, SKILL_PROMPT_MESSAGE_TYPE, skillInvocationName, STATE_UPDATE_TOOL_NAME, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage, windowNoticeMessage } from "../src/messages";
+import { announcedSkillNames, consolidationNudgeMessage, degradationNoticeMessage, extractStatePayload, fallbackNoticeMessage, isStateCoreMessage, isStateScratchMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, rulesMessage, SKILL_PROMPT_MESSAGE_TYPE, skillInvocationName, STATE_UPDATE_TOOL_NAME, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage, windowNoticeMessage } from "../src/messages";
 import { DEFAULT_PARAMS } from "../src/state";
 
 describe("consolidationNudgeMessage", () => {
@@ -19,8 +19,8 @@ describe("consolidationNudgeMessage", () => {
 });
 
 describe("fallbackNoticeMessage", () => {
-	test("is a developer message naming the projection failure reason and the ordinary-context fallback", () => {
-		const head = fallbackNoticeMessage("incomplete-head");
+	test("is a developer message naming the incomplete head and the ordinary-context fallback", () => {
+		const head = fallbackNoticeMessage();
 		expect(head).toEqual({
 			role: "developer",
 			content: expect.stringContaining("the stored head is incomplete"),
@@ -28,15 +28,24 @@ describe("fallbackNoticeMessage", () => {
 		});
 		if (!("content" in head) || typeof head.content !== "string") throw new Error("developer message without text content");
 		expect(head.content).toContain("projection");
+	});
+});
 
-		const pair = fallbackNoticeMessage("unmatched-tool-pair");
-		expect(pair).toEqual({
+describe("degradationNoticeMessage", () => {
+	test("is a developer message naming the empty window, the blocked-or-missing results, the intact state and the re-emit ask", () => {
+		const notice = degradationNoticeMessage();
+		expect(notice).toEqual({
 			role: "developer",
-			content: expect.stringContaining("a tool result does not answer the tool call before it"),
+			content: expect.stringContaining("observation window is empty"),
 			timestamp: expect.any(Number),
 		});
-		if (!("content" in pair) || typeof pair.content !== "string") throw new Error("developer message without text content");
-		expect(pair.content).toContain("projection");
+		if (!("content" in notice) || typeof notice.content !== "string") throw new Error("developer message without text content");
+		expect(notice.content).toContain("blocked");
+		expect(notice.content).toContain("missing");
+		expect(notice.content).toContain("state is intact");
+		expect(notice.content).toContain("Re-emit");
+		// The projection gap never borrows the procedure's degrade wording.
+		expect(notice.content).not.toContain("degrade");
 	});
 });
 

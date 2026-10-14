@@ -5,6 +5,15 @@ import type { AgentMessage, ProjectionFailure } from "./types";
 type ToolResult = Extract<AgentMessage, { role: "toolResult" }>;
 type ResultContent = ToolResult["content"];
 
+// A degraded step's projection (ADR 0005): the stored head is intact but the
+// newest tool pair cannot be built, so the step runs on the head alone. The
+// walk collects pairs newest first, so no pair survives an unbuildable newest
+// pair and the degraded window is empty; the head messages are the stored
+// byte-stable ones, so the cache ceiling is unchanged. Never ordinary history.
+export interface DegradedProjection {
+	head: AgentMessage[];
+}
+
 interface CutPlan {
 	position: number;
 	result: ToolResult;
@@ -54,10 +63,12 @@ function isSkippable(message: AgentMessage): boolean {
 // and content, makes the harness mark it per-call so the durable breakpoint
 // anchors on the newest stable message before it, the last core message.
 // A ProjectionFailure return means no projection: the call gets ordinary
-// context. That is the safe fallback whenever the head is incomplete or
-// provider pairing cannot be established; a wrong prompt is worse than a
-// plain one, and the named reason is what the fallback notice quotes.
-export function project(messages: readonly AgentMessage[], observationBytes: number, observationWindow = 1): AgentMessage[] | ProjectionFailure {
+// context. That is the safe fallback whenever the head is incomplete; a wrong
+// prompt is worse than a plain one, and the reason is what the fallback
+// notice quotes. A DegradedProjection return keeps the head and drops the
+// window: while the head is intact the projection never falls back to
+// ordinary history (ADR 0005).
+export function project(messages: readonly AgentMessage[], observationBytes: number, observationWindow = 1): AgentMessage[] | ProjectionFailure | DegradedProjection {
 	const rules = lastCustom(messages, RULES_MESSAGE_TYPE);
 	const procedureSpec = lastCustom(messages, PROCEDURE_SPEC_MESSAGE_TYPE);
 	const core = lastCustom(messages, STATE_CORE_MESSAGE_TYPE);
@@ -82,9 +93,9 @@ export function project(messages: readonly AgentMessage[], observationBytes: num
 	const last = messages[end - 1]!;
 	if (last.role === "toolResult") {
 		// Walk back over the observation window's tool pairs, newest first. The
-		// newest pair is mandatory: any pairing failure there leaves the call
-		// unprojected. An unpairable older pair only ends the walk, keeping the
-		// pairs collected before it.
+		// newest pair is mandatory: any pairing failure there degrades the step
+		// in place (ADR 0005). An unpairable older pair only ends the walk,
+		// keeping the pairs collected before it.
 		const pairs: AgentMessage[][] = [];
 		let cursor = end;
 		for (let collected = 0; collected < observationWindow; collected++) {
@@ -103,16 +114,16 @@ export function project(messages: readonly AgentMessage[], observationBytes: num
 			}
 			// Every result must answer a toolCall block in the assistant message
 			// right before it; that is what keeps provider pairing intact without
-			// repair. Otherwise fall back to no projection. A call that never got
-			// a result is a history condition the harness handles on its own, so
-			// it is not checked.
+			// repair. An unbuildable newest pair degrades instead of failing. A
+			// call that never got a result is a history condition the harness
+			// handles on its own, so it is not checked here.
 			if (results.length === 0 || pinned?.role !== "assistant") {
-				if (collected === 0) return "unmatched-tool-pair";
+				if (collected === 0) return { head };
 				break;
 			}
 			const callIds = new Set(pinned.content.flatMap((block) => (block.type === "toolCall" ? [block.id] : [])));
 			if (results.some((result) => !callIds.has(result.toolCallId))) {
-				if (collected === 0) return "unmatched-tool-pair";
+				if (collected === 0) return { head };
 				break;
 			}
 			pairs.push([pinned, ...results]);
@@ -142,7 +153,14 @@ export function project(messages: readonly AgentMessage[], observationBytes: num
 		if (cursor >= 0 && messages[cursor]!.role === "assistant") turn.unshift(messages[cursor]!);
 		return [...head, ...turn];
 	}
-	// A trailing assistant message has no observation yet.
+	// A trailing assistant whose calls have no results after them is the shape
+	// a fully blocked batch leaves: the newest pair has no result side, so the
+	// step degrades like any other unbuildable newest pair (ADR 0005). A
+	// text-only reply lost no observation and stays a plain head step.
+	if (last.role === "assistant" && last.content.some((block) => block.type === "toolCall")) {
+		return { head };
+	}
+	// A trailing assistant message with no calls has no observation yet.
 	return head;
 }
 

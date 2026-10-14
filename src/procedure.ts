@@ -1,7 +1,7 @@
 import type { CustomMessagePayload, SessionBeforeCompactEvent, SessionBeforeCompactResult } from "@oh-my-pi/pi-coding-agent";
 import { currentStepCut } from "./branch";
 import type { AgentMessage } from "./types";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, fallbackNoticeMessage, nudgeMessage, renderStateContent, rulesMessage, scratchMessage, windowNoticeMessage } from "./messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, degradationNoticeMessage, fallbackNoticeMessage, nudgeMessage, renderStateContent, rulesMessage, scratchMessage, windowNoticeMessage } from "./messages";
 import { pairTag, project } from "./projection";
 import { applyPatch, splitState } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
@@ -36,8 +36,11 @@ export interface Procedure {
 	// instead of re-evaluating or duplicating nudges.
 	nudgedAt: number;
 	nudgesMemo: AgentMessage[];
-	// Whether the latest provider call carried the stored head. A step without
-	// the stored head does not count as idle. The first step runs before the
+	// Whether the latest provider call was a normal projection carrying the
+	// stored head. A fallback step sets it false because the rules were not in
+	// its prompt; a degraded step sets it false too, because the step is
+	// policy-neutral (ADR 0005): the degradation moves no counter, though the
+	// reply itself still folds normally. The first step runs before the
 	// engage asides land but has seen the rules through the before_agent_start
 	// delivery; the step after a compaction can run before the re-sent head
 	// lands, and there the model truly has not seen the rules.
@@ -96,7 +99,9 @@ export function recordReply(procedure: Procedure, reply: { patches: unknown[]; h
 }
 
 // A step the model spent without editing its state. A step whose prompt
-// carried no stored head does not count: the rules were not in its prompt.
+// carried no stored head does not count: the rules were not in its prompt. A
+// degraded step does not count either: the degradation is policy-neutral
+// (ADR 0005), the reply's own validity is judged elsewhere as usual.
 function idleStep(procedure: Procedure): StepOutcome {
 	if (!procedure.projected) return { kind: "none" };
 	procedure.idle += 1;
@@ -183,20 +188,34 @@ function pendingNudges(procedure: Procedure): AgentMessage[] {
 // — and append the turn's nudges. An unprojected step keeps the ordinary
 // context and carries the fallback notice once per episode: the first
 // unprojected step latches fallbackNoticed and rides the notice, later ones
-// return undefined untouched, and a projected step re-arms the latch. The
-// whole prompt is never memoized because a same-step context re-run after a
-// compaction must rebuild from the new messages; only the nudge memo, which
-// is not stale-prone, is. The projected flag, the notice latch, the nudge
-// memo and its step key are private machinery: a caller cannot note without
-// nudging or nudge without noting, so the note-before-nudge ordering the
-// two-call seam needed is unstateable from outside.
+// return undefined untouched, and a projected step re-arms the latch. A
+// degraded step (ADR 0005) takes the middle road: the head is intact, so its
+// prompt is the head plus the degradation notice, never ordinary history, and
+// it stays policy-neutral — projected goes false, so the reply moves no
+// counter by way of the degradation and no policy nudge rides. The
+// degradation notice has no latch: it rides every degraded step, and the
+// first projected step is its re-arm. The whole prompt is never memoized
+// because a same-step context re-run after a compaction must rebuild from the
+// new messages; only the nudge memo, which is not stale-prone, is. The
+// projected flag, the notice latch, the nudge memo and its step key are
+// private machinery: a caller cannot note without nudging or nudge without
+// noting, so the note-before-nudge ordering the two-call seam needed is
+// unstateable from outside.
 export function stepPrompt(procedure: Procedure, messages: AgentMessage[]): AgentMessage[] | undefined {
-	const projected = project(messages, procedure.params.observationBytes, procedure.params.observationWindow);
-	if (typeof projected === "string") {
+	const projection = project(messages, procedure.params.observationBytes, procedure.params.observationWindow);
+	if (typeof projection === "string") {
 		procedure.projected = false;
 		if (procedure.fallbackNoticed) return undefined;
 		procedure.fallbackNoticed = true;
-		return [...messages, fallbackNoticeMessage(projected)];
+		return [...messages, fallbackNoticeMessage()];
+	}
+	// Degraded: head plus the degradation notice and nothing else. The head
+	// reaching the prompt re-arms the fallback latch, the way a projected
+	// step does.
+	if ("head" in projection) {
+		procedure.projected = false;
+		procedure.fallbackNoticed = false;
+		return [...projection.head, degradationNoticeMessage()];
 	}
 	procedure.projected = true;
 	procedure.fallbackNoticed = false;
@@ -204,13 +223,13 @@ export function stepPrompt(procedure: Procedure, messages: AgentMessage[]): Agen
 	// model's window precedes the policy asks built on it. The projected
 	// prompt's tool results are exactly the projected window, and the tags
 	// re-mint from the tool call ids, so no window state crosses the seam.
-	const windowed = projected.filter((message): message is Extract<AgentMessage, { role: "toolResult" }> => message.role === "toolResult");
+	const windowed = projection.filter((message): message is Extract<AgentMessage, { role: "toolResult" }> => message.role === "toolResult");
 	const notice = windowed.length > 0
 		? [windowNoticeMessage(windowed.map((result) => ({ tag: pairTag(result.toolCallId), toolName: result.toolName })))]
 		: [];
 	const nudges = pendingNudges(procedure);
 	const tail = [...notice, ...nudges];
-	return tail.length > 0 ? [...projected, ...tail] : projected;
+	return tail.length > 0 ? [...projection, ...tail] : projection;
 }
 
 // The current state split into its two stored partitions, derived from the

@@ -1,9 +1,10 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
+import { STATE_UPDATE_TOOL_NAME } from "../src/messages";
 import { loadStateSchema } from "../src/state";
 import { fakeOmp } from "./fake-session";
-import { engageAsideTypes, engagedSession, makeSkillSet, nudgeIn, procedureSchema, smallcapSchema } from "./harness";
+import { engageAsideTypes, engagedSession, makeSkillSet, nudgeIn, patchStep, procedureSchema, smallcapSchema } from "./harness";
 
 // The real bundled schema, loaded from the repo so a change to its x-state
 // window flows into this suite.
@@ -212,4 +213,47 @@ describe("omp-skill-state projection (context seam)", () => {
 		expect(loaded.params.stateBytes).toBe(32768);
 		expect(loaded.params.idleSteps).toBe(8);
 	});
+
+	// The wiring witness for the no-raw-history claim (ADR 0005): a blocked
+	// batch leaves its calls unanswered, and the next step's prompt is the
+	// head plus the degradation notice, never the ordinary transcript.
+	test("engaged: a blocked batch degrades the next step in place, head plus notice, and recovery projects normally", async () => {
+		const { s } = await engagedSession([procedure]);
+		await s.step("the first step lands the head");
+
+		// An invalid patch co-batched with a read: the fold refuses the step,
+		// so the tool_call handler blocks every call and no result is stored.
+		await s.step("patching", patchStep({ goal: 42 }, ["read"]));
+		expect(s.blocked.map((call) => call.toolName)).toEqual([STATE_UPDATE_TOOL_NAME, "read"]);
+
+		const degraded = await s.step("re-emitting");
+		if (degraded === undefined) throw new Error("the degraded step returned no prompt");
+		expect(degraded).toHaveLength(5);
+		expect(headCustomTypes(degraded)).toEqual(engageAsideTypes);
+		const notices = nudgeIn(degraded);
+		expect(notices).toHaveLength(1);
+		expect(String(notices[0]!.content)).toContain("observation window is empty");
+		expect(degraded.some((message) => typeof message === "object" && message !== null && "role" in message && message.role === "toolResult")).toBe(false);
+
+		// The re-emitted patch is valid, and the step after it projects a
+		// normal window again: the window notice, not the degradation notice.
+		await s.step("recovering", patchStep({ goal: "x" }));
+		const recovered = await s.step("reading");
+		if (recovered === undefined) throw new Error("the recovered step returned no prompt");
+		const recoveredNotices = nudgeIn(recovered);
+		expect(recoveredNotices).toHaveLength(1);
+		expect(String(recoveredNotices[0]!.content)).toContain("window oldest");
+	});
 });
+
+// The customType list of a prompt's messages, undefined where the message is
+// not a custom message. Narrowed field by field: the prompt arrives as
+// unknown[] from the fake.
+function headCustomTypes(prompt: unknown[]): (string | undefined)[] {
+	return prompt.map((message) => {
+		if (typeof message !== "object" || message === null) return undefined;
+		if (!("role" in message) || message.role !== "custom") return undefined;
+		if (!("customType" in message) || typeof message.customType !== "string") return undefined;
+		return message.customType;
+	});
+}

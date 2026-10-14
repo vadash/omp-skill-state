@@ -32,10 +32,11 @@ Call it as a native tool call; do not redirect writes through xd:// devices or a
 
 Merge semantics: a non-null value sets its key, null deletes its key, keys absent from the object are left untouched. Arrays accept the complete array (set whole) or the root operators, which edit items without resending the rest:
 
+{"patch": {"plan": ["step 1", "step 2"]}}
 {"patch": {"$append": {"findings": ["one new item"]}, "next_step": "Write HTML report"}}
 {"patch": {"$remove": {"findings": ["the item to retire"]}}}
 
-$append and $remove are root keys of the patch, each mapping state keys to item arrays. One patch cannot both set and operate on a key, or both append and remove one key; any other $-prefixed root key is rejected as an unknown operator.
+$append and $remove are root keys of the patch, each mapping state keys to item arrays. To replace an array entirely, assign it directly: {"plan": [...]}. One patch cannot both set and operate on a key, or both append and remove one key; any other $-prefixed root key is rejected as an unknown operator.
 
 Send only the keys that change.
 

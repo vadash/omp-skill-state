@@ -89,7 +89,8 @@ skills/<name>/
   "properties": {
     "working_dir": { "type": "string" },
     "discovered_flags": { "type": "array", "items": { "type": "string" } },
-    "tested_hypotheses": { "type": "array", "items": { "type": "string" } }
+    "tested_hypotheses": { "type": "array", "items": { "type": "string" } },
+    "knowledge": { "type": "object", "additionalProperties": true }
   },
   "additionalProperties": true
 }
@@ -99,7 +100,7 @@ Rules:
 
 - The top level must be an object.
 - Types used: `string`, `number`, `boolean`, `array`, `object`, `null`.
-- `additionalProperties` defaults to `true`, so a procedure can carry keys the schema does not name.
+- `additionalProperties` accepts `true`, `false` or a schema. It defaults to `true`, so a procedure can carry keys the schema does not name; `false` rejects undeclared keys; a schema validates every undeclared member against itself exactly like a declared key, with errors naming the member path (`knowledge.db_port`). Hazard keys, null deletion and all-or-nothing validation are unchanged for members.
 - Optional `x-state` block for runtime parameters:
 
 ```
@@ -118,6 +119,8 @@ Rules:
 The schema is authored once per domain, not per task. A skill without `state.schema.json` is an ordinary skill and never engages.
 
 `x-state.volatile` names the declared keys expected to change on most steps. They ride in the scratch state; every other declared key stays in the state core (sections 6 and 7). Non-string entries of the list are dropped. Without an explicit list the runtime applies a heuristic that protects the cache prefix: array-typed declared keys and the planning keys (`plan`, `next_step`, `findings`, `open_questions`, `scratch`) are volatile, and every other declared key is core.
+
+An object-typed declared key with no properties and open `additionalProperties` — the example's `knowledge` — is the knowledge bag (ADR 0006): it admits any JSON member, so a skill holds stable discovered facts without pre-enumerating their keys, and being declared and non-volatile it takes the state core, where its bytes cache and its object merge accrues facts key-wise without re-emission. A skill types the bag's members when it wants to by giving `additionalProperties` a schema; declaring anticipated discovery-array keys and leaving them off the volatile list freezes them into the core the same way.
 
 ## 6. Execution state
 
@@ -140,7 +143,7 @@ Validation, on every patch, before merge:
 - Valid JSON object, or the patch is rejected.
 - Every key present in the schema validates against its declared type — null excepted, per the deletion rule above — or the patch is rejected. Null is a deletion only at the key level: an array element's null is a value and must satisfy the `items` schema like any other element. An operator payload validates like any value of its target key: item-wise against the array's `items` schema when the key declares one.
 - The operators are root keys of the patch. `$append` and `$remove` each map state keys to item arrays; a root key that is both set and operated, or both appended and removed, rejects — one key carries one write per patch. Any other `$`-prefixed root key rejects as an unknown operator: the `$` namespace is reserved. An operator may target an undeclared key, where the payload only has to be an array; operator-shaped objects below the patch root are plain data.
-- Unknown keys are accepted when `additionalProperties` is true; their values are not type-checked, but the banned shapes below still hold inside them.
+- Unknown keys are accepted when `additionalProperties` is true or absent; their values are not type-checked, but the banned shapes below still hold inside them. When `additionalProperties` is a schema, each undeclared member validates against it like a declared key, member path in the error; a member's null is still the deletion, and the hazard keys are still rejected first.
 - The keys `__proto__`, `constructor` and `prototype` are rejected outright, at every depth — declared or not.
 - A schema type this runtime does not read (for example an array-valued `type`, or a bogus value in hand-written JSON) rejects the patch with an unsupported-type error rather than passing silently.
 - A rejected patch changes nothing. The runtime does not partially apply.

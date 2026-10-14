@@ -218,6 +218,55 @@ describe("validatePatch unknown keys", () => {
 	});
 });
 
+describe("validatePatch additionalProperties schema", () => {
+	const bag: StateSchema = {
+		type: "object",
+		properties: { knowledge: { type: "object", additionalProperties: { type: "string" } } },
+	};
+
+	test("an undeclared member matching the schema passes", () => {
+		expect(validatePatch({ knowledge: { framework: "bun" } }, bag)).toBeNull();
+	});
+
+	test("a member that fails the schema rejects, naming the member path", () => {
+		expect(validatePatch({ knowledge: { db_port: 5432 } }, bag)).toBe('state key "knowledge.db_port" must be a string (was number)');
+	});
+
+	test("a typeless member schema still bans the shapes no schema catches", () => {
+		const loose: StateSchema = {
+			type: "object",
+			properties: { knowledge: { type: "object", additionalProperties: {} } },
+		};
+		const wired = JSON.parse('{"knowledge": {"route": {"__proto__": {}}}}') as ExecutionState;
+		expect(validatePatch(wired, loose)).toBe('invalid state key "knowledge.route.__proto__"');
+	});
+
+	test("explicit false still rejects undeclared members", () => {
+		const closed: StateSchema = {
+			type: "object",
+			properties: { knowledge: { type: "object", additionalProperties: false } },
+		};
+		expect(validatePatch({ knowledge: { db_port: 5432 } }, closed)).toBe('unknown state key "knowledge.db_port"');
+	});
+
+	test("open default unchanged: any member passes under an open bag", () => {
+		const open: StateSchema = {
+			type: "object",
+			properties: { knowledge: { type: "object", additionalProperties: true } },
+		};
+		expect(validatePatch({ knowledge: { db_port: 5432, flags: ["a"], nested: { deep: true } } }, open)).toBeNull();
+	});
+
+	test("hazard keys stay banned inside bag members under a member schema", () => {
+		const wired = JSON.parse('{"knowledge": {"__proto__": {}}}') as ExecutionState;
+		expect(validatePatch(wired, bag)).toBe('invalid state key "knowledge.__proto__"');
+	});
+
+	test("a null member is a deletion, not a value to validate", () => {
+		expect(validatePatch({ knowledge: { db_port: null } }, bag)).toBeNull();
+	});
+});
+
 describe("validatePatch top level", () => {
 	const schema: StateSchema = { type: "object", properties: {} };
 

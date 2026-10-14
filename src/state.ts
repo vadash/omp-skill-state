@@ -11,7 +11,7 @@ export interface JsonSchema {
 	type?: "string" | "number" | "boolean" | "array" | "object" | "null";
 	properties?: Record<string, JsonSchema>;
 	items?: JsonSchema;
-	additionalProperties?: boolean;
+	additionalProperties?: boolean | JsonSchema;
 	[k: string]: unknown;
 }
 
@@ -180,10 +180,17 @@ function validateObject(obj: Record<string, unknown>, schema: JsonSchema, path: 
 		if (obj[key] === null) continue;
 		const sub = properties[key];
 		if (sub === undefined) {
-			// additionalProperties defaults to open, so only an explicit false rejects.
-			if (schema.additionalProperties === false) return `unknown state key "${path ? `${path}.${key}` : key}"`;
-			// An undeclared value's subtree is walked by no schema, so the
-			// banned shapes are enforced here directly.
+			const addl = schema.additionalProperties;
+			if (addl === false) return `unknown state key "${path ? `${path}.${key}` : key}"`;
+			// A schema in additionalProperties types the undeclared member like
+			// a declared key (the knowledge bag, ADR 0006). True or absent stays
+			// open: the member's subtree is walked by no schema, so the banned
+			// shapes are enforced here directly.
+			if (isPlainObject(addl)) {
+				const error = validateValue(obj[key], addl, path ? `${path}.${key}` : key);
+				if (error !== null) return error;
+				continue;
+			}
 			const error = checkDeepPatch(obj[key], path ? `${path}.${key}` : key);
 			if (error !== null) return error;
 			continue;

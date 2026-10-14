@@ -19,7 +19,7 @@ Loop:
 1. Read the state. `plan` holds the remaining actions in order; its front is the next one.
 2. Set `next_step` to the single action this step performs.
 3. Do that action.
-4. Record the outcome: facts into `findings`, new requirements into `constraints`, what you still do not know into `open_questions`, and the remaining actions into `plan`. One string per item, phrased to stand alone.
+4. Record the outcome: facts into `findings`, new requirements into `constraints`, what you still do not know into `open_questions`, and the remaining actions into `plan`. One string per item, phrased to stand alone. A stable discovered fact that later steps only read — a version, a build command, a port, a route, an environment layout — goes into `knowledge` instead, one member per fact, named so the fact stands alone: `{"knowledge": {"db_port": 5432}}`. `knowledge` merges key-wise and rides in the state core, so writing one member never re-sends the others and the cached prefix holds.
 5. Return to step 1.
 
 Drop findings that later facts supersede: the state holds what is true now, not a log of what you did.
@@ -37,5 +37,6 @@ Field meanings:
 - `findings`: established facts only. No plans, no speculation.
 - `open_questions`: what you still do not know to finish the task. Ordered; pop from the front.
 - `next_step`: the one action the current step performs. Overwritten every step.
+- `knowledge`: stable discovered facts, one member per fact. Members stay until a later fact supersedes them; a `null` member deletes one.
 
-A task may need keys the schema does not name. Add them; the fields above stay.
+A task may need keys the schema does not name. Add them; the fields above stay. Keep anything that changes on most steps out of the core: a growing list belongs in a volatile array key (`findings`), while a list that has frozen into stable reference — the routes of a finished recon — is worth declaring in the schema as an ordinary array key left off the `volatile` list, so once frozen it caches in the core beside `knowledge`.

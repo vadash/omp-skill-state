@@ -418,7 +418,7 @@ describe("validatePatch $append", () => {
 	});
 
 	test("a non-array $append payload is rejected", () => {
-		expect(validatePatch({ "$append": { findings: "a" } }, schema)).toBe('state key "$append.findings" must be an array of items');
+		expect(validatePatch({ "$append": { findings: "a" } }, schema)).toBe('state key "$append.findings" must be an array of items, e.g. {"$append": {"findings": [items]}}');
 	});
 
 	test("a null element is a value, not a deletion, and must satisfy the items schema", () => {
@@ -429,7 +429,7 @@ describe("validatePatch $append", () => {
 
 	test("a malformed $append on an undeclared key is rejected instead of merging literally", () => {
 		const open: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
-		expect(validatePatch({ "$append": { extra: "x" } }, open)).toBe('state key "$append.extra" must be an array of items');
+		expect(validatePatch({ "$append": { extra: "x" } }, open)).toBe('state key "$append.extra" must be an array of items, e.g. {"$append": {"extra": [items]}}');
 	});
 
 	test("$append merges onto the current array instead of replacing it", () => {
@@ -472,7 +472,7 @@ describe("validatePatch $remove", () => {
 	});
 
 	test("a non-array $remove payload is rejected", () => {
-		expect(validatePatch({ "$remove": { findings: "a" } }, schema)).toBe('state key "$remove.findings" must be an array of items');
+		expect(validatePatch({ "$remove": { findings: "a" } }, schema)).toBe('state key "$remove.findings" must be an array of items, e.g. {"$remove": {"findings": [items]}}');
 	});
 
 	test("a null element is a value, not a deletion, and must satisfy the items schema", () => {
@@ -481,7 +481,7 @@ describe("validatePatch $remove", () => {
 
 	test("a malformed $remove on an undeclared key is rejected instead of merging literally", () => {
 		const open: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
-		expect(validatePatch({ "$remove": { extra: "x" } }, open)).toBe('state key "$remove.extra" must be an array of items');
+		expect(validatePatch({ "$remove": { extra: "a" } }, open)).toBe('state key "$remove.extra" must be an array of items, e.g. {"$remove": {"extra": [items]}}');
 	});
 
 	test("$remove deletes matching items by value and preserves the order of the rest", () => {
@@ -555,7 +555,7 @@ describe("validatePatch root operators", () => {
 
 	test("a root key cannot be both $appended and $removed in one patch", () => {
 		expect(validatePatch({ "$append": { findings: ["a"] }, "$remove": { findings: ["b"] } }, schema)).toBe(
-			'state key "findings" cannot be both $appended and $removed in one patch; keep only one operator',
+			'state key "findings" cannot be both $appended and $removed in one patch; keep only one operator, e.g. {"$append": {"findings": [items]}}',
 		);
 	});
 
@@ -593,8 +593,8 @@ describe("validatePatch root operators", () => {
 	});
 
 	test("an operator payload must be an object mapping state keys to item arrays", () => {
-		expect(validatePatch({ "$append": ["a"] }, schema)).toBe('state key "$append" must be an object mapping state keys to item arrays');
-		expect(validatePatch({ "$remove": { extra: "a" } }, schema)).toBe('state key "$remove.extra" must be an array of items');
+		expect(validatePatch({ "$append": ["a"] }, schema)).toBe('state key "$append" must be an object mapping state keys to item arrays, e.g. {"$append": {"findings": [items]}}');
+		expect(validatePatch({ "$remove": { extra: "a" } }, schema)).toBe('state key "$remove.extra" must be an array of items, e.g. {"$remove": {"extra": [items]}}');
 	});
 });
 

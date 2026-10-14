@@ -82,7 +82,7 @@ The per-call developer line appended after the observation window each step, lis
 _Avoid_: expiry line, TTL banner, watermark
 
 **Degraded step**:
-A step whose newest tool pair cannot be paired. The projection sends the head, the complete pairs that survive, and a degradation notice riding that step; the raw transcript is never sent while the head exists. The degradation itself advances neither the retry counter nor the idle count. Only a missing head falls back to the ordinary session.
+A step whose newest tool pair cannot be paired. The projection sends the head and a degradation notice riding that step — the walk collects pairs newest first, so an unbuildable newest pair leaves no window to send — and the raw transcript is never sent while the head exists. The degradation itself advances neither the retry counter nor the idle count. Only a missing head falls back to the ordinary session.
 _Avoid_: fallback step, raw-history step
 
 **Step**:

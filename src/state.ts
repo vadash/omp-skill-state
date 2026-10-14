@@ -134,7 +134,7 @@ function validateRootOperators(patch: Record<string, unknown>, schema: StateSche
 			return `unknown state patch operator "${key}"; the operators are $append and $remove, e.g. {"$append": {"findings": ["item"]}}`;
 		}
 		const map = patch[key];
-		if (!isPlainObject(map)) return `state key "${key}" must be an object mapping state keys to item arrays`;
+		if (!isPlainObject(map)) return `state key "${key}" must be an object mapping state keys to item arrays, e.g. {"${key}": {"findings": [items]}}`;
 		for (const target of Object.keys(map)) {
 			if (isHazardKey(target)) return `invalid state key "${key}.${target}"`;
 		}
@@ -142,7 +142,7 @@ function validateRootOperators(patch: Record<string, unknown>, schema: StateSche
 	}
 	for (const target of appended) {
 		if (sets.has(target)) return `state key "${target}" cannot be both set and $appended in one patch; emit only {"$append": {"${target}": [items]}}`;
-		if (removed.includes(target)) return `state key "${target}" cannot be both $appended and $removed in one patch; keep only one operator`;
+		if (removed.includes(target)) return `state key "${target}" cannot be both $appended and $removed in one patch; keep only one operator, e.g. {"$append": {"${target}": [items]}}`;
 	}
 	for (const target of removed) {
 		if (sets.has(target)) return `state key "${target}" cannot be both set and $removed in one patch; emit only {"$remove": {"${target}": [items]}}`;
@@ -151,7 +151,7 @@ function validateRootOperators(patch: Record<string, unknown>, schema: StateSche
 		const map = patch[op] as Record<string, unknown>;
 		for (const target of op === "$append" ? appended : removed) {
 			const payload = map[target];
-			if (!Array.isArray(payload)) return `state key "${op}.${target}" must be an array of items`;
+			if (!Array.isArray(payload)) return `state key "${op}.${target}" must be an array of items, e.g. {"${op}": {"${target}": [items]}}`;
 			const sub = properties[target];
 			const error = sub === undefined ? checkDeepPatch(payload, `${op}.${target}`) : validateValue(payload, sub, `${op}.${target}`);
 			if (error !== null) return error;

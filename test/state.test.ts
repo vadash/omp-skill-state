@@ -543,32 +543,32 @@ describe("validatePatch root operators", () => {
 
 	test("a root key cannot be both set and $appended in one patch", () => {
 		expect(validatePatch({ goal: "x", "$append": { goal: ["a"] } }, schema)).toBe(
-			'state key "goal" cannot be both set and $appended in one patch',
+			'state key "goal" cannot be both set and $appended in one patch; emit only {"$append": {"goal": [items]}}',
 		);
 	});
 
 	test("a root key cannot be both set and $removed in one patch", () => {
 		expect(validatePatch({ findings: ["a"], "$remove": { findings: ["a"] } }, schema)).toBe(
-			'state key "findings" cannot be both set and $removed in one patch',
+			'state key "findings" cannot be both set and $removed in one patch; emit only {"$remove": {"findings": [items]}}',
 		);
 	});
 
 	test("a root key cannot be both $appended and $removed in one patch", () => {
 		expect(validatePatch({ "$append": { findings: ["a"] }, "$remove": { findings: ["b"] } }, schema)).toBe(
-			'state key "findings" cannot be both $appended and $removed in one patch',
+			'state key "findings" cannot be both $appended and $removed in one patch; keep only one operator',
 		);
 	});
 
 	test("a null write still collides with an operator on the same key", () => {
 		expect(validatePatch({ goal: null, "$append": { goal: ["a"] } }, schema)).toBe(
-			'state key "goal" cannot be both set and $appended in one patch',
+			'state key "goal" cannot be both set and $appended in one patch; emit only {"$append": {"goal": [items]}}',
 		);
 	});
 
 	test("an unknown $-prefixed root key rejects as an unknown operator: the namespace is reserved", () => {
-		expect(validatePatch({ "$pop": 1 }, schema)).toBe('unknown state patch operator "$pop"; the operators are $append and $remove');
+		expect(validatePatch({ "$pop": 1 }, schema)).toBe('unknown state patch operator "$pop"; the operators are $append and $remove, e.g. {"$append": {"findings": ["item"]}}');
 		expect(validatePatch({ "$append": { findings: ["a"] }, "$push": { findings: ["b"] } }, schema)).toBe(
-			'unknown state patch operator "$push"; the operators are $append and $remove',
+			'unknown state patch operator "$push"; the operators are $append and $remove, e.g. {"$append": {"findings": ["item"]}}',
 		);
 	});
 

@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { STATE_UPDATE_TOOL_NAME } from "../src/messages";
-import { loadStateSchema } from "../src/state";
+import { applyPatch, loadStateSchema, splitState, validatePatch } from "../src/state";
 import { fakeOmp } from "./fake-session";
 import { engageAsideTypes, engagedSession, makeSkillSet, nudgeIn, patchStep, procedureSchema, smallcapSchema } from "./harness";
 
@@ -212,6 +212,22 @@ describe("omp-skill-state projection (context seam)", () => {
 		expect(loaded.params.observationBytes).toBe(65536);
 		expect(loaded.params.stateBytes).toBe(32768);
 		expect(loaded.params.idleSteps).toBe(8);
+	});
+
+	// The wiring witness for the knowledge-bag claim (issue #31): the bundled
+	// schema's bag is a declared, non-volatile object key, so a patch writing
+	// facts into it validates and the split lands it wholly in the state core.
+	test("the bundled knowledge bag validates and lands in the state core", async () => {
+		const loaded = await loadStateSchema("zstate", [windowProcedure]);
+		if (!loaded.ok) throw new Error("the bundled zstate schema must load");
+		const patch = { knowledge: { db_port: 5432 } };
+
+		expect(validatePatch(patch, loaded.schema)).toBeNull();
+		const applied = applyPatch({}, patch, loaded.schema);
+		if (!applied.ok) throw new Error("the knowledge patch must apply");
+		const { core, scratch } = splitState(applied.state, loaded.schema);
+		expect(core).toEqual({ knowledge: { db_port: 5432 } });
+		expect(scratch).toEqual({});
 	});
 
 	// The wiring witness for the no-raw-history claim (ADR 0005): a blocked

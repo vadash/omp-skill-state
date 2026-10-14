@@ -131,7 +131,7 @@ function validateRootOperators(patch: Record<string, unknown>, schema: StateSche
 			continue;
 		}
 		if (key !== "$append" && key !== "$remove") {
-			return `unknown state patch operator "${key}"; the operators are $append and $remove`;
+			return `unknown state patch operator "${key}"; the operators are $append and $remove, e.g. {"$append": {"findings": ["item"]}}`;
 		}
 		const map = patch[key];
 		if (!isPlainObject(map)) return `state key "${key}" must be an object mapping state keys to item arrays`;
@@ -141,11 +141,11 @@ function validateRootOperators(patch: Record<string, unknown>, schema: StateSche
 		(key === "$append" ? appended : removed).push(...Object.keys(map));
 	}
 	for (const target of appended) {
-		if (sets.has(target)) return `state key "${target}" cannot be both set and $appended in one patch`;
-		if (removed.includes(target)) return `state key "${target}" cannot be both $appended and $removed in one patch`;
+		if (sets.has(target)) return `state key "${target}" cannot be both set and $appended in one patch; emit only {"$append": {"${target}": [items]}}`;
+		if (removed.includes(target)) return `state key "${target}" cannot be both $appended and $removed in one patch; keep only one operator`;
 	}
 	for (const target of removed) {
-		if (sets.has(target)) return `state key "${target}" cannot be both set and $removed in one patch`;
+		if (sets.has(target)) return `state key "${target}" cannot be both set and $removed in one patch; emit only {"$remove": {"${target}": [items]}}`;
 	}
 	for (const op of OPERATORS) {
 		const map = patch[op] as Record<string, unknown>;

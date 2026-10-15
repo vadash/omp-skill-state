@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { announcedSkillNames, consolidationNudgeMessage, degradationNoticeMessage, extractStatePayload, fallbackNoticeMessage, isStateCoreMessage, isStateScratchMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, rulesMessage, SKILL_PROMPT_MESSAGE_TYPE, skillInvocationName, STATE_UPDATE_TOOL_NAME, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage, windowNoticeMessage } from "../src/messages";
+import { announcedSkillNames, consolidationNudgeMessage, degradationNoticeMessage, extractStatePayload, fallbackNoticeMessage, idleNudgeMessage, isStateCoreMessage, isStateScratchMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, rulesMessage, SKILL_PROMPT_MESSAGE_TYPE, skillInvocationName, STATE_UPDATE_TOOL_NAME, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage, windowNoticeMessage } from "../src/messages";
 
 describe("consolidationNudgeMessage", () => {
 	test("is a developer message asking for a state_update consolidation, with no fence, so it never becomes an elide target", () => {
@@ -14,6 +14,21 @@ describe("consolidationNudgeMessage", () => {
 		if (!("content" in nudge) || typeof nudge.content !== "string") throw new Error("developer message without text content");
 		expect(nudge.content).toContain(STATE_UPDATE_TOOL_NAME);
 		expect(nudge.content.split("\n").some((line) => line.trimStart().startsWith("```"))).toBe(false);
+	});
+});
+
+describe("idleNudgeMessage", () => {
+	test("is a developer message naming the quiet run and asking for a state_update record, naming no cutoff and carrying no fence", () => {
+		const ask = idleNudgeMessage(4);
+		expect(ask).toEqual({
+			role: "developer",
+			content: expect.stringContaining("unchanged for 4 consecutive steps"),
+			timestamp: expect.any(Number),
+		});
+		if (!("content" in ask) || typeof ask.content !== "string") throw new Error("developer message without text content");
+		expect(ask.content).toContain(STATE_UPDATE_TOOL_NAME);
+		expect(ask.content).not.toContain("disengage");
+		expect(ask.content.split("\n").some((line) => line.trimStart().startsWith("```"))).toBe(false);
 	});
 });
 

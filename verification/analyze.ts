@@ -166,7 +166,7 @@ function analyze(file: string, titles?: { dir: string; n: number }): void {
 	console.log("\n## summary");
 	const changed = steps.filter((step) => step.changed).length;
 	console.log(`model=${model} steps=${steps.length} projected=${steps.filter((step) => step.projected).length} stateChangedSteps=${changed} stateMessages=${stateMessages} headRules=${headRules} headSpec=${headSpec} shakenEntries=${shaken}`);
-	console.log(`steps after the last stored state: ${stepsSinceState}${stepsSinceState > 1 ? " (past the skill's idleSteps this means the runtime disengaged, or the final state was never stored)" : ""}`);
+	console.log(`steps after the last stored state: ${stepsSinceState}${stepsSinceState > 1 ? " (a quiet run: the runtime raises the idle ask and stays engaged, or the final state was never stored)" : ""}`);
 
 	const projected = steps.filter((step) => step.projected);
 	if (projected.length > 0) {

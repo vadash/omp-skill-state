@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, rulesMessage, scratchMessage } from "../src/messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, idleNudgeMessage, rulesMessage, scratchMessage } from "../src/messages";
 import { commitStep, compactionFor, headMessages, newProcedure, recordReply, stateMessages, stepPrompt } from "../src/procedure";
 import type { Procedure } from "../src/procedure";
 import { DEFAULT_PARAMS } from "../src/state";
@@ -64,6 +64,7 @@ describe("newProcedure", () => {
 			invalidPatches: 0,
 			idle: 0,
 			capNudged: false,
+			idleNudged: false,
 			fallbackNoticed: false,
 			projected: false,
 			step: 0,
@@ -207,28 +208,24 @@ describe("recordReply and idle steps", () => {
 		expect(p.idle).toBe(0);
 
 		if (stepPrompt(p, headWithTurn(p)) === undefined) throw new Error("head did not project");
-		expect(recordReply(p, empty())).toEqual({ kind: "none" });
-		expect(recordReply(p, empty())).toEqual({ kind: "none" });
-		expect(recordReply(p, empty())).toEqual({ kind: "none" });
-		expect(recordReply(p, empty())).toEqual({ kind: "none" });
-		expect(recordReply(p, empty())).toEqual({ kind: "ended", cause: "idle" });
+		for (let i = 0; i < 7; i++) expect(recordReply(p, empty())).toEqual({ kind: "none" });
+		expect(p.idle).toBe(7);
 	});
 
-	test("the idle threshold honours x-state idleSteps", () => {
+	test("a quiet run never ends, however long it goes on", () => {
 		const p = projected({ idleSteps: 2 });
-		expect(recordReply(p, empty())).toEqual({ kind: "none" });
-
-		expect(recordReply(p, empty())).toEqual({ kind: "ended", cause: "idle" });
+		for (let i = 0; i < 6; i++) expect(recordReply(p, empty())).toEqual({ kind: "none" });
+		expect(p.idle).toBe(6);
 	});
 
 	test("an unchanged patch is an idle step too", () => {
 		const p = projected({ idleSteps: 2 }, { goal: "x" });
 		expect(recordReply(p, step({ goal: "x" }))).toEqual({ kind: "none" });
-
-		expect(recordReply(p, step({ goal: "x" }))).toEqual({ kind: "ended", cause: "idle" });
+		expect(recordReply(p, step({ goal: "x" }))).toEqual({ kind: "none" });
+		expect(p.idle).toBe(2);
 	});
 
-	test("a patch of any kind, valid or invalid, breaks an idle run", () => {
+	test("a patch that changes the state, or an invalid one, breaks an idle run", () => {
 		const valid = projected();
 		recordReply(valid, empty());
 		recordReply(valid, empty());
@@ -255,10 +252,8 @@ describe("recordReply and idle steps", () => {
 		expect(p.idle).toBe(1);
 
 		if (stepPrompt(p, headWithTurn(p)) === undefined) throw new Error("head did not project");
-		recordReply(p, empty());
-		recordReply(p, empty());
-		recordReply(p, empty());
-		expect(recordReply(p, empty())).toEqual({ kind: "ended", cause: "idle" });
+		for (let i = 0; i < 5; i++) expect(recordReply(p, empty())).toEqual({ kind: "none" });
+		expect(p.idle).toBe(6);
 	});
 });
 
@@ -318,6 +313,7 @@ describe("stepPrompt nudges", () => {
 
 	// The nudge rides with a build-time timestamp; match the text, not the clock.
 	const consolidationNudge = () => ({ ...consolidationNudgeMessage(), timestamp: expect.any(Number) });
+	const idleAsk = (idle: number) => ({ ...idleNudgeMessage(idle), timestamp: expect.any(Number) });
 
 	test("returns nothing while the state is under the cap and leaves the latch off", () => {
 		const p = projected();
@@ -357,49 +353,95 @@ describe("stepPrompt nudges", () => {
 		expect(nudgesFor(p)).toEqual([consolidationNudge()]);
 	});
 
-	test("the idle warning rides exactly at threshold minus one and resets with a patch", () => {
+	test("no idle ask rides before the threshold", () => {
 		const p = projected({ idleSteps: 3 });
 		recordReply(p, empty());
 		expect(nudgesFor(p)).toEqual([]);
 
 		recordReply(p, empty());
-		const nudged = nudgesFor(p);
-		expect(nudged).toHaveLength(1);
-		const [nudge] = nudged;
-		if (nudge === undefined || !("content" in nudge) || typeof nudge.content !== "string") throw new Error("nudge without text content");
-		expect(nudge.role).toBe("developer");
-		expect(nudge.content).toContain("unchanged for 2 consecutive steps");
-
-		recordReply(p, step({ goal: "x" }));
 		expect(nudgesFor(p)).toEqual([]);
 	});
 
-	test("a fresh cap ask and the idle warning ride on the same step, consolidation first", () => {
-		const p = projected({ stateBytes: 200, idleSteps: 3 }, { blob: "x".repeat(200) });
-		expect(p.capNudged).toBe(true);
+	test("the idle ask rides exactly at the threshold and names the count", () => {
+		const p = projected({ idleSteps: 3 });
+		recordReply(p, empty());
+		recordReply(p, empty());
+		recordReply(p, empty());
 
-		// Under the cap the latch re-arms; over it again the ask is fresh, and
-		// a commit resets the idle run.
-		const shrink = commitStep(p, { blob: "x" });
-		if ("error" in shrink) throw new Error(shrink.error);
+		const nudged = nudgesFor(p);
+		expect(nudged).toEqual([idleAsk(3)]);
+		const [ask] = nudged;
+		if (ask === undefined || !("content" in ask) || typeof ask.content !== "string") throw new Error("ask without text content");
+		expect(ask.role).toBe("developer");
+		expect(ask.content).toContain("unchanged for 3 consecutive steps");
+	});
+
+	test("hands the idle ask out once per episode and is idempotent within the step", () => {
+		const p = projected({ idleSteps: 2 });
+		recordReply(p, empty());
+		recordReply(p, empty());
+
+		// The ask rode on the first prompt past the threshold and latched.
+		expect(nudgesFor(p)).toEqual([idleAsk(2)]);
+		expect(p.idleNudged).toBe(true);
+		// A repeated call in the same step re-serves the same set, never a duplicate.
+		expect(nudgesFor(p)).toEqual([idleAsk(2)]);
+
+		// The next step re-evaluates: the latch holds, so nothing rides again.
 		recordReply(p, empty());
 		expect(nudgesFor(p)).toEqual([]);
+	});
+
+	test("a patch that changes the state, or an invalid one, breaks the idle run and re-arms the ask", () => {
+		const valid = projected({ idleSteps: 2 });
+		recordReply(valid, empty());
+		recordReply(valid, empty());
+		expect(nudgesFor(valid)).toEqual([idleAsk(2)]);
+
+		// A valid changing patch commits and resets the idle run, re-arming the ask.
+		recordReply(valid, step({ goal: "x" }));
+		commit(valid, step({ goal: "x" }));
+		recordReply(valid, empty());
+		expect(nudgesFor(valid)).toEqual([]);
+		recordReply(valid, empty());
+		expect(nudgesFor(valid)).toEqual([idleAsk(2)]);
+
+		// An invalid patch breaks the run too: it resets idle and re-arms.
+		const invalid = projected({ idleSteps: 2 });
+		recordReply(invalid, empty());
+		recordReply(invalid, empty());
+		expect(nudgesFor(invalid)).toEqual([idleAsk(2)]);
+		expect(recordReply(invalid, step({ goal: 42 }))).toEqual({ kind: "block" });
+		expect(invalid.idle).toBe(0);
+		recordReply(invalid, empty());
+		expect(nudgesFor(invalid)).toEqual([]);
+		recordReply(invalid, empty());
+		expect(nudgesFor(invalid)).toEqual([idleAsk(2)]);
+	});
+
+	test("a long quiet run never ends and asks exactly once", () => {
+		const p = projected({ idleSteps: 5 });
+		for (let i = 0; i < 12; i++) {
+			expect(recordReply(p, empty())).toEqual({ kind: "none" });
+			const asks = nudgesFor(p).filter((message) => "content" in message && typeof message.content === "string" && message.content.includes("unchanged for"));
+			expect(asks).toHaveLength(i === 4 ? 1 : 0);
+		}
+	});
+
+	test("a fresh cap ask and the idle ask ride on the same step, consolidation first", () => {
+		const p = projected({ stateBytes: 200, idleSteps: 1 });
 		expect(p.capNudged).toBe(false);
+
+		// The commit puts the state over the cap; the next quiet step is also
+		// the first past the idle threshold (idleSteps 1), so both asks ride
+		// together.
 		const grow = commitStep(p, { blob: "x".repeat(200) });
 		if ("error" in grow) throw new Error(grow.error);
-
-		// Two quiet projected steps bring idle to threshold minus one.
-		recordReply(p, empty());
 		recordReply(p, empty());
 
 		const nudges = nudgesFor(p);
 		expect(nudges).toHaveLength(2);
-		const [capAsk, idleWarn] = nudges;
-		if (capAsk === undefined || idleWarn === undefined || !("content" in idleWarn) || typeof idleWarn.content !== "string") {
-			throw new Error("nudges without text content");
-		}
-		expect(capAsk).toEqual(consolidationNudge());
-		expect(idleWarn.content).toContain("unchanged for 2 consecutive steps");
+		expect(nudges).toEqual([consolidationNudge(), idleAsk(1)]);
 	});
 
 	test("a step whose prompt carried no head neither nudges nor latches", () => {
@@ -533,21 +575,23 @@ describe("stepPrompt window notice", () => {
 		expect(devTexts(out)).toEqual(["tail oldest→newest: #ecd6 read, #eb43 read, #e9b0 read — oldest evict first when the prompt outgrows its budget"]);
 	});
 
-	test("the notice rides before the idle warning at the threshold step", () => {
+	test("the notice rides before the idle ask at the threshold step", () => {
 		const p = procedure({ idleSteps: 3 });
 		const h = headContext(p);
 		stepPrompt(p, [...h, callMsg("t1"), resultMsg("t1", "a")]);
 		recordReply(p, empty());
 		stepPrompt(p, [...h, callMsg("t2"), resultMsg("t2", "b")]);
 		recordReply(p, empty());
+		stepPrompt(p, [...h, callMsg("t3"), resultMsg("t3", "c")]);
+		recordReply(p, empty());
 
-		const out = stepPrompt(p, [...h, callMsg("t3"), resultMsg("t3", "c")]);
+		const out = stepPrompt(p, [...h, callMsg("t4"), resultMsg("t4", "d")]);
 		if (out === undefined) throw new Error("head did not project");
 
 		const texts = devTexts(out);
 		expect(texts).toHaveLength(2);
 		expect(texts[0]).toMatch(/^tail oldest→newest: /);
-		expect(texts[1]).toContain("unchanged for 2 consecutive steps");
+		expect(texts[1]).toContain("unchanged for 3 consecutive steps");
 	});
 
 	test("absent on a user-turn step", () => {

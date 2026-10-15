@@ -14,7 +14,7 @@ const fx = await makeSkillSet({
 	brokenjson: "{ not json",
 	smallcap: JSON.stringify(smallcapSchema),
 	idleproc: JSON.stringify({ ...procedureSchema, "x-state": { idleSteps: 2 } }),
-	warnproc: JSON.stringify({ ...procedureSchema, "x-state": { idleSteps: 3 } }),
+	quietproc: JSON.stringify({ ...procedureSchema, "x-state": { idleSteps: 3 } }),
 });
 afterAll(() => rm(fx.root, { recursive: true, force: true }));
 const {
@@ -24,7 +24,7 @@ const {
 	brokenjson: brokenJson,
 	smallcap: smallProcedure,
 	idleproc: idleProcedure,
-	warnproc: warnProcedure,
+	quietproc: quietProcedure,
 } = fx.skills;
 
 describe("omp-skill-state engage/disengage lifecycle", () => {
@@ -491,40 +491,71 @@ describe("omp-skill-state first-step rules", () => {
 	});
 });
 
-describe("omp-skill-state idle disengage", () => {
-	test("the nudge is per-call: nothing is stored and nothing is sent", async () => {
-		const { s } = await projectingSession(warnProcedure);
+describe("omp-skill-state idle ask", () => {
+	test("a quiet run raises the idle ask once on the projected prompt and stores nothing", async () => {
+		const { s } = await projectingSession(quietProcedure);
 
 		// The step right after the boundary is degraded (the tail is still
-		// empty) and policy-neutral; the two steps after it count idle.
+		// empty) and policy-neutral; the three steps after it count idle, and
+		// the ask rides on the prompt after the third.
 		await s.step("the degraded step after the boundary");
 		await s.step("step 3");
 		await s.step("step 4");
-		const prompt = await s.step("step 5");
+		await s.step("step 5");
+		const prompt = await s.step("step 6");
 		const notices = nudgeIn(prompt);
-		// The window notice rides first, the idle cutoff last.
+		// The window notice rides first, the idle ask last.
 		expect(notices).toHaveLength(2);
 		expect(notices.map((notice) => String(notice.content))).toEqual([
 			expect.stringContaining("tail oldest→newest"),
-			expect.stringContaining("unchanged for 2 consecutive steps"),
+			expect.stringContaining("unchanged for 3 consecutive steps"),
 		]);
-		expect(s.notices).toEqual([...engageNotices("warnproc"), ...disengageNotices("warnproc", "idle for 3 steps")]);
+		// A reminder, not a deadline: the run stays engaged, so no disengage
+		// notice exists and no ask is stored or sent.
+		expect(s.notices).toEqual(engageNotices("quietproc"));
 		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
 		expect(s.storedStates).toEqual([{}]);
 	});
 
-	test("after an idle disengage the step is ordinary", async () => {
-		const { s } = await projectingSession(idleProcedure);
-
-		// Degraded boundary step, then two counted idle steps: the second ends
-		// the procedure.
+	test("a later patch still commits and re-arms the ask", async () => {
+		const { s } = await projectingSession(quietProcedure);
 		await s.step("the degraded step after the boundary");
-		await s.step("step 2");
 		await s.step("step 3");
-		expect(s.notices).toEqual([...engageNotices("idleproc"), ...disengageNotices("idleproc", "idle for 2 steps")]);
+		await s.step("step 4");
+		await s.step("step 5");
 
 		await s.step("recording", patchStep({ goal: "x" }));
 		expect(s.blocked).toEqual([]);
-		expect(s.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
+		expect(s.sends.map((sent) => sent.payload.customType)).toEqual([...engageAsideTypes, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE]);
+		expect(s.storedStates).toEqual([{}, { goal: "x" }]);
+
+		// Quiet again: after idleSteps further idle steps the ask fires once more.
+		await s.step("step 7");
+		await s.step("step 8");
+		await s.step("step 9");
+		const prompt = await s.step("step 10");
+		expect(nudgeIn(prompt).map((notice) => String(notice.content))).toEqual([
+			expect.stringContaining("tail oldest→newest"),
+			expect.stringContaining("unchanged for 3 consecutive steps"),
+		]);
+		expect(s.notices).toEqual(engageNotices("quietproc"));
+	});
+
+	test("a long quiet run stays engaged across many steps and asks exactly once", async () => {
+		const { s } = await projectingSession(idleProcedure);
+
+		await s.step("the degraded step after the boundary");
+		let asks = 0;
+		for (let i = 0; i < 8; i++) {
+			const prompt = await s.step(`quiet step ${i}`);
+			asks += nudgeIn(prompt).filter((notice) => String(notice.content).includes("unchanged for")).length;
+		}
+		expect(asks).toBe(1);
+		expect(s.notices).toEqual(engageNotices("idleproc"));
+
+		// Still engaged: a patch after the long quiet run still commits.
+		await s.step("recording", patchStep({ goal: "x" }));
+		expect(s.blocked).toEqual([]);
+		expect(s.storedStates).toEqual([{}, { goal: "x" }]);
 	});
 });

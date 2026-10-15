@@ -159,20 +159,21 @@ export function extractStatePayload(details: unknown): ExecutionState | undefine
 	return partition;
 }
 
-// The idle warning the model sees one step before the cutoff. Per-call by
-// construction: the context handler appends it to the projected prompt only,
-// so it has no stored counterpart, never anchors the cache breakpoint and is
-// never re-sent from history.
-export function nudgeMessage(idle: number): AgentMessage {
+// The idle ask the model sees after idleSteps consecutive steps without a
+// state change, once per quiet episode. Per-call by construction: the context
+// handler appends it to the projected prompt only, so it has no stored
+// counterpart, never anchors the cache breakpoint and is never re-sent from
+// history. A reminder, never a deadline: it names no consequence.
+export function idleNudgeMessage(idle: number): AgentMessage {
 	return {
 		role: "developer",
-		content: `The execution state has been unchanged for ${idle} consecutive steps. One more step without a state_update patch that changes the state disengages this procedure and returns the session to ordinary history-based execution. If there is anything worth keeping, record it in the state now with a state_update patch.`,
+		content: `The execution state has been unchanged for ${idle} consecutive steps. If there is anything worth keeping, record a meaningful fact in the state now with a state_update patch. This is a reminder, not a deadline.`,
 		timestamp: Date.now(),
 	};
 }
 
 // The ask the model sees while the execution state is over its soft size cap.
-// Per-call by construction, like the idle warning: appended to the projected
+// Per-call by construction, like the idle ask: appended to the projected
 // prompt only, never stored, never re-sent from history.
 export function consolidationNudgeMessage(): AgentMessage {
 	return {

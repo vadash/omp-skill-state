@@ -46,9 +46,8 @@ export default function (pi: ExtensionAPI): void {
 	}
 
 	// The disengage trigger texts, one home per wording so a notice wording
-	// changes in exactly one place; the idle label is parameterized because it
-	// names idleSteps, and the /clear input check reads the same entry it
-	// disengages with.
+	// changes in exactly one place; the /clear input check reads the same
+	// entry it disengages with.
 	const disengageLabels = {
 		new: "/new",
 		resume: "/resume",
@@ -59,7 +58,6 @@ export default function (pi: ExtensionAPI): void {
 		sessionStart: "session start",
 		treeNavigation: "tree navigation",
 		clear: "/clear",
-		idle: (steps: number) => `idle for ${steps} steps`,
 	};
 
 	// The state-write channel (ADR 0002): a strict, zero-approval tool built
@@ -217,8 +215,9 @@ export default function (pi: ExtensionAPI): void {
 		const outcome = recordReply(procedure, { patches, hasPatch: patches.length > 0 });
 		switch (outcome.kind) {
 			case "ended":
-				if (outcome.cause === "degrade") end(ctx, procedure, `degraded after ${procedure.params.retries} invalid patches; running ordinarily`, "warning");
-				else end(ctx, procedure, `disengaged (${disengageLabels.idle(procedure.params.idleSteps)})`);
+				// Degrade is the only ended cause: a quiet run raises the idle ask
+				// and stays engaged.
+				end(ctx, procedure, `degraded after ${procedure.params.retries} invalid patches; running ordinarily`, "warning");
 				break;
 			default:
 				// ok and none need nothing here: the state_update executes commit

@@ -1,7 +1,7 @@
 import type { CustomMessagePayload, SessionBeforeCompactEvent, SessionBeforeCompactResult } from "@oh-my-pi/pi-coding-agent";
 import { currentStepCut } from "./branch";
 import type { AgentMessage } from "./types";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, degradationNoticeMessage, fallbackNoticeMessage, nudgeMessage, renderStateContent, rulesMessage, scratchMessage, windowNoticeMessage } from "./messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, degradationNoticeMessage, fallbackNoticeMessage, idleNudgeMessage, renderStateContent, rulesMessage, scratchMessage, windowNoticeMessage } from "./messages";
 import { pairTag, project } from "./projection";
 import { applyPatch, splitState } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
@@ -25,6 +25,10 @@ export interface Procedure {
 	// episode. pendingNudges latches it when it hands the nudge out; a commit
 	// that lands the state back under the cap re-arms it there.
 	capNudged: boolean;
+	// Whether the idle ask already fired in the current quiet episode.
+	// pendingNudges latches it when it hands the ask out; breakIdle re-arms it
+	// with the counter when the episode ends.
+	idleNudged: boolean;
 	// Whether the fallback notice already fired in the current unprojected
 	// episode. stepPrompt latches it when it hands the notice out; a projected
 	// step ends the episode and re-arms it there.
@@ -50,18 +54,19 @@ export interface Procedure {
 // Every procedure starts with fresh counters, from a new invocation and from a
 // re-derive alike.
 export function newProcedure(name: string, spec: string, schema: StateSchema, params: StateParams, state: ExecutionState): Procedure {
-	return { name, spec, schema, params, state, invalidPatches: 0, idle: 0, capNudged: false, fallbackNoticed: false, projected: false, step: 0, nudgedAt: -1, nudgesMemo: [] };
+	return { name, spec, schema, params, state, invalidPatches: 0, idle: 0, capNudged: false, idleNudged: false, fallbackNoticed: false, projected: false, step: 0, nudgedAt: -1, nudgesMemo: [] };
 }
 
 // What one reply did to the procedure. The factory acts on it: an ok step's
 // patches are committed by the state_update executes later in the same step,
 // an ended procedure is dropped and announced, and the other two need nothing
-// from it.
+// from it. Idleness never ends a procedure, so degrade is the only ended
+// cause.
 export type StepOutcome =
 	| { kind: "none" }
 	| { kind: "ok" }
 	| { kind: "block" }
-	| { kind: "ended"; cause: "degrade" | "idle" };
+	| { kind: "ended"; cause: "degrade" };
 
 // The step policy: validate and merge the reply's state_update patches, and
 // decide what the reply means for the counters. The reply may carry several
@@ -72,14 +77,15 @@ export type StepOutcome =
 // against the state the previous one left. A reply with no
 // state_update call, or whose fold leaves the state as it was, is an idle
 // step; an invalid patch blocks the step and counts toward degrade; a patch
-// of any kind, valid or not, breaks an idle run.
+// that changes the state, or an invalid one, breaks an idle run.
 export function recordReply(procedure: Procedure, reply: { patches: unknown[]; hasPatch: boolean }): StepOutcome {
 	// One reply is one step; the nudge memo is keyed to this counter.
 	procedure.step += 1;
 	if (!reply.hasPatch || reply.patches.length === 0) {
 		procedure.pendingError = undefined;
 		procedure.invalidPatches = 0;
-		return idleStep(procedure);
+		idleStep(procedure);
+		return { kind: "none" };
 	}
 	let candidateState = procedure.state;
 	let anyChanged = false;
@@ -93,20 +99,22 @@ export function recordReply(procedure: Procedure, reply: { patches: unknown[]; h
 	procedure.invalidPatches = 0;
 	// A fold that leaves the state as it was is an empty patch: there is
 	// nothing to commit, and the model did not edit its state this step.
-	if (!anyChanged) return idleStep(procedure);
-	procedure.idle = 0;
+	if (!anyChanged) {
+		idleStep(procedure);
+		return { kind: "none" };
+	}
+	breakIdle(procedure);
 	return { kind: "ok" };
 }
 
 // A step the model spent without editing its state. A step whose prompt
 // carried no stored head does not count: the rules were not in its prompt. A
 // degraded step does not count either: the degradation is policy-neutral
-// (ADR 0005), the reply's own validity is judged elsewhere as usual.
-function idleStep(procedure: Procedure): StepOutcome {
-	if (!procedure.projected) return { kind: "none" };
+// (ADR 0005), the reply's own validity is judged elsewhere as usual. An idle
+// step never ends anything; it only advances the counter the idle ask reads.
+function idleStep(procedure: Procedure): void {
+	if (!procedure.projected) return;
 	procedure.idle += 1;
-	if (procedure.idle >= procedure.params.idleSteps) return { kind: "ended", cause: "idle" };
-	return { kind: "none" };
 }
 
 // The pending error blocks the step's tool calls. On the retries-th
@@ -115,17 +123,25 @@ function idleStep(procedure: Procedure): StepOutcome {
 function invalidPatch(procedure: Procedure, error: string): StepOutcome {
 	procedure.pendingError = error;
 	procedure.invalidPatches += 1;
-	procedure.idle = 0;
+	breakIdle(procedure);
 	if (procedure.invalidPatches >= procedure.params.retries) return { kind: "ended", cause: "degrade" };
 	return { kind: "block" };
 }
 
-// The one write path for a merged state: every commit goes through this, so
-// the state/idle reset policy has a single home and can never diverge between
-// call sites.
+// The one way a quiet episode ends: a patch that changed the state, or an
+// invalid one. The counter and the ask's latch re-arm together, so the ask
+// can never fire again without idleSteps fresh quiet steps (spec section 11).
+function breakIdle(procedure: Procedure): void {
+	procedure.idle = 0;
+	procedure.idleNudged = false;
+}
+
+// The one write path for a merged state: every commit goes through this. A
+// commit is a patch that changed the state, so it breaks the quiet episode
+// through breakIdle, like every other episode breaker.
 function commitPatch(procedure: Procedure, state: ExecutionState): void {
 	procedure.state = state;
-	procedure.idle = 0;
+	breakIdle(procedure);
 }
 
 // The state_update execute's whole policy: apply the call's patch to the
@@ -157,10 +173,10 @@ function overCap(procedure: Procedure): boolean {
 }
 
 // The turn-scoped nudges the next provider call should carry, in delivery
-// order: the consolidation ask first, the idle cutoff last. Only for a call
+// order: the consolidation ask first, the idle ask last. Only for a call
 // whose prompt carries the stored head. Idempotent within a step: repeated
 // calls before the next reply re-serve the memo, so a re-run context handler
-// cannot duplicate nudges or re-latch the cap ask.
+// cannot duplicate nudges or re-latch an ask.
 function pendingNudges(procedure: Procedure): AgentMessage[] {
 	if (procedure.nudgedAt === procedure.step) return procedure.nudgesMemo;
 	const nudges: AgentMessage[] = [];
@@ -172,11 +188,13 @@ function pendingNudges(procedure: Procedure): AgentMessage[] {
 	} else {
 		procedure.capNudged = false;
 	}
-	// The idle cutoff rides at threshold minus one; idle > 0 keeps a skill
-	// that sets idleSteps to 1 from nudging on every single step, where no
-	// quiet step could ever precede the cutoff.
-	if (procedure.projected && procedure.idle > 0 && procedure.idle === procedure.params.idleSteps - 1) {
-		nudges.push(nudgeMessage(procedure.idle));
+	// The idle ask rides the first prompt after idleSteps consecutive idle
+	// steps, once per quiet episode: idleNudged latches when it is handed out,
+	// and breakIdle re-arms it with the counter when the episode ends. A
+	// reminder, never a deadline: the run continues either way.
+	if (procedure.projected && procedure.idle >= procedure.params.idleSteps && !procedure.idleNudged) {
+		procedure.idleNudged = true;
+		nudges.push(idleNudgeMessage(procedure.idle));
 	}
 	procedure.nudgedAt = procedure.step;
 	procedure.nudgesMemo = nudges;

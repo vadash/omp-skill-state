@@ -1,6 +1,6 @@
 # Skill State
 
-A runtime for omp that executes a procedural skill against an explicit execution state instead of a growing conversation. It exists because prompt size and stale facts both grow with execution length in ordinary history-based runtimes.
+A runtime for omp that executes a procedural skill against an explicit execution state and a bounded window on the conversation, instead of a growing transcript. It exists because prompt size and stale facts both grow with execution length in ordinary history-based runtimes.
 
 ## Language
 
@@ -27,6 +27,10 @@ _Avoid_: prompt, instructions, spec
 **State schema**:
 The declarative shape a procedure's execution state must satisfy, shipped beside the skill as `state.schema.json`.
 _Avoid_: type, contract, model
+
+**Default schema**:
+The schema a procedure skill gets when its state file declares no properties: a general-purpose set of keys plus a knowledge bag, so a skill can opt in without authoring its own.
+_Avoid_: fallback schema, auto schema
 
 **Execution state**:
 The structured value `t` holding everything the procedure needs from the past. It is the only thing that survives a step.
@@ -65,13 +69,29 @@ _Avoid_: memory, fact store, dict
 The two stored messages holding one committed execution state: the state core followed immediately by the scratch state. A scratch closes the pair its preceding core opened.
 _Avoid_: checkpoint, checkpoint pair, head pair
 
+**Durable mirror**:
+The entry `pi.appendEntry` writes for each committed state. It never enters the model's prompt; re-derive reads it and repairs a stored state message that disagrees with it.
+_Avoid_: backup, journal, sidecar
+
 **Observation**:
-The environment output for the current step, `Oₜ`. It is the only past-free material the model receives besides the spec and the state.
+The environment output for the current step, `Oₜ`. It is the newest part of the tail — the most recent stored messages in the prompt.
 _Avoid_: result, output, feedback
 
-**Observation window**:
-The number of most recent tool pairs the projection pins as the step's observation, under one shared byte cap.
-_Avoid_: history window, result buffer
+**Tail**:
+The most recent stored messages behind the state core in the projection, returned byte-unchanged under the prompt budget. It is what keeps the conversation and anything the state did not record visible, and it is not the transcript: what it drops leaves the prompt.
+_Avoid_: window, history, recent messages, transcript
+
+**Prompt budget**:
+The share of the model's context window a projected prompt may use, 30% by default. The tail gets what the head, the scratch state and the reserve leave.
+_Avoid_: cap, limit, max tokens
+
+**Eviction**:
+The tail dropping its oldest messages when the budget is exceeded, in one chunk at a time rather than one message per step.
+_Avoid_: truncation, pruning, expiry
+
+**Recall**:
+Reading dropped history back on demand, verbatim, through the `state_recall` tool. Nothing is summarised.
+_Avoid_: retrieval, search, lookup
 
 **Pair tag**:
 The short label minted per windowed tool pair: four hex digits derived from the tool call id, prepended to the projected tool result's text as `[#xxxx tool]`. Stable for the pair's lifetime in the window; the stored transcript never carries it. Modeled on the harness's hashline tags, but not one.
@@ -82,7 +102,7 @@ The per-call developer line appended after the observation window each step, lis
 _Avoid_: expiry line, TTL banner, watermark
 
 **Degraded step**:
-A step whose newest tool pair cannot be paired. The projection sends the head and a degradation notice riding that step — the walk collects pairs newest first, so an unbuildable newest pair leaves no window to send — and the raw transcript is never sent while the head exists. The degradation itself advances neither the retry counter nor the idle count. Only a missing head falls back to the ordinary session.
+A step whose head is intact but whose tail is empty. The projection still never sends ordinary history; only a missing head does that.
 _Avoid_: fallback step, raw-history step
 
 **Step**:
@@ -98,7 +118,7 @@ The stored custom messages the projection pins at the front of every prompt: the
 _Avoid_: preamble, prefix, context
 
 **Cache ceiling**:
-The prompt prefix two consecutive steps can share. It ends at the first head message the step changed, so it bounds what caching can save regardless of provider.
+The prompt prefix two consecutive steps can share. It ends at the first prompt message the step changed, so it bounds what caching can save regardless of provider.
 _Avoid_: cache hit rate, prefix limit
 
 **Per-call message**:
@@ -106,8 +126,12 @@ The harness's mark for a prompt message that differs from its stored counterpart
 _Avoid_: synthesized message, ephemeral message
 
 **Nudge**:
-A per-call developer message appended to the projected prompt when a policy threshold is met: the consolidation ask while the execution state is over its `stateBytes` cap, and the idle warning one step before an idle disengage. It is never stored and never re-sent from history.
+A per-call developer message appended to the projected prompt when a policy threshold is met: the consolidation ask while the execution state is over its `stateBytes` cap, and the idle ask while the model has stopped editing the state. It is never stored and never re-sent from history.
 _Avoid_: warning, reminder, injection
+
+**Idle**:
+The model going `idleSteps` consecutive steps without changing the execution state. It raises one ask per episode and never ends the procedure.
+_Avoid_: timeout, stall, inactivity
 
 **Consolidation**:
 The ask the over-cap nudge makes: one state patch that brings the execution state back under `stateBytes`, by dropping superseded entries or null-deleting keys it no longer needs. The nudge fires once per over-cap episode and re-arms when a commit lands the state back under the cap.

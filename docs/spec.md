@@ -3,7 +3,7 @@
 An omp plugin that runs a procedural skill against an explicit execution state instead of a growing transcript.
 Target: `omp-skill-state`, shipped as an omp plugin. No file under the harness source tree is modified.
 
-Status: implemented and verified against a long real session; the acceptance run's figures are in `docs/verification.md`.
+Status: v0.3.0 is implemented and verified against a long real session; the acceptance run's figures are in `docs/verification.md`. The universal redesign is decided and **not implemented**: sections marked `[V4]` carry its target text, ADR 0010-0012 record its decisions, and section 20 is its design record.
 
 ---
 
@@ -11,29 +11,29 @@ Status: implemented and verified against a long real session; the acceptance run
 
 A conversation-based runtime sends the model the skill text plus every past reasoning trace, action and observation. Prompt size therefore grows with the number of steps, and obsolete facts stay in context after they stop being true.
 
-This runtime sends the model three things and nothing else: the immutable procedure spec, the current execution state, and the latest observation. Reasoning is discarded after each step. The stored transcript is kept in full; only the prompt is bounded.
+This runtime sends the model the immutable procedure spec, the current execution state and the recent conversation under a byte budget `[V4]`, and nothing else. Reasoning leaves the prompt as the window moves past it, and the stored transcript is kept in full; only the prompt is bounded.
 
 Non-goals:
 
 - Replacing compaction, memory backends, or the todo system.
 - Applying to every session. A procedure runs only when the user invokes a skill that declares a state schema.
-- Summarising or retrieving history. The state is a sufficient statistic, not a digest.
+- Summarising history. The state is explicit and the recent conversation stays raw; nothing is digested, and dropped history is read back verbatim rather than compressed.
 
 ## 2. The model
 
-At step `t` the model receives exactly:
+At step `t` the model receives:
 
 ```
-A_t = (P, t, O_t)
+A_t = (P, t, T_t)
 ```
 
 - `P` — the procedure spec: the skill body as the harness renders it for the user invocation (body, skill directory, user arguments), immutable for the run.
 - `t` — the execution state: a JSON object satisfying the state schema.
-- `O_t` — the observation: the most recent tool pairs and the current user turn, under a byte cap.
+- `T_t` — the tail `[V4]`: the most recent stored messages of the branch under the prompt budget, whose newest messages are the current step's observation `O_t`. Before V4 this term was `O_t` alone — the newest tool pair and the current user turn under a byte cap — and everything older was absent from the prompt.
 
-The model replies with a state patch `Δt`, tool calls, or both. The runtime validates `Δt`, merges it into `t`, and lets the tool calls run. Nothing else from the past is ever sent.
+The model replies with a state patch `Δt`, tool calls, or both. The runtime validates `Δt`, merges it into `t`, and lets the tool calls run.
 
-Consequence: the prompt is `O(1)` in the number of steps; cumulative prompt cost is `O(T)`.
+Consequence `[V4]`: the prompt is bounded by the budget and the transcript by the steps, so the prompt stops growing with execution length while the transcript does not. The pre-V4 runtime claimed `O(1)` in the number of steps; the tail gives that up deliberately (ADR 0010), because the state alone could not carry a user turn it did not anticipate or a fact whose relevance arrived late.
 
 ## 3. Lifecycle
 
@@ -46,7 +46,7 @@ Consequence: the prompt is `O(1)` in the number of steps; cumulative prompt cost
    |                     |
    |                     +-- invalid patch x3 ----> degrade (self-disable, notify)
    |                     |
-   |                     +-- idle x5 --------------> disengage
+   |                     +-- idle x5 -------------> idle ask, no exit
    |                     |
    |                     +-- /new, /clear, session change -> disengage
    v
@@ -62,7 +62,7 @@ Arm and engage happen together in practice. The split matters only because armin
 The runtime engages when all of these hold:
 
 1. A user-invoked skill prompt is present in the conversation. The test is the harness's own: a message with `customType === "skill-prompt"` and `attribution === "user"`. A model-initiated `read skill://…` never counts.
-2. That skill declares a state schema.
+2. That skill is a procedure skill: it ships a `state.schema.json` beside its `SKILL.md` (section 5). `[V4]` The file is the opt-in marker; a file that declares no properties selects the runtime's default schema.
 3. The message is in the main agent. Subagent sessions stay inert.
 
 Detection is direct: `/skill:<name>` produces a message whose `details` carry `name` and `path`. The runtime reads `state.schema.json` from the skill's directory. It resolves the path as a sibling of the skill file, and reads it through `skill://<name>/state.schema.json`, which the harness already resolves inside the skill's base directory.
@@ -106,8 +106,9 @@ Rules:
 ```
 {
   "x-state": {
+    "promptBudgetPercent": 30,
+    "evictionChunkPercent": 25,
     "observationBytes": 32768,
-    "observationWindow": 3,
     "stateBytes": 16384,
     "idleSteps": 3,
     "retries": 3,
@@ -116,7 +117,7 @@ Rules:
 }
 ```
 
-The schema is authored once per domain, not per task. A skill without `state.schema.json` is an ordinary skill and never engages.
+The schema is authored once per domain, not per task. A skill without `state.schema.json` is an ordinary skill and never engages — the file is the opt-in marker. `[V4]` A file that declares no `properties` selects the runtime's default schema: `goal`, `working_dir`, `constraints`, `plan`, `findings`, `open_questions`, `next_step` and the `knowledge` bag, with `plan`, `findings`, `open_questions` and `next_step` volatile. A skill that ships only `x-state` params therefore needs no authored fields, and a mode-entry skill fits in one file plus one marker.
 
 `x-state.volatile` names the declared keys expected to change on most steps. They ride in the scratch state; every other declared key stays in the state core (sections 6 and 7). Non-string entries of the list are dropped. Without an explicit list the runtime applies a heuristic that protects the cache prefix: array-typed declared keys and the planning keys (`plan`, `next_step`, `findings`, `open_questions`, `scratch`) are volatile, and every other declared key is core.
 
@@ -152,30 +153,32 @@ Persistence: after each accepted patch the runtime sends the state as two custom
 
 The run's final state is the live state at `agent_end`. The runtime polls `ctx.isIdle()` every 20 ms for up to 2 s and then sends both state messages, core then scratch, as next-turn messages (`deliverAs: "nextTurn"`): the harness then appends them to context and history at once, with no turn started. Sent any earlier, while the harness is still inside the loop, a next-turn message is only held in memory until the next prompt, and `/resume`, `/new` or quitting before that prompt loses it. A queued follow-up prompt keeps the session busy past the budget, in which case the messages are sent anyway and the harness holds them for that prompt. The waiting copy is dropped if a patch is accepted in the meantime (it is stale) or if the engagement ends in that window (a session switch or `/clear`: a message sent after it would land in the wrong context).
 
+`[V4]` Each commit is mirrored through `pi.appendEntry` as well: an entry the harness never sends to the LLM, carrying the same partitions and the same write stamp as the messages it mirrors. A re-derive reads the mirror, and a stored state message that disagrees with it is repaired by re-sending the head (ADR 0012). The messages stay the projection's source because the cache breakpoint anchors on them (section 7).
+
 ## 7. The projection
 
 On every `context` event while engaged, the runtime returns a replacement message array containing, in order:
 
 1. The runtime's operating rules, a custom message passed through unchanged.
 2. `P`, the skill body as rendered for the invocation, a custom message passed through unchanged. The rendered skill prompt is used rather than the raw file so the user's invocation arguments stay in every step.
-3. The state core, the declared keys the schema does not list as volatile, as labelled plain JSON — plain text by design, so the elide pass described in section 10 never targets it — the latest stored core message passed through unchanged. Changes only when a patch changes a core key.
-4. The scratch state, the volatile-listed keys plus every undeclared key, the latest stored scratch message returned as a shallow clone of itself with one added detail field, `details.perCall`. The copy deliberately differs from its stored counterpart so the harness marks it per-call (below); the field lives outside the content, so the model sees the same bytes either way. Its rendered content changes whenever the scratch keys do.
+3. The state core, the declared keys the schema does not list as volatile, as labelled plain JSON — plain text by design, so the `elide` pass described in section 10 never targets it — the latest stored core message passed through unchanged. Changes only when a patch changes a core key.
+4. **The tail** `[V4]`: the most recent stored messages of the branch, returned as the stored objects themselves, oldest first, under the prompt budget (section 9). It begins after the head's own messages — the rules, `P`, the core and the scratch — and after every injected live-state block, so the tail is the run's real conversation: user turns, assistant text and tool calls, tool results, skill-prompt customs, `state_update` calls and their results. Its newest messages are the step's observation `O_t`, which is why there is no separate observation window.
+5. The scratch state, the volatile-listed keys plus every undeclared key, the latest stored scratch message returned as a shallow clone of itself with one added detail field, `details.perCall`. The copy deliberately differs from its stored counterpart so the harness marks it per-call (below); the field lives outside the content, so the model sees the same bytes either way. Its rendered content changes whenever the scratch keys do.
+6. Pair tags and the window notice, derived from the tail `[V4]`. Each tailed tool result's projected copy carries a **pair tag**: four lowercase hex digits derived deterministically from the tool call id alone — FNV-1a, no memo state — prepended as the result's first text line, `[#xxxx tool]`. A re-derive after `/resume` or a rewind recomputes identical tags, so the model's references stay coherent across a resume. The tag bytes count toward the result cap (they are prepended before capping), the truncation marker stays at the cut end, and neither the markers nor the tag line are ever cut: the cap's floor is one tag line plus one marker per result. The step prompt then carries a per-call **window notice**: one developer line listing the tailed results' tags and tools oldest first — `window oldest→newest: #a3f2 read, #b71c grep — oldest drop first as new results arrive` — with the drop rule stated as a rule, never as a prediction: which result evicts depends on the next step's result count, unknowable at projection time. It rides the existing per-call seam (section 16), before the consolidation ask and the idle ask, and is absent whenever the tail carries no tool result — the first step, a degraded step, or a step whose prompt carries no head. Stored results never carry tags and the notice is never stored: the transcript stays the unmutated record of the run.
 
-Items 1 to 4 are the head: stored transcript messages, not synthesised text. The projection returns the stored objects themselves, with two exceptions: the scratch's per-call clone above, and the windowed tool results, whose projected copies gain a pair-tag line (item 7). The head is sent at engage and again after every compaction while engaged (`session_compact`), because the harness's cut can land after the original copies; the re-sent copies are byte-equal to the first except for the scratch clone, and the projection takes the last stored message of each type.
+Items 1 to 3 are the head: stored transcript messages, not synthesised text; the tail is stored transcript too, which is what makes it cacheable. The projection returns the stored objects themselves, with two exceptions: the scratch's per-call clone above, and the tailed tool results, whose projected copies gain a pair-tag line. The head is sent at engage and again after every compaction while engaged (`session_compact`), because the harness's cut can land after the original copies; the re-sent copies are byte-equal to the first except for the scratch clone, and the projection takes the last stored message of each type. The tail needs no such re-send: it is read from the branch, not from the harness's context, so a compaction cut cannot shorten it.
 
-The operating rules also reach the model on the invocation batch itself. `before_agent_start` fires at the batch's dequeue, before the skill prompt's `message_end` can engage, so the handler cannot consult engagement state; it answers with the rules message when the prompt announces a procedure skill. The harness's user-invocation announcement line names the invoked skill, and the state-schema check filters every other prompt, so an ordinary prompt matches nothing. The harness appends the returned message to the batch and stores it with the transcript; the copy is byte-equal to the head's rules. The first step runs on ordinary context plus this message; from the second step on the projection takes the stored head's copy, and the first-step copy is dropped with the rest of the hidden history, so the cache never sees a difference.
-5. `O_t`, the current step's observations, as the original observation messages with their roles preserved.
-6. The observation window: the `observationWindow` most recent assistant `toolCall`/`toolResult` pairs, oldest first. The newest pair is mandatory, and the invariant it serves is "newest pair or degradation notice": when the step's observation is itself a tool result, every result must answer a `toolCall` block of its assistant message, or the step degrades in place (below) instead of being projected with a window. A trailing assistant whose calls produced no results — the shape a fully blocked batch leaves — has no result side to pair and degrades the same way. Older pairs follow the same pairing rule; the walk stops at the first unpairable older pair and keeps the pairs collected before it, which is not a degradation. This keeps provider tool pairing intact so no repair is needed.
-7. Pair tags and the window notice. Each windowed tool result's projected copy carries a **pair tag** (CONTEXT.md): four lowercase hex digits derived deterministically from the tool call id alone — FNV-1a, no memo state — prepended as the result's first text line, `[#xxxx tool]`. A re-derive after `/resume` or a rewind recomputes identical tags, so the model's references stay coherent across a resume. The tag bytes count toward the observation cap (they are prepended before capping), the truncation marker stays at the cut end, and neither the markers nor the tag line are ever cut: the cap's floor is one tag line plus one marker per result. After the window the step prompt carries a per-call **window notice**: one developer line listing the projected pairs' tags and tools oldest first — `window oldest→newest: #a3f2 read, #b71c grep — oldest drop first as new results arrive` — with the drop rule stated as a rule, never as a prediction: which pair expires depends on the next step's result count, unknowable at projection time. It rides the existing per-call seam (section 16), before the consolidation ask and the idle warning, and is absent whenever no window is projected — the first step, a user-turn observation, a fallback step, a degraded step, or a step whose prompt carries no head. Stored results never carry tags and the notice is never stored: the transcript stays the unmutated record of the run.
-8. The current user turn, when it is a user prompt rather than a tool result: every trailing user message of the batch, plus the assistant message immediately before them — interleaved custom and developer notices skipped — when there is one. A human answer is anaphoric ("agree with your recommendation"); without its antecedent the turn is an orphan and the model must guess what it agreed to. One assistant message bounds the turn, so the prompt stays `O(1)`, and once the agent acts on the answer the next step's observation is a tool result and the exchange rotates out. A trailing assistant message with no calls carries no observation and contributes nothing; one with calls never produced its results, and that is a degradation (item 6).
+The order is not free. The scratch is volatile, so a per-call region placed early would poison every byte behind it; the tail sits after the core and before the scratch so the cached prefix reaches through it (ADR 0011).
 
-**Degraded steps.** While the head is intact, the projection never falls back to ordinary history. When the newest pair cannot be built — a result answering no call, results with no assistant before them, or a trailing assistant whose calls never produced results — the step's prompt is the head plus a per-call **degradation notice**: one developer line naming the gap (the newest tool results are missing or answer no call), stating that the execution state is intact and current, and asking the model to re-emit the action. A degraded step has no window: no pair tags, no window notice, the degradation notice is the only signal, and the worst case is head plus an empty window. The head messages are the stored byte-stable ones, so the cache ceiling is unchanged. The notice rides every degraded step and disappears on the first projected step — the inverse of the fallback notice's once-per-episode latch, because a fallbacked model could see history while a degraded model sees only the head and cannot know why its window is empty. A degraded step is policy-neutral: it advances neither the idle counter nor the retry counter (the fold already consumed the blocked batch's retry at its own step), while the model's reply on it is judged as any reply. A step whose prompt carries no head is not a degradation: the missing-head fallback to ordinary context stands unchanged. "Degraded step" names the projection gap only; the procedure's **degrade** (section 8, retries exhausted, self-disable) is a different failure and keeps its name.
+The operating rules also reach the model on the invocation batch itself. `before_agent_start` fires at the batch's dequeue, before the skill prompt's `message_end` can engage, so the handler cannot consult engagement state; it answers with the rules message when the prompt announces a procedure skill. The harness's user-invocation announcement line names the invoked skill, and the state-schema check filters every other prompt, so an ordinary prompt matches nothing. The harness appends the returned message to the batch and stores it with the transcript; the copy is byte-equal to the head's rules. The first step runs on ordinary context plus this message; from the second step on the projection takes the stored head's copy, and step 1's copy is part of the tail like any other stored message, so the cache never sees a difference.
 
-Everything else is dropped: all earlier assistant turns, all earlier tool results, all earlier user turns, and every injected live-state block — `goal-mode-context`, `plan-mode-context`, the eager-todo and mid-run-todo nudges, TTSR injections, and todo reminders.
+**Degraded steps.** While the head is intact, the projection never falls back to ordinary history. A step is degraded when the tail is empty — the head is in place and there is nothing behind it to show — and its prompt is the head plus a per-call **degradation notice**: one developer line stating that the execution state is intact and current and that no recent transcript is in the prompt, and asking the model to continue from the state. A degraded step is policy-neutral: it advances neither the idle counter nor the retry counter, while the model's reply on it is judged as any reply. A step whose prompt carries no head is not a degradation: the missing-head fallback to ordinary context stands unchanged. "Degraded step" names the projection gap only; the procedure's **degrade** (section 8, retries exhausted, self-disable) is a different failure and keeps its name.
 
-The runtime never mutates the transcript. The dropped material remains on disk and in the branch; it is only absent from the prompt.
+Everything else is dropped: every injected live-state block — `goal-mode-context`, `plan-mode-context`, the eager-todo and mid-run-todo nudges, TTSR injections, and todo reminders — and every message the tail's budget has evicted. Nothing else is filtered, and that is the point of the tail: a second skill invocation, a human correction and the model's own earlier prose all reach the model, so a mid-run invocation is answerable without a succession protocol (ADR 0010).
 
-Caching. Prompt caching is positional: a breakpoint caches every byte before it, and a hit needs that whole prefix to match. The harness marks any message that is not byte-equal to its stored counterpart as per-call, and places one breakpoint on the newest message at or before the first per-call message. Items 1 to 3 are stored messages returned unchanged, so they are stable; the scratch clone is the first per-call message, and the breakpoint lands on the state core. Every step is then a cache hit on tools, system prompt, rules, `P` and the core, until a patch changes a core key and that step re-bills through the new core. Only the scratch state and the current observation are re-billed, and the scratch changes on most steps by design. The tagged windowed results and the window notice sit in that same per-call region, behind the scratch, so the breakpoint stays on the state core. The split is what lifts the breakpoint into the state at all: with the volatile keys riding in one full-state message, every step's patch would invalidate it and the breakpoint would fall back on `P`, caching only through the spec; split, the durable prefix reaches through the core. A synthesised `P` or `t`, or `P` appended to the system prompt through `before_agent_start`, would not be cached: the former is per-call, the latter lands after the volatile `<project-context>` block and outside the head breakpoint. The rules message returned from `before_agent_start` on the invocation batch needs no exception: the harness stores it with the batch, so the step-1 prompt copy is byte-equal to its stored counterpart, stable like the head, and step 1 is cold regardless; no cache behaviour relies on it.
+The runtime never mutates the transcript. Evicted material remains on disk and in the branch; it is absent from the prompt and reachable through recall (section 8).
+
+Caching. Prompt caching is positional: a breakpoint caches every byte before it, and a hit needs that whole prefix to match. The harness marks any message that is not byte-equal to its stored counterpart as per-call, and places one breakpoint on the newest message at or before the first per-call message. Items 1 to 4 are stored messages returned unchanged, so they are stable; the scratch clone is the first per-call message, and the breakpoint lands at the end of the tail. Every step is then a cache hit on tools, system prompt, rules, `P`, the core and the tail's already-seen messages, until a patch changes a core key and that step re-bills through the new core. Only the tail's newest messages, the scratch state and the per-call notices are re-billed. The tail's position is what makes that possible: after the scratch it would re-bill in full on every step, because the scratch changes on most steps and a per-call region poisons everything behind it (ADR 0011). The split is what lifts the breakpoint into the state at all: with the volatile keys riding in one full-state message, every step's patch would invalidate it and the breakpoint would fall back on `P`, caching only through the spec. A synthesised `P`, `t` or tail would not be cached at all: a message with no stored counterpart is per-call by construction, and `P` appended to the system prompt through `before_agent_start` lands after the volatile `<project-context>` block and outside the head breakpoint.
 
 ## 8. Producing and validating the patch
 
@@ -208,14 +211,18 @@ No JSON repair exists on this channel. Tool arguments are protocol-level JSON, s
 
 ## 9. Caps
 
-### Observation cap
+### Result cap
 
-`O_t` is capped at `observationBytes`, default 65536.
+A tailed tool result's own text is capped at `observationBytes`, default 65536. `[V4]` The tail's total is bounded by the prompt budget below.
 
-- The cap applies to the combined text of the whole observation window across its pairs, not to each result.
-- Over the cap, the runtime truncates from the end of the largest result and inserts a marker naming what was cut and how to re-read it.
-- Markers are never cut, and neither is the pair-tag line (section 7): the tag is what still identifies a fully cut result and what the window notice names. The cap's floor is one tag line plus one marker per result.
-- The cap is per step. Exactly one observation window is ever in the prompt, so the cap is a ceiling on the steady state, not a cumulative budget.
+- The cap applies to the result's text, not to the tail as a whole.
+- Over the cap, the runtime truncates from the end of the result and inserts a marker naming what was cut and how to re-read it.
+- Markers are never cut, and neither is the pair-tag line (section 7): the tag is what still identifies a fully cut result and what the window notice names. The cap's floor is one tag line plus one marker.
+- The cap is per result, not cumulative; the budget is the cumulative bound.
+
+### Tail budget `[V4]`
+
+The tail is bounded by the prompt budget: `promptBudgetPercent` of the model's context window (`ctx.getContextUsage()`), default 30, minus the head, the scratch state and a reserve. When the projected tail would exceed it, the runtime evicts from the front in one chunk of `evictionChunkPercent` of the budget (default 25), so the front of the tail is stable for many steps and the cached prefix survives between evictions (ADR 0011). Eviction never touches the head, the scratch, or the newest message.
 
 ### State cap
 
@@ -240,12 +247,13 @@ The cut is computed rather than taken from `preparation` because of what the har
 
 ## 11. Disengaging
 
-Four triggers, all leading to the same reset (clear `t`, clear engaged flag, stop projecting):
+Three triggers, all leading to the same reset (clear `t`, clear engaged flag, stop projecting):
 
 1. **New session.** `/new` starts one, firing `session_before_switch` and then `session_switch` with reason `new`; `session_start` fires only on a cold load. This is the intended ending, and the runtime tells the user so (section 12). On every `session_start` and `session_switch` the runtime re-derives engagement from the branch rather than resetting blindly: an empty branch is inert; a branch holding a user skill invocation for a procedure skill followed by its procedure-spec message and its two state messages, the latest core and the latest scratch, re-engages with the merged state, and either state message missing is inert (the spec is read back from the branch so no file is re-read). That is what makes `/resume` restore `t` while `/new` starts clean.
 2. **Context reset.** `/clear` keeps the session and drops messages in place, and emits nothing to extensions. The `input` event runs before command interpretation and does see the raw text, so the runtime disengages on `/clear` directly.
 3. **Session change.** A switch, a rewind or a fork all land in a different session id, so `session_before_switch` and `session_before_branch` end the outgoing engagement with the usual disengage notice. `session_switch`, `session_branch` and `session_tree` then re-derive engagement from the branch now loaded: a rewind that lands after the invocation re-engages with that branch's state, one that lands before it stays inert, and a fork re-derives like any other branch.
-4. **Idleness.** `idleSteps` consecutive steps with no patch or with a patch that leaves the state unchanged. At `idleSteps` − 1 consecutive idle steps — never at zero: a skill that sets `idleSteps` to 1 disengages on its first idle step unwarned — the next step's prompt carries a per-call developer nudge naming the count and the imminent disengage, so the model can record a meaningful fact before the cutoff; the nudge is never stored and never re-sent from history. The model has stopped editing its state; the runtime stands down. A step whose provider call carried no stored head still does not count: the first step carries the rules through the `before_agent_start` delivery (section 7) but runs before the engage asides land, and the step after a compaction can run before the re-sent head lands, so the rules are missing from its prompt in that case — no head means no count and no nudge. An early integration run disengaged on a legitimate preamble of reads before the first fact; the raised default and the nudge above are the answer to that case.
+
+**Idleness does not end the procedure.** `[V4]` While the state goes unchanged the model's edits are not required for the run to stay coherent, so the runtime never stands down on its own: `idleSteps` consecutive steps with no patch or with a patch that leaves the state unchanged raise one per-call developer ask per episode, naming how long the state has stood still and asking the model to record a meaningful fact — a reminder, never a deadline — and the ask is never stored and never re-sent from history. A step whose provider call carried no stored head does not count: the first step carries the rules through the `before_agent_start` delivery (section 7) but runs before the engage asides land, and the step after a compaction can run before the re-sent head lands, so the rules are missing from its prompt in that case — no head means no count and no ask.
 
 The remaining exit is **degrade**, from section 8, which is a failure path rather than a normal ending.
 
@@ -267,10 +275,11 @@ Extension factories are rebound into every subagent session, so the handler runs
 | Invalid patch | validation | block the batch, re-prompt, up to `retries` |
 | Repeated invalid patches | retry counter | degrade, notify, ordinary session |
 | Missing or malformed schema | load | do not engage; notify |
-| Oversized observation | byte cap | truncate from the end of the largest result, insert a marker |
+| Oversized tool result | result cap | truncate from the end of the result, insert a marker |
 | Provider rejects the prompt shape | provider error surfaced to the session | the harness's own retry and compaction paths apply; the runtime does not intercept them |
-| Model stops updating the state | `idleSteps` idle steps | disengage, notify |
+| Model stops updating the state | `idleSteps` idle steps | one idle ask per episode; the procedure stays engaged `[V4]` |
 | Head message missing on rebuild | invocation without a following procedure-spec message or either state message | stay inert: there is no head to project |
+| Empty tail | head intact, no messages behind it | project the head and a degradation notice `[V4]` |
 
 Degrade is terminal for the session. The user gets ordinary history-based execution back, which is always correct, only more expensive.
 
@@ -278,12 +287,14 @@ Degrade is terminal for the session. The user gets ordinary history-based execut
 
 | Parameter | Default | Source |
 | --- | --- | --- |
+| `promptBudgetPercent` `[V4]` | 30 | schema `x-state`, else runtime default |
+| `evictionChunkPercent` `[V4]` | 25 | schema `x-state`, else runtime default |
 | `observationBytes` | 65536 | schema `x-state`, else runtime default |
 | `idleSteps` | 5 | schema `x-state` |
 | `retries` | 3 | schema `x-state` |
-| `observationWindow` | 3 | schema `x-state`, else runtime default |
 | `stateBytes` | 0 (disabled) | schema `x-state`, else runtime default |
 | `volatile` | heuristic: array-typed and planning keys | schema `x-state.volatile`, else runtime heuristic |
+| `observationWindow` | deleted `[V4]` | the tail replaced it (section 7) |
 | dropped blocks | all live-state blocks | fixed in v1 |
 
 ## 16. Harness surfaces used
@@ -293,7 +304,7 @@ Every mechanism above is public extension API. Nothing else is touched.
 | Need | Surface |
 | --- | --- |
 | per-step rewrite | `context` event; receives `AgentMessage[]` before `convertToLlm`, so `customType` is still visible, and its replacement never rewrites stored history |
-| nudge at the policy thresholds | `stepPrompt`, the `context` handler's one call: it projects the prompt, notes whether the stored head reached it, and appends the turn's per-call developer lines in a fixed order — the window notice first (the projected window's pair tags and tools oldest first with the drop rule, on tool-result steps only, section 7), then the consolidation ask latched once per over-cap episode (`capNudged`, re-armed when a commit lands back under `stateBytes`), then the idle warning one step before the idle disengage; all of them ride the event's replacement, are never stored and never re-sent from history (sections 9 and 11) |
+| nudge at the policy thresholds | `stepPrompt`, the `context` handler's one call: it projects the prompt, notes whether the stored head reached it, and appends the turn's per-call developer lines in a fixed order — the window notice first (the tailed tool results' pair tags and tools oldest first with the drop rule, on tool-result steps only, section 7), then the consolidation ask latched once per over-cap episode (`capNudged`, re-armed when a commit lands back under `stateBytes`), then the idle ask once per idle episode (section 11); all of them ride the event's replacement, are never stored and never re-sent from history (sections 9 and 11) |
 | validate before tools run | `assistant_message`, awaited before tool dispatch |
 | block a batch | `tool_call`, may block with a reason |
 | offer the state-write channel | `registerTool` with the strict, zero-approval `state_update` definition, registered once at factory load (section 8) |
@@ -301,13 +312,17 @@ Every mechanism above is public extension API. Nothing else is touched.
 | persist the head: the state core, the scratch state, `P`, rules | `sendMessage` with `deliverAs: "aside"`, plus `ctx.sessionManager.getBranch()` to rebuild |
 | persist the run's final `t` | `agent_end`, then `sendMessage` with `deliverAs: "nextTurn"` once `ctx.isIdle()` (section 6) |
 | re-send the head after a compaction | `session_compact`, then `sendMessage` with `deliverAs: "aside"` during a run or `"nextTurn"` when `ctx.isIdle()` (section 7) |
-| keep the head cacheable | return the stored rules, spec and core unchanged and the scratch as its per-call copy, so the provider anchors the breakpoint on the state core |
+| keep the head and tail cacheable | return the stored rules, spec, core and tail unchanged and the scratch as its per-call copy, so the provider anchors the breakpoint at the end of the tail (ADR 0011) |
 | own compaction | `session_before_compact`, lazily registered |
 | detect `/clear` | `input` |
 | detect a user skill invocation | `message_end`; the harness's own skill-prompt message, checked for `attribution === "user"` |
 | detect a session change | `session_before_switch`, `session_before_branch`; `session_start`, `session_switch`, `session_branch`, `session_tree` re-derive engagement from the branch (section 11) |
 | read the schema | `skill://<name>/state.schema.json`, plus `pi.pi.getActiveSkills()` |
 | visibility | `ctx.ui.notify`, `registerMessageRenderer` |
+| build the tail | `context` event plus `ctx.sessionManager.getBranch()`; the tail is read from the branch, so a harness compaction cannot shorten it |
+| read the prompt budget | `ctx.getContextUsage()`, `{ tokens, contextWindow, percent }` |
+| store the durable mirror | `pi.appendEntry`, an entry the harness never sends to the LLM (ADR 0012) |
+| read back dropped transcript | the `state_recall` tool over the session's own JSONL file |
 
 ### The harness register
 
@@ -321,6 +336,9 @@ The surfaces table lists the public extension API; the register lists the behavi
 | Registering a session_before_compact handler disables speculative compaction only: the speculation path yields while handlers exist ("a speculated result would bypass their veto"), blocking compaction still runs them, and the effect lasts exactly as long as the session, which builds its own extension runner. | the lazy registration's cost is scoped to the session (section 10, ADR 0001) | `@oh-my-pi/pi-coding-agent@18.10.3 src/session/session-maintenance.ts:2099-2101; per session: src/sdk.ts:3306-3331` |
 | A tool's load mode is presentation-only: it decides top-level presence versus mounting as an xd:// device and deferral under code mode; no approval or availability gate reads it. | state_update's loadMode: "essential" keeps the patch protocol-level JSON in every presentation (section 8, ADR 0002) | `@oh-my-pi/pi-coding-agent@18.10.3 src/extensibility/custom-tools/types.ts:206-207, src/session/code-mode.ts:115, src/tools/xdev.ts:85-88` |
 | The hook order the patch path relies on: the context projection runs before convertToLlm on every provider request; the assistant_message transform is awaited once the message is final and before it reaches context, persistence, or tool dispatch; tool_call fires at argument-prep, before approval and scheduling; scheduling resolves last. | the fold, the block, and the commits happen in this order (section 8) | `@oh-my-pi/pi-agent-core@18.10.3 src/agent-loop.ts:1896-1900, 2243-2248, 3074-3091, 3770-3796` |
+| `getContextUsage()` returns the active model's live estimate `{ tokens, contextWindow, percent }`, anchored to the last provider-reported usage when available. | the prompt budget is a fraction of `contextWindow` (section 9, ADR 0011) | `@oh-my-pi/pi-coding-agent@18.10.3 src/extensibility/extensions/types.ts:387, 491; src/session/agent-session.ts:12446-12448` |
+| `appendEntry(customType, data)` appends a `CustomEntry { type: "custom", customType, data }` that `getEntries()`/`getBranch()` return like any other entry, and that never reaches the LLM. | the durable mirror (section 6, ADR 0012) | `@oh-my-pi/pi-coding-agent@18.10.3 src/session/session-manager.ts:3521-3525, src/session/session-entries.ts:180-184, src/extensibility/extensions/types.ts:1602-1603` |
+| A session's transcript is a JSONL file, one entry per line, greppable from disk at `~/.omp/agent/sessions/<encoded-cwd>/<ts>_<id>.jsonl`. | the recall tool reads the current session's own file (section 8) | `@oh-my-pi/pi-coding-agent@18.10.3 docs/session.md:41-43, 63-68` |
 
 ## 17. Packaging
 
@@ -371,17 +389,21 @@ Against a real session (run G and the nudge probe in `docs/verification.md`; the
 - `t` survives `/resume` and a rewind.
 - compaction while engaged produces a state summary and makes no summarizer call, and speculative compaction is off from that point.
 - `/new` and `/clear` both disengage.
-- prompt size is flat across a long run: assert the reported input tokens per step stay inside a band.
+- prompt size stays inside the budget across a long run: assert the reported input tokens per step stay under `promptBudgetPercent` of the window and sawtooth at evictions. `[V4]`
+
+`[V4]` The redesign adds claims to the same suites: the tail's assembly (order, the head's own messages excluded, the live-state filter, the budget, chunked eviction), the degraded step (head intact, tail empty), the durable mirror and its repair path, the budget read from `ctx.getContextUsage()`, and the recall tool's read and its result cap.
 
 ## 19. Out of scope
 
 - Multi-agent procedures with concurrent state writes and conflict resolution.
 - Automatic schema discovery for skills that do not declare one.
 - Any change under the harness source tree.
-- Multiple concurrent procedures per session; retrieval or summarization of dropped history.
+- Multiple concurrent procedures per session; summarization of dropped history — recall reads it back verbatim instead (section 8).
 - Positional array editing beyond the value-keyed `$append` and `$remove` operators (no positional splices, no per-index edits, no pop-like removal of the head or tail).
 - JSON repair in any form; `setActiveTools` registration gymnastics.
 - Hard enforcement of the state cap (the nudge is the only sanction, by decision).
+- Cross-session recall: `state_recall` reads the current session's transcript only.
+- Ambient engagement: the runtime still engages only on a user invocation of a procedure skill; the always-on trigger is deferred (ADR 0010).
 
 ## 20. Design record: the V2 change
 
@@ -399,3 +421,15 @@ Four generalities and one channel change answered that. Decisions are recorded i
 Measured in run G (`docs/verification.md`): `cacheRead` pinned at 10496 — system prompt, tools, rules, spec, state core — across the patched steps while only the scratch, the observation window and the user turn re-billed. The baseline to beat was run F: median prompt 11,348 tokens, uncached median 788, cache read positive on 49 of 51 steps, a through-the-spec ceiling.
 
 The V3 change (window awareness, issue #30) made the runtime stop being vague about its own mechanics. A long real session showed the model guessing which observations were still prompt-resident — the bundled zstate skill said "a few steps" while the real value, six pairs, lived only in the schema — and the state drifting into an append-only diary, facts superseding one another with no visible deadline to distill by. Three additions answered that, all riding the per-call region so cost and the cache ceiling are unchanged: the operating rules state the exact window count, interpolated from the procedure's loaded params at engage, the first-step copy and the stored head copy byte-equal because both build from params loaded from the same schema file; each windowed tool result's projected copy gains a pair tag, four hex digits derived by FNV-1a from the tool call id alone, so tags are a pure function of the branch and a re-derive recomputes them identically with no memo state; and a per-call window notice lists the window's tags oldest first with the drop rule, appended by the step-prompt seam before the consolidation ask and the idle warning — data before policy. The notice states the drop rule, never a prediction: which pair expires depends on the next step's result count, unknowable at projection time. Rejected alternatives, recorded in the issue to prevent revisiting: content-derived tags (lose composition stability for a marginal re-read nicety), random memoized tags (nondeterministic across re-derive, need storage), expiry prediction (impossible), tags as separate messages between a tool call and its result (breaks provider sequence rules), and per-step re-firing of the consolidation ask (contradicts the recorded soft-cap decision). No ADR: the change fails the hard-to-reverse gate, and sections 5, 7 and 16 carry the reasoning.
+
+The V4 change (ADR 0010-0012) turns the runtime from a procedure executor into a bounded context manager. V3 was coherent inside one procedure and blind outside it: a mid-run skill invocation was dropped by `message_end` and filtered out of the prompt, and a fact whose relevance arrived late had no route in. The `beta` branch's answer — succession with declared carry, a ride notice, a schema-less exit — was protocol where visibility was missing, so that line is abandoned rather than merged, and its numbers stay spent.
+
+Five decisions, three ADRs:
+
+- **The tail** (ADR 0010): the projection carries the most recent stored messages behind the state core, byte-unchanged and under a budget, so recency and anything the state did not record are simply visible. The observation window collapses into it; the window walk, the pair-pairing rule and the degraded-window path are deleted, and a degraded step narrows to "head intact, tail empty".
+- **Recall** (ADR 0010): a `state_recall` tool reads back what the tail evicted, from the session's own transcript, which keeps the lossiness recoverable rather than absolute.
+- **The layout** (ADR 0011): `rules, P, core, tail, scratch, observation`, so the cached prefix reaches through the tail; the budget is a fraction of the window and eviction is chunked.
+- **The durable mirror** (ADR 0012): the state keeps its stored messages as the projection's source and gains an `appendEntry` mirror that no harness pass rewrites.
+- **Adopted from the abandoned branch**: state reads order by write stamp with branch position as the final tiebreak (the `beta` branch's ADR 0008), because a parked next-turn send can land after a newer commit and time-travel the projection. Its module split is not adopted: this change moves those boundaries anyway.
+
+Nothing here is implemented. The sections marked `[V4]` are the target; the rest of the document describes the shipped v0.3.0. Acceptance widens to four classes — an ordinary coding session, a long research run, trajectory-as-objective work (an audit, "what changed and why", debug provenance), and a multi-skill session — and each is verified by a real session the user records and whose transcript is read afterwards, not by a synthetic session harness.

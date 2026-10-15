@@ -4,6 +4,8 @@ An [omp](https://omp.sh) plugin that runs a procedural skill against an explicit
 
 Status: implemented and verified against a long real session (`docs/verification.md`). A procedure skill engages and disengages; the model's `state_update` calls are validated, merged and persisted as state messages, and invalid patches block the step and degrade after `retries` failures. While engaged, every provider call sees only the head (the operating rules, the procedure spec, the state core and the scratch state), the observation window (the `observationWindow` most recent tool pairs under one shared byte cap; 1 by default, 3 in the bundled zstate skill), the current user turn and, when their thresholds are met, the two per-call nudges: the idle warning one step before an idle disengage and the consolidation ask while the state is over its `stateBytes` cap; the stored transcript stays complete. Compaction while engaged is owned by the runtime: the summary is the state, the cut is the current step, and no summarizer call is made.
 
+The universal redesign — a bounded tail on the conversation, recall for what it evicts, and a cacheable prefix that runs through the tail (ADR 0010-0012, spec section 20) — is decided and not yet implemented.
+
 ## Layout
 
 | Path | Role |

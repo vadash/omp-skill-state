@@ -11,3 +11,5 @@ Prefix caching diverges at the first changed byte, and the execution state chang
 ## Consequences
 
 The head is four stored messages; re-derive, compaction (both state messages carried in summary and preserve-data) and the transcript renderer handle both, and an invocation whose branch lacks either state message is an incomplete head that stays inert. The copy's distinguishing field must live outside model-visible content: a unit test pins the copy's shape, and every real-session verification run re-checks that the provider payload never sees the field. On OpenAI-style implicit prefix caching the ceiling is through-the-core; on Anthropic the mark is what anchors it.
+
+Amended by ADR 0011: the scratch rides after the tail, so the cached prefix reaches through the tail instead of ending at the state core. The split, the per-call clone and the cache-ceiling reasoning stand unchanged.

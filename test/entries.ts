@@ -110,3 +110,21 @@ export function assistantEntry(id: string): SessionEntry {
 		},
 	};
 }
+
+// The transcript file's fixed-width first line: the harness pads the title
+// slot to exactly 256 UTF-8 bytes with spaces, so the line is valid JSON with
+// trailing whitespace and a recall read must parse it or skip it, never crash.
+export function titleSlotLine(title = "fixture transcript"): string {
+	const slot = { type: "title", v: 1, title, updatedAt: stamp(), pad: "" };
+	const pad = " ".repeat(256 - Buffer.byteLength(JSON.stringify(slot)));
+	return JSON.stringify({ ...slot, pad });
+}
+
+// The raw transcript-line shape the recall read parses off disk: one message
+// entry per JSON line, stamped with the same epoch instant as the builders
+// above so either shape asserts identically.
+export const transcriptStamp = stamp();
+
+export function messageLine(role: string, content: unknown): string {
+	return JSON.stringify({ type: "message", id: "e", parentId: null, timestamp: transcriptStamp, message: { role, content, timestamp: 0 } });
+}

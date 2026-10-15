@@ -142,6 +142,9 @@ export class FakeSession {
 	// The default is the common large-context tier; a test overrides it to
 	// watch the tail budget move.
 	contextUsage: { tokens: number; contextWindow: number; percent: number } | undefined = { tokens: 0, contextWindow: 262_144, percent: 0 };
+	// The transcript path getSessionFile returns; a test points it at a fixture
+	// .jsonl file. Undefined mirrors a session with no file on disk yet.
+	sessionFile: string | undefined = undefined;
 	private readonly internals: Internals;
 	// Sends that land at the next step boundary (busy) rather than at once (idle).
 	private pending: Sent[] = [];
@@ -385,7 +388,7 @@ export class FakeSession {
 		return {
 			agent: { kind: this.kind },
 			ui: { notify: (message: string, type?: string) => this.notices.push({ message, type }) },
-			sessionManager: { getSessionId: () => this.id, getBranch: () => this.branch },
+			sessionManager: { getSessionId: () => this.id, getBranch: () => this.branch, getSessionFile: () => this.sessionFile },
 			isIdle: () => this.idle,
 			getContextUsage: () => this.contextUsage,
 		} as unknown as ExtensionContext;

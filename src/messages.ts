@@ -16,6 +16,11 @@ export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 // so they cannot drift.
 export const STATE_UPDATE_TOOL_NAME = "state_update";
 
+// The recall channel's fixed name (ADR 0010), the same one-source pattern:
+// the model reads dropped transcript text back through it, verbatim, never
+// through a summary.
+export const STATE_RECALL_TOOL_NAME = "state_recall";
+
 // The legacy single state message an older runtime version stored: never a
 // head message and never tail-eligible, wherever it sits on the branch.
 export const LEGACY_STATE_MESSAGE_TYPE = "sh.omp.skill-state.state";
@@ -84,6 +89,9 @@ An invalid patch blocks every tool call of the step, and the error comes back as
 
 export const STATE_UPDATE_DESCRIPTION =
 	"Apply a patch to the running procedure's execution state. Call it once per step alongside your other tool calls. The patch is a JSON object merged into the state: a non-null value sets its key, null deletes its key, keys you omit are left untouched. The root operators {\"$append\": {\"key\": [items]}} and {\"$remove\": {\"key\": [items]}} edit array items without resending the rest; one patch cannot both set and operate on a key, or both append and remove one key.";
+
+export const STATE_RECALL_DESCRIPTION =
+	"Recall transcript text the prompt no longer carries: the tail keeps only recent conversation, and what it dropped stays readable here. The query is matched case-insensitively against the stored text of user turns, assistant text, tool calls and results, and skill prompts; every match is returned verbatim, oldest first, under a byte cap, and nothing is summarised. When the result ends with the cap marker, matches were dropped: narrow the query to see the rest.";
 
 // One rules message, the same object shape everywhere the rules are delivered:
 // the first-step copy from before_agent_start and the stored head asides are

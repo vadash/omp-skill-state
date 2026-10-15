@@ -1,9 +1,13 @@
 import { afterAll, describe, expect, jest, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { STATE_CORE_MESSAGE_TYPE, STATE_MIRROR_ENTRY_TYPE, STATE_SCRATCH_MESSAGE_TYPE, STATE_UPDATE_DESCRIPTION, STATE_UPDATE_TOOL_NAME, coreMessage, renderStateContent } from "../src/messages";
+import path from "node:path";
+import { RECALL_CAP_MARKER, RECALL_RESULT_BYTES } from "../src/recall";
+import { STATE_CORE_MESSAGE_TYPE, STATE_MIRROR_ENTRY_TYPE, STATE_RECALL_DESCRIPTION, STATE_RECALL_TOOL_NAME, STATE_SCRATCH_MESSAGE_TYPE, STATE_UPDATE_DESCRIPTION, STATE_UPDATE_TOOL_NAME, coreMessage, renderStateContent } from "../src/messages";
 import { newProcedure, recordReply } from "../src/procedure";
 import { DEFAULT_PARAMS } from "../src/state";
 import type { ExecutionState } from "../src/state";
+import { messageLine, titleSlotLine, transcriptStamp } from "./entries";
 import { fakeOmp } from "./fake-session";
 import type { FakeOmp } from "./fake-session";
 import { disengageNotices, engagedSession, engageAsideTypes, engageNotices, makeSkillSet, patchStep, procedureSchema, stateSends } from "./harness";
@@ -354,5 +358,133 @@ describe("omp-skill-state state_update registration", () => {
 		expect(result).toEqual({ content: [{ type: "text", text: "no active procedure" }], isError: true });
 		await s.step("ordinary");
 		expect(s.storedStates).toEqual([{}]);
+	});
+});
+
+describe("omp-skill-state state_recall registration", () => {
+	// A real transcript file under the suite's fixture root; the suite's
+	// afterAll cleans it up with the skills.
+	const jsonl = (name: string, lines: string[]) => {
+		const file = path.join(fx.root, name);
+		writeFileSync(file, lines.join("\n") + "\n");
+		return file;
+	};
+
+	test("registers the pinned definition at factory load, before any engage", async () => {
+		const omp = fakeOmp([procedure]);
+		const def = omp.tool(STATE_RECALL_TOOL_NAME)!;
+		expect(def.name).toBe(STATE_RECALL_TOOL_NAME);
+		expect(def.description).toBe(STATE_RECALL_DESCRIPTION);
+		expect(def.strict).toBe(true);
+		// Zero approval like the patch channel: a recall read never prompts.
+		expect(def.approval).toEqual({ tier: "read", policy: "allow" });
+		// The wrapper: exactly one query argument.
+		const parameters = def.parameters as { parse(value: unknown): unknown };
+		expect(parameters.parse({ query: "crimson" })).toEqual({ query: "crimson" });
+		expect(() => parameters.parse({})).toThrow();
+		expect(() => parameters.parse({ query: 3 })).toThrow();
+		expect(() => parameters.parse({ patch: {} })).toThrow();
+
+		// Registration is permanent: an engage adds nothing new.
+		await omp.session("s1").invoke("procedure");
+		expect(omp.tool(STATE_RECALL_TOOL_NAME)).toBe(def);
+	});
+
+	test("requests top-level presentation like the patch channel: the query travels as protocol-level JSON", async () => {
+		const omp = fakeOmp([procedure]);
+
+		await omp.session("s1").invoke("procedure");
+
+		expect(omp.tool(STATE_RECALL_TOOL_NAME)!.loadMode).toBe("essential");
+	});
+
+	test("declares exclusive scheduling like the patch channel", async () => {
+		const omp = fakeOmp([procedure]);
+
+		// Not on the extension-facing type; reaches the scheduler as a
+		// forwarded extra property, the untyped surface this assertion pins.
+		const def = omp.tool(STATE_RECALL_TOOL_NAME)! as { concurrency?: unknown };
+
+		expect(def.concurrency).toBe("exclusive");
+	});
+
+	test("a direct execute reads matching text back verbatim, oldest first, from the session's own transcript", async () => {
+		const omp = fakeOmp([procedure]);
+		const s = omp.session("s1");
+		s.sessionFile = jsonl("recall-verbatim.jsonl", [
+			titleSlotLine(),
+			JSON.stringify({ type: "session", id: "s1", timestamp: transcriptStamp }),
+			messageLine("user", "find the crimson report"),
+			messageLine("assistant", [{ type: "text", text: "the CRIMSON report is filed" }]),
+			messageLine("toolResult", [{ type: "text", text: "crimson bytes counted" }]),
+			JSON.stringify({ type: "custom", customType: "sh.omp.skill-state.mirror", data: { core: {}, scratch: {}, stamp: 1 } }),
+			"{oops",
+		]);
+		const def = omp.tool(STATE_RECALL_TOOL_NAME)!;
+
+		const result = await def.execute("t1", { query: "CRIMSON" }, undefined, undefined, s.ctx());
+
+		// Matches only: no-text and malformed lines are skipped, the padded
+		// title slot parses, every match is the file's own text in file order,
+		// and nothing was dropped so no marker rides.
+		expect(result.isError).toBeUndefined();
+		expect(result.content).toEqual([{ type: "text", text: "find the crimson report\n\nthe CRIMSON report is filed\n\ncrimson bytes counted" }]);
+	});
+
+	test("a transcript whose matches overflow the cap truncates with the exact marker", async () => {
+		const omp = fakeOmp([procedure]);
+		const s = omp.session("s1");
+		const chunk = "c".repeat(6000);
+		const shown = `crimson ${chunk}`;
+		s.sessionFile = jsonl("recall-oversized.jsonl", [
+			titleSlotLine(),
+			messageLine("user", shown),
+			messageLine("user", shown),
+			messageLine("user", shown),
+		]);
+		const def = omp.tool(STATE_RECALL_TOOL_NAME)!;
+
+		const result = await def.execute("t1", { query: "crimson" }, undefined, undefined, s.ctx());
+
+		expect(result.isError).toBeUndefined();
+		expect(result.content).toEqual([{ type: "text", text: `${shown}\n\n${shown}\n\nrecall cap 16384 bytes reached — oldest matches shown; narrow the query to see the rest` }]);
+		// The marker rides after the packed matches, outside the cap.
+		const text = (result.content as Array<{ type: string; text?: string }>)[0]!.text!;
+		expect(Buffer.byteLength(text.slice(0, text.length - RECALL_CAP_MARKER.length - 2))).toBeLessThanOrEqual(RECALL_RESULT_BYTES);
+	});
+
+	test("a transcript file that is missing on disk yields an empty non-error result", async () => {
+		const omp = fakeOmp([procedure]);
+		const s = omp.session("s1");
+		s.sessionFile = path.join(fx.root, "absent-transcript.jsonl");
+		const def = omp.tool(STATE_RECALL_TOOL_NAME)!;
+
+		const result = await def.execute("t1", { query: "crimson" }, undefined, undefined, s.ctx());
+
+		expect(result.isError).toBeUndefined();
+		expect(result.content).toEqual([{ type: "text", text: "" }]);
+	});
+
+	test("no transcript file at all yields an empty non-error result, never a cross-session read", async () => {
+		const omp = fakeOmp([procedure]);
+		const s = omp.session("s1");
+		const def = omp.tool(STATE_RECALL_TOOL_NAME)!;
+
+		const result = await def.execute("t1", { query: "crimson" }, undefined, undefined, s.ctx());
+
+		expect(result.isError).toBeUndefined();
+		expect(result.content).toEqual([{ type: "text", text: "" }]);
+	});
+
+	test("a transcript with no matching lines yields an empty non-error result", async () => {
+		const omp = fakeOmp([procedure]);
+		const s = omp.session("s1");
+		s.sessionFile = jsonl("recall-quiet.jsonl", [titleSlotLine(), messageLine("user", "nothing to see here")]);
+		const def = omp.tool(STATE_RECALL_TOOL_NAME)!;
+
+		const result = await def.execute("t1", { query: "crimson" }, undefined, undefined, s.ctx());
+
+		expect(result.isError).toBeUndefined();
+		expect(result.content).toEqual([{ type: "text", text: "" }]);
 	});
 });

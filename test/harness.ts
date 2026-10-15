@@ -58,8 +58,8 @@ export async function projectingSession(skill: Skill, id = "s1") {
 
 // The two stored state messages a commit sends, in order, as the fake records
 // them.
-export const stateSends = (state: ExecutionState, deliverAs: "aside" | "nextTurn") => {
-	const { core, scratch } = splitState(state, procedureSchema);
+export const stateSends = (state: ExecutionState, deliverAs: "aside" | "nextTurn", schema: StateSchema = procedureSchema) => {
+	const { core, scratch } = splitState(state, schema);
 	return [
 		{ payload: coreMessage(core) as Record<string, unknown>, options: { deliverAs } },
 		{ payload: scratchMessage(scratch) as Record<string, unknown>, options: { deliverAs } },

@@ -85,6 +85,33 @@ describe("parseStateSchema", () => {
 		expect(loaded).toMatchObject({ ok: true, params: { ...DEFAULT_PARAMS, idleSteps: 2 } });
 	});
 
+	const defaultKeys = ["constraints", "findings", "goal", "knowledge", "next_step", "open_questions", "plan", "working_dir"];
+
+	test("a marker that declares no properties selects the default schema", () => {
+		for (const body of [{ type: "object" }, {}, { type: "object", properties: {} }]) {
+			const loaded = parse(body);
+			expect(loaded.ok).toBe(true);
+			if (!loaded.ok) return;
+			expect(Object.keys(loaded.schema.properties ?? {}).sort()).toEqual(defaultKeys);
+			expect(loaded.params).toEqual(DEFAULT_PARAMS);
+		}
+	});
+
+	test("the default selection keeps the file's own x-state params", () => {
+		const loaded = parse({ type: "object", "x-state": { idleSteps: 2 } });
+		expect(loaded.ok).toBe(true);
+		if (!loaded.ok) return;
+		expect(Object.keys(loaded.schema.properties ?? {}).sort()).toEqual(defaultKeys);
+		expect(loaded.params).toEqual({ ...DEFAULT_PARAMS, idleSteps: 2 });
+	});
+
+	test("a schema that declares properties is returned as authored, not defaulted", () => {
+		const loaded = parse({ type: "object", properties: { goal: { type: "string" } } });
+		expect(loaded.ok).toBe(true);
+		if (!loaded.ok) return;
+		expect(Object.keys(loaded.schema.properties ?? {})).toEqual(["goal"]);
+	});
+
 	test("rejects a non-object schema", () => {
 		for (const body of ["text", 42, [], null, true]) {
 			expect(parse(body).ok).toBe(false);
@@ -674,6 +701,13 @@ describe("volatileKeys", () => {
 	test("non-string entries of an explicit list are dropped, not fatal", () => {
 		expect(volatileKeys({ type: "object", "x-state": { volatile: ["plan", 3] } })).toEqual(["plan"]);
 	});
+
+	test("the default-selected schema's explicit list beats the array heuristic: constraints stays core", () => {
+		const loaded = parseStateSchema({ type: "object" });
+		expect(loaded.ok).toBe(true);
+		if (!loaded.ok) return;
+		expect(volatileKeys(loaded.schema)).toEqual(["plan", "findings", "open_questions", "next_step"]);
+	});
 });
 
 describe("splitState", () => {
@@ -700,6 +734,27 @@ describe("splitState", () => {
 
 	test("an empty state splits to two empty partitions", () => {
 		expect(splitState({}, schema)).toEqual({ core: {}, scratch: {} });
+	});
+
+	test("on the default-selected schema the planning keys ride scratch, the rest of the key set the core", () => {
+		const loaded = parseStateSchema({ type: "object" });
+		expect(loaded.ok).toBe(true);
+		if (!loaded.ok) return;
+		const state: ExecutionState = {
+			goal: "land the fix",
+			working_dir: "/repo",
+			constraints: ["no network"],
+			knowledge: { port: 8080 },
+			plan: ["write tests"],
+			findings: ["flaky test"],
+			open_questions: ["which backport"],
+			next_step: "run tests",
+		};
+
+		const { core, scratch } = splitState(state, loaded.schema);
+
+		expect(core).toEqual({ goal: "land the fix", working_dir: "/repo", constraints: ["no network"], knowledge: { port: 8080 } });
+		expect(scratch).toEqual({ plan: ["write tests"], findings: ["flaky test"], open_questions: ["which backport"], next_step: "run tests" });
 	});
 
 	test("the partitions are disjoint and the input is not mutated", () => {

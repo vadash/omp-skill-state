@@ -64,12 +64,42 @@ function jsonEquals(a: JsonValue | undefined, b: JsonValue | undefined): boolean
 	return false;
 }
 
+const DEFAULT_VOLATILE = ["plan", "findings", "open_questions", "next_step"];
+
+// The default schema a marker selects when it names no properties: the zstate
+// key set without zstate's caps and params. The explicit volatile list keeps
+// constraints (array-typed) in the core, where the heuristic would send it to
+// scratch.
+const DEFAULT_SCHEMA: StateSchema = {
+	type: "object",
+	properties: {
+		goal: { type: "string" },
+		working_dir: { type: "string" },
+		constraints: { type: "array", items: { type: "string" } },
+		plan: { type: "array", items: { type: "string" } },
+		findings: { type: "array", items: { type: "string" } },
+		open_questions: { type: "array", items: { type: "string" } },
+		next_step: { type: "string" },
+		knowledge: { type: "object", additionalProperties: true },
+	},
+	"x-state": { volatile: DEFAULT_VOLATILE },
+};
+
 // Pure schema parsing: the shape check plus parameter clamping, no I/O. The
 // in-memory seam the unit tests table over; loadStateSchema wraps it around
 // the file read.
 export function parseStateSchema(parsed: unknown): SchemaLoad {
 	if (!isPlainObject(parsed)) return { ok: false, error: "state schema is not a JSON object" };
 	const schema = parsed as StateSchema;
+	// A marker that names no properties selects the default key set; the
+	// file's own x-state merges over the default's, so a params-only or
+	// volatile-only marker keeps its tuning where the default list does not.
+	const properties = schema.properties;
+	if (properties === undefined || (isPlainObject(properties) && Object.keys(properties).length === 0)) {
+		const xState = isPlainObject(schema["x-state"]) ? schema["x-state"] : {};
+		const selected: StateSchema = { ...DEFAULT_SCHEMA, "x-state": { volatile: DEFAULT_VOLATILE, ...xState } };
+		return { ok: true, schema: selected, params: readParams(selected["x-state"]) };
+	}
 	return { ok: true, schema, params: readParams(schema["x-state"]) };
 }
 

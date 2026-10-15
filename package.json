@@ -8,11 +8,13 @@
 	},
 	"scripts": {
 		"test": "bun test",
-		"typecheck": "tsc --noEmit"
+		"typecheck": "tsc --noEmit",
+		"repomix": "repomix --style markdown --output repomix-src.md --include \"src/**,docs/**,skills/**,tsconfig.json,package.json,CONTEXT.md,README.md,AGENTS.md\" && repomix --style markdown --output repomix-tests.md --include \"test/**,verification/**\""
 	},
 	"devDependencies": {
 		"@oh-my-pi/pi-coding-agent": "18.10.3",
 		"@types/bun": "^1.3.14",
+		"repomix": "^1.18.1",
 		"typescript": "^7.0.2"
 	}
 }

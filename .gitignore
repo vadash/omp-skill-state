@@ -1,3 +1,5 @@
 node_modules/
 verification/sessions/
 .scratch/
+repomix-src.md
+repomix-tests.md

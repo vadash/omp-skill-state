@@ -185,24 +185,31 @@ function pendingNudges(procedure: Procedure): AgentMessage[] {
 
 // The context handler's whole job: project the step's prompt, note whether
 // the stored head reached it — the fold counts only steps that saw the rules
-// — and append the turn's nudges. An unprojected step keeps the ordinary
-// context and carries the fallback notice once per episode: the first
-// unprojected step latches fallbackNoticed and rides the notice, later ones
-// return undefined untouched, and a projected step re-arms the latch. A
-// degraded step (ADR 0005) takes the middle road: the head is intact, so its
-// prompt is the head plus the degradation notice, never ordinary history, and
-// it stays policy-neutral — projected goes false, so the reply moves no
-// counter by way of the degradation and no policy nudge rides. The
-// degradation notice has no latch: it rides every degraded step, and the
-// first projected step is its re-arm. The whole prompt is never memoized
-// because a same-step context re-run after a compaction must rebuild from the
-// new messages; only the nudge memo, which is not stale-prone, is. The
-// projected flag, the notice latch, the nudge memo and its step key are
+// — and append the turn's nudges. The tail is read from the branch, not from
+// the prompt the event carries, so a compaction cut cannot shorten it; the
+// window size comes from the harness's context-usage read. An unprojected
+// step keeps the ordinary context and carries the fallback notice once per
+// episode: the first unprojected step latches fallbackNoticed and rides the
+// notice, later ones return undefined untouched, and a projected step re-arms
+// the latch. A degraded step (ADR 0005) takes the middle road: the head is
+// intact, so its prompt is the head plus the degradation notice, never
+// ordinary history, and it stays policy-neutral — projected goes false, so
+// the reply moves no counter by way of the degradation and no policy nudge
+// rides. The degradation notice has no latch: it rides every degraded step,
+// and the first projected step is its re-arm. The whole prompt is never
+// memoized because a same-step context re-run after a compaction must rebuild
+// from the new messages; only the nudge memo, which is not stale-prone, is.
+// The projected flag, the notice latch, the nudge memo and its step key are
 // private machinery: a caller cannot note without nudging or nudge without
 // noting, so the note-before-nudge ordering the two-call seam needed is
 // unstateable from outside.
-export function stepPrompt(procedure: Procedure, messages: AgentMessage[]): AgentMessage[] | undefined {
-	const projection = project(messages, procedure.params.observationBytes, procedure.params.observationWindow);
+export function stepPrompt(
+	procedure: Procedure,
+	messages: AgentMessage[],
+	branch: readonly AgentMessage[] = messages,
+	contextWindowTokens: number | undefined = undefined,
+): AgentMessage[] | undefined {
+	const projection = project(messages, branch, procedure.params, contextWindowTokens);
 	if (typeof projection === "string") {
 		procedure.projected = false;
 		if (procedure.fallbackNoticed) return undefined;
@@ -220,16 +227,16 @@ export function stepPrompt(procedure: Procedure, messages: AgentMessage[]): Agen
 	procedure.projected = true;
 	procedure.fallbackNoticed = false;
 	// The window notice rides this seam ahead of the nudges: data about the
-	// model's window precedes the policy asks built on it. The projected
-	// prompt's tool results are exactly the projected window, and the tags
-	// re-mint from the tool call ids, so no window state crosses the seam.
-	const windowed = projection.filter((message): message is Extract<AgentMessage, { role: "toolResult" }> => message.role === "toolResult");
-	const notice = windowed.length > 0
-		? [windowNoticeMessage(windowed.map((result) => ({ tag: pairTag(result.toolCallId), toolName: result.toolName })))]
+	// tail precedes the policy asks built on it. The projected prompt's tool
+	// results are exactly the tailed results, and the tags re-mint from the
+	// tool call ids, so no tail state crosses the seam.
+	const tailed = projection.filter((message): message is Extract<AgentMessage, { role: "toolResult" }> => message.role === "toolResult");
+	const notice = tailed.length > 0
+		? [windowNoticeMessage(tailed.map((result) => ({ tag: pairTag(result.toolCallId), toolName: result.toolName })))]
 		: [];
 	const nudges = pendingNudges(procedure);
-	const tail = [...notice, ...nudges];
-	return tail.length > 0 ? [...projection, ...tail] : projection;
+	const perCall = [...notice, ...nudges];
+	return perCall.length > 0 ? [...projection, ...perCall] : projection;
 }
 
 // The current state split into its two stored partitions, derived from the
@@ -254,7 +261,7 @@ export function stateMessages(procedure: Procedure): CustomMessagePayload[] {
 // with all four.
 export function headMessages(procedure: Procedure): CustomMessagePayload[] {
 	return [
-		rulesMessage(procedure.params),
+		rulesMessage(),
 		{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: procedure.spec, display: false, details: { name: procedure.name } },
 		...stateMessages(procedure),
 	];

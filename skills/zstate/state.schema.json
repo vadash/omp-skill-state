@@ -12,8 +12,9 @@
 	},
 	"additionalProperties": true,
 	"x-state": {
+		"promptBudgetPercent": 30,
+		"evictionChunkPercent": 25,
 		"observationBytes": 65536,
-		"observationWindow": 6,
 		"stateBytes": 32768,
 		"idleSteps": 8,
 		"retries": 3,

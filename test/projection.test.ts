@@ -1,36 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE } from "../src/messages";
+import { LEGACY_STATE_MESSAGE_TYPE, LIVE_STATE_CUSTOM_TYPES, OPERATING_RULES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE } from "../src/messages";
 import { project } from "../src/projection";
+import { DEFAULT_PARAMS } from "../src/state";
 import { isPlainObject } from "../src/types";
 import type { AgentMessage } from "../src/types";
 import { ZERO_USAGE } from "./entries";
 
-// Live-state blocks the harness injects around the model; all of them must
-// vanish from a projected prompt. The skill-state types appear too: an older
-// superseded head message must lose to the latest one, and the legacy single
-// state message must never leak into the projected tail.
-const DROPPED_CUSTOM_TYPES = [
-	"goal-mode-context",
-	"plan-mode-context",
-	"plan-mode-reference",
-	"eager-todo-prelude",
-	"eager-task-prelude",
-	"mid-run-todo-nudge",
-	"ttsr-injection",
-	"todo-error-reminder",
-	"experimental-context-notes-reminder",
-	"skill-prompt",
-	RULES_MESSAGE_TYPE,
-	PROCEDURE_SPEC_MESSAGE_TYPE,
-	STATE_CORE_MESSAGE_TYPE,
-	STATE_SCRATCH_MESSAGE_TYPE,
-	"sh.omp.skill-state.state",
-];
-
 let seq = 0;
 
 function custom(customType: string, content = "noise", details?: Record<string, unknown>): AgentMessage {
-	return { role: "custom", customType, content, display: false, ...(details === undefined ? {} : { details }), timestamp: seq++ };
+	return { role: "custom", customType, content, display: false, ...(details === undefined ? {} : { details }), timestamp: seq++ } as AgentMessage;
 }
 const rulesMsg = () => custom(RULES_MESSAGE_TYPE, OPERATING_RULES);
 const procedureSpecMsg = () => custom(PROCEDURE_SPEC_MESSAGE_TYPE, "Running skill recon\nBody of recon.");
@@ -55,7 +34,7 @@ function assistantText(text: string): AgentMessage {
 	return assistant([{ type: "text", text }]);
 }
 
-function toolResult(toolCallId: string, text: string, toolName = "read"): AgentMessage {
+function toolResult(toolCallId: string, text: string, toolName = "read"): Extract<AgentMessage, { role: "toolResult" }> {
 	return {
 		role: "toolResult",
 		toolCallId,
@@ -81,8 +60,12 @@ function asToolResult(message: AgentMessage): Extract<AgentMessage, { role: "too
 }
 
 // The success branch of project: the projected prompt itself.
-function projected(messages: AgentMessage[], observationBytes = 32768, observationWindow?: number): AgentMessage[] {
-	const out = observationWindow === undefined ? project(messages, observationBytes) : project(messages, observationBytes, observationWindow);
+function projected(
+	messages: AgentMessage[],
+	observationBytes = 32768,
+	opts: { windowTokens?: number; branch?: readonly AgentMessage[] } = {},
+): AgentMessage[] {
+	const out = project(messages, opts.branch ?? messages, { ...DEFAULT_PARAMS, observationBytes }, opts.windowTokens);
 	if (typeof out === "string") throw new Error(`unexpected fallback: ${out}`);
 	if (!Array.isArray(out)) throw new Error("unexpected degraded projection");
 	return out;
@@ -106,6 +89,11 @@ function textBytes(messages: readonly AgentMessage[]): number {
 	return total;
 }
 
+// Whole-message byte size, the proxy the tail budget itself measures.
+function byteSize(message: AgentMessage): number {
+	return Buffer.byteLength(JSON.stringify(message));
+}
+
 // The stored head: rules, procedure spec, state core, scratch state. The
 // projection returns the first three by reference and the scratch as a
 // per-call copy, so the expected scratch in an assertion is `perCall(h.scratch)`.
@@ -120,349 +108,255 @@ function perCall(stored: AgentMessage): AgentMessage {
 	return { ...stored, details: { ...details, perCall: true } };
 }
 
-describe("project assembly", () => {
-	test("tool-result step projects to rules, spec, core, scratch copy, pinned assistant, results in order", () => {
+// The prompt order: rules, spec, core, tail, scratch copy. The tail length
+// varies, so the scratch copy is located from the end.
+describe("project tail assembly", () => {
+	test("a step's prompt carries the run's recent conversation behind the state core, byte-identical to stored", () => {
 		const h = head();
-		const call = assistant([
-			{ type: "toolCall", id: "t1", name: "read", arguments: {} },
-			{ type: "toolCall", id: "t2", name: "read", arguments: {} },
-		]);
-		const result1 = toolResult("t1", "first");
-		const result2 = toolResult("t2", "second", "bash");
-		const messages = [
-			userMsg("old"),
-			assistantText("old"),
-			toolResult("t0", "old"),
-			custom("goal-mode-context"),
-			developerMsg("old instruction"),
-			...h.all,
-			custom("mid-run-todo-nudge"),
-			call,
-			result1,
-			custom("ttsr-injection"),
-			result2,
-		];
-		const out = projected(messages, 32768);
+		const turn = userMsg("the task, restated mid-run");
+		const prose = assistantText("Reading the config first.");
+		const call = assistantToolCall("t0");
+		const result = toolResult("t0", "file contents");
+		const newestCall = assistantToolCall("t1");
+		const newestResult = toolResult("t1", "newer contents");
+		// The head lands first at engage; the run's conversation is stored
+		// behind it and is the tail.
+		const branch = [...h.all, turn, prose, call, result, newestCall, newestResult];
 
-		expect(out.map((m) => m.role)).toEqual(["custom", "custom", "custom", "custom", "assistant", "toolResult", "toolResult"]);
-		expect(out.slice(0, 4).map((m) => (m.role === "custom" ? m.customType : m.role))).toEqual([
-			RULES_MESSAGE_TYPE,
-			PROCEDURE_SPEC_MESSAGE_TYPE,
-			STATE_CORE_MESSAGE_TYPE,
-			STATE_SCRATCH_MESSAGE_TYPE,
-		]);
-		expect(out[4]).toBe(call);
-		// Windowed results project as tagged copies; the stored objects pass
-		// through untouched (asserted in "project pair tags").
-		expect(out[5]).not.toBe(result1);
-		expect(asToolResult(out[5]!).content[0]).toEqual({ type: "text", text: "[#ecd6 read]\n" });
-		expect(out[6]).not.toBe(result2);
-		expect(asToolResult(out[6]!).content[0]).toEqual({ type: "text", text: "[#eb43 bash]\n" });
-	});
-
-	test("user step projects head plus trailing user batch, interleaved customs skipped", () => {
-		const h = head();
-		const first = userMsg("first");
-		const second = userMsg("second");
-		const out = projected([...h.all, custom("todo-error-reminder"), first, developerMsg("nudge"), second], 32768);
-
-		expect(out).toHaveLength(6);
-		expect(out[4]).toBe(first);
-		expect(out[5]).toBe(second);
-	});
-
-	test("a user turn projects the head, the preceding assistant prompt, and the user message", () => {
-		const h = head();
-		const promptAssistant = assistantText("Which candidate: (A) or (B)? I recommend (A).");
-		const userReply = userMsg("Agree with recommendations.");
-
-		const out = projected([...h.all, promptAssistant, userReply], 32768);
-
-		// Head (4) + Preceding Assistant (1) + User Reply (1) = 6
-		expect(out).toHaveLength(6);
-		expect(out[4]).toBe(promptAssistant);
-		expect(out[5]).toBe(userReply);
-	});
-
-	test("multiple user messages still keep the single preceding assistant prompt", () => {
-		const h = head();
-		const promptAssistant = assistantText("Ready to proceed?");
-		const user1 = userMsg("Yes.");
-		const user2 = userMsg("Also remember to check tests.");
-
-		const out = projected([...h.all, promptAssistant, user1, user2], 32768);
-
-		expect(out).toHaveLength(7);
-		expect(out[4]).toBe(promptAssistant);
-		expect(out[5]).toBe(user1);
-		expect(out[6]).toBe(user2);
-	});
-
-	test("a user turn without a preceding assistant message projects head plus user turn only", () => {
-		const h = head();
-		const user = userMsg("First instruction");
-
-		const out = projected([...h.all, user], 32768);
-
-		expect(out).toHaveLength(5);
-		expect(out[4]).toBe(user);
-	});
-
-	test("a notice between the assistant prompt and the user reply does not break the pair", () => {
-		const h = head();
-		const promptAssistant = assistantText("Ready to proceed?");
-		const reply = userMsg("Yes.");
-		const out = projected([...h.all, promptAssistant, custom("todo-error-reminder"), reply], 32768);
-
-		expect(out).toHaveLength(6);
-		expect(out[4]).toBe(promptAssistant);
-		expect(out[5]).toBe(reply);
-	});
-
-	test("a tool result between the last turn and the reply means no antecedent", () => {
-		const h = head();
-		const call = assistantToolCall("t1");
-		const result = toolResult("t1", "ok");
-		const reply = userMsg("now widen the search");
-		const out = projected([...h.all, call, result, reply], 32768);
-
-		expect(out).toHaveLength(5);
-		expect(out[4]).toBe(reply);
-	});
-
-	test("the head and the pinned assistant stay identity references under the cap; windowed results are tagged copies", () => {
-		const h = head();
-		const call = assistantToolCall("t1");
-		const result = toolResult("t1", "ok");
-		const out = projected([...h.all, call, result], 32768);
+		const out = projected([...h.all, turn, prose, call, result, newestCall, newestResult]);
 
 		expect(out[0]).toBe(h.rules);
 		expect(out[1]).toBe(h.procedureSpec);
 		expect(out[2]).toBe(h.core);
-		expect(out[4]).toBe(call);
-		expect(out[5]).not.toBe(result);
+		// The tail: every stored message after the newest head custom, oldest first.
+		expect(out[3]).toBe(turn);
+		expect(out[4]).toBe(prose);
+		expect(out[5]).toBe(call);
+		expect(out[7]).toBe(newestCall);
+		// Tool results are the one tail exception: the stored content rides
+		// unchanged behind the added tag line.
+		expect(asToolResult(out[6]!).content.slice(1)).toEqual(result.content);
+		expect(asToolResult(out[8]!).content.slice(1)).toEqual(newestResult.content);
+		// The scratch copy closes the prompt.
+		expect(out).toHaveLength(10);
+		expect(out.at(-1)).toEqual(perCall(h.scratch));
 	});
 
-	test("the projected scratch is a per-call copy: unequal to the stored message, same model-visible bytes", () => {
+	test("the tail rides between the state core and the scratch copy", () => {
 		const h = head();
-		const out = projected([...h.all, assistantToolCall("t1"), toolResult("t1", "ok")], 32768);
-		const copy = out[3]!;
+		const out = projected([...h.all, userMsg("turn"), assistantText("prose")]);
 
-		expect(copy).not.toEqual(h.scratch);
-		if (copy.role !== "custom" || h.scratch.role !== "custom") throw new Error("scratch head message is not a custom message");
-		expect(copy.role).toBe(h.scratch.role);
-		expect(copy.customType).toBe(h.scratch.customType);
-		expect(copy.content).toBe(h.scratch.content);
-		// The one distinguishing field lives in details, outside role/content,
-		// so the harness's deep-equality marking catches it and the provider
-		// payload never sees it.
-		const copyDetails = copy.details;
-		expect(copyDetails !== null && typeof copyDetails === "object" && "perCall" in copyDetails && copyDetails.perCall).toBe(true);
-		const storedDetails = h.scratch.details;
-		expect(storedDetails !== null && typeof storedDetails === "object" && "perCall" in storedDetails).toBe(false);
+		expect(out.map((m) => m.role)).toEqual(["custom", "custom", "custom", "user", "assistant", "custom"]);
+		expect(out[2]!.role === "custom" && out[2].customType).toBe(STATE_CORE_MESSAGE_TYPE);
+		expect(out.at(-1)).toEqual(perCall(h.scratch));
 	});
 
-	test("the projected core is the stored reference: byte-equal across steps unless a core key changed", () => {
-		const first = custom(STATE_CORE_MESSAGE_TYPE, '{"goal":"x"}', { state: { goal: "x" } });
-		const second = custom(STATE_CORE_MESSAGE_TYPE, '{"goal":"x"}', { state: { goal: "x" } });
-		const changed = custom(STATE_CORE_MESSAGE_TYPE, '{"goal":"y"}', { state: { goal: "y" } });
-		const step = [assistantToolCall("t1"), toolResult("t1", "ok")];
-		if (first.role !== "custom" || second.role !== "custom" || changed.role !== "custom") throw new Error("core fixture is not a custom message");
-
-		// Returning the stored object itself is what keeps the bytes identical:
-		// the projected core is the reference, never a re-rendering.
-		const out = projected([rulesMsg(), procedureSpecMsg(), first, scratchMsg(), ...step], 32768);
-		expect(out[2]).toBe(first);
-
-		const resaved = projected([rulesMsg(), procedureSpecMsg(), first, second, scratchMsg(), ...step], 32768);
-		expect(resaved[2]).toBe(second);
-		expect(resaved[2]?.role === "custom" ? resaved[2].content : undefined).toBe(first.content);
-
-		const moved = projected([rulesMsg(), procedureSpecMsg(), first, changed, scratchMsg(), ...step], 32768);
-		expect(moved[2]).toBe(changed);
-		expect(moved[2]?.role === "custom" ? moved[2].content : undefined).not.toBe(first.content);
-	});
-
-	test("last wins per type: two stored scratch or core messages project the later one", () => {
+	test("the tail begins after the newest spine custom: a later rules or spec copy cuts everything before it", () => {
 		const h = head();
-		const olderScratch = scratchMsg({ plan: ["old"] });
-		const latestScratch = scratchMsg({ plan: ["new"] });
-		const out = projected([h.rules, olderScratch, h.procedureSpec, latestScratch, h.core, assistantToolCall("t1"), toolResult("t1", "ok")], 32768);
+		const mid = userMsg("mid-run turn");
+		const lateSpec = custom(PROCEDURE_SPEC_MESSAGE_TYPE, "re-sent spec");
+		const latest = userMsg("latest turn");
+		const out = projected([...h.all, mid, lateSpec, latest]);
 
-		expect(out[3]).toEqual(perCall(latestScratch));
-		expect(out[3]).not.toEqual(perCall(olderScratch));
-
-		const olderCore = coreMsg({ goal: "old" });
-		const latestCore = coreMsg({ goal: "new" });
-		const out2 = projected([h.rules, olderCore, latestCore, h.procedureSpec, h.scratch, assistantToolCall("t1"), toolResult("t1", "ok")], 32768);
-
-		expect(out2[2]).toBe(latestCore);
+		// The re-sent spec is the newest spine custom, so the mid-run turn
+		// sits before the tail's start and the latest turn is the whole tail.
+		// The later scratch only wins the head lookup; it is excluded from the
+		// tail by type.
+		expect(out).toHaveLength(5);
+		expect(out[0]).toBe(h.rules);
+		expect(out[1]).toBe(lateSpec);
+		expect(out[3]).toBe(latest);
+		expect(out.some((m) => m === mid)).toBe(false);
+		expect(out.at(-1)).toEqual(perCall(h.scratch));
 	});
 
-	test("every live-state block, developer message and earlier turn is dropped", () => {
-		for (const type of DROPPED_CUSTOM_TYPES) {
-			const h = head();
-			const call = assistantToolCall("t1");
-			const result = toolResult("t1", "ok");
-			const messages = [
-				userMsg("old"),
-				assistantText("old"),
-				toolResult("t0", "old"),
-				custom(type),
-				...h.all,
-				custom(type),
-				call,
-				custom(type),
-				result,
-			];
-			// The latest custom of a head type wins, so an injected older head
-			// message of the same type supersedes the fixture's copy. The
-			// legacy single state message is never a head message: it only
-			// ever vanishes.
-			const lastInjected = messages[10]!;
-			// The windowed result projects as its tagged copy: the tag line is
-			// content's first text block, the stored blocks follow it.
-			if (result.role !== "toolResult") throw new Error("fixture is not a tool result");
-			const tagged = { ...result, content: [{ type: "text" as const, text: "[#ecd6 read]\n" }, ...result.content] };
-			const expected = [
-				type === RULES_MESSAGE_TYPE ? lastInjected : h.rules,
-				type === PROCEDURE_SPEC_MESSAGE_TYPE ? lastInjected : h.procedureSpec,
-				type === STATE_CORE_MESSAGE_TYPE ? lastInjected : h.core,
-				type === STATE_SCRATCH_MESSAGE_TYPE ? perCall(lastInjected) : perCall(h.scratch),
-				call,
-				tagged,
-			];
-			expect(projected(messages, 32768)).toEqual(expected);
+	test("superseded head copies and live-state blocks never appear in the tail; other stored messages do", () => {
+		const h = head();
+		const tailProbe = [userMsg("turn"), assistantText("prose"), developerMsg("stored developer line"), custom("skill-prompt")];
+		const dropped = [...LIVE_STATE_CUSTOM_TYPES, RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, LEGACY_STATE_MESSAGE_TYPE];
+		for (const type of dropped) {
+			const out = projected([...h.all, custom(type), ...tailProbe, assistantToolCall("t1"), toolResult("t1", "ok")]);
+			// An injected head-type copy can win the head lookup (last of its
+			// type), so the claim is over the tail region: the prompt between
+			// the core and the scratch copy carries none of the dropped types.
+			const tailRegion = out.slice(3, -1);
+			expect(tailRegion.some((m) => "customType" in m && m.customType === type)).toBe(false);
+			for (const probe of tailProbe) expect(tailRegion.some((m) => m === probe)).toBe(true);
 		}
-	});
-
-	test("a developer message dropped between the pinned assistant and its results keeps pairing", () => {
-		const h = head();
-		const call = assistantToolCall("t1");
-		const result = toolResult("t1", "ok");
-		const out = projected([...h.all, call, developerMsg("interleave"), result], 32768);
-
-		expect(out).toHaveLength(6);
-		expect(out[4]).toBe(call);
-		expect(out[5]).not.toBe(result);
-		expect(asToolResult(out[5]!).toolCallId).toBe("t1");
-	});
-
-	test("a dropped head message fails the projection as incomplete-head", () => {
-		const complete = [...head().all, assistantToolCall("t1"), toolResult("t1", "ok")];
-		for (const drop of [0, 1, 2, 3]) {
-			expect(project(complete.filter((_, i) => i !== drop), 32768)).toBe("incomplete-head");
-		}
-	});
-
-	test("a legacy single state message never completes the head: the projection reports incomplete-head", () => {
-		const h = head();
-		const legacy = [...h.all.slice(0, 2), custom("sh.omp.skill-state.state", "{}", { state: { goal: "x" } })];
-		expect(project([...legacy, assistantToolCall("t1"), toolResult("t1", "ok")], 32768)).toBe("incomplete-head");
-		expect(project([...h.all.slice(0, 2), h.core, legacy[2]!, assistantToolCall("t1"), toolResult("t1", "ok")], 32768)).toBe("incomplete-head");
-	});
-
-	test("the stored head with a text-only trailing assistant projects to the head only", () => {
-		const h = head();
-		const out = projected([...h.all, assistantText("thinking out loud")], 32768);
-
-		expect(out).toEqual([h.rules, h.procedureSpec, h.core, perCall(h.scratch)]);
-	});
-
-	test("a fresh procedure with only the skill prompt and the head projects to the head only", () => {
-		const h = head();
-		const out = projected([custom("skill-prompt"), ...h.all, developerMsg("note")], 32768);
-
-		expect(out).toEqual([h.rules, h.procedureSpec, h.core, perCall(h.scratch)]);
-	});
-
-	test("project never mutates its input, including under truncation", () => {
-		const truncated = [...head().all, assistantToolCall("t1"), toolResult("t1", "y".repeat(500))];
-		const snapshot = structuredClone(truncated);
-		projected(truncated, 200);
-		expect(truncated).toEqual(snapshot);
-
-		const untouched = [...head().all, userMsg("keep")];
-		const snapshot2 = structuredClone(untouched);
-		projected(untouched, 10);
-		expect(untouched).toEqual(snapshot2);
 	});
 });
 
-describe("project observation cap", () => {
-	test("over the cap the largest result is cut from the end and carries the marker", () => {
+describe("project tail budget", () => {
+	test("an over-budget tail evicts down to the newest message when the budget is zero", () => {
+		const h = head();
+		const newest = toolResult("t2", "newest");
+		const tail = [userMsg("old"), assistantText("old"), assistantToolCall("t1"), toolResult("t1", "x".repeat(2000)), assistantToolCall("t2"), newest];
+		// A 1000-token window leaves a negative budget after the head and the
+		// reserve: the tail evicts everything but the newest message.
+		const out = projected([...h.all, ...tail], 32768, { windowTokens: 1000 });
+
+		expect(out).toHaveLength(5);
+		expect(asToolResult(out[3]!).toolCallId).toBe("t2");
+		expect(asToolResult(out[3]!).content.slice(1)).toEqual(newest.content);
+		expect(out.at(-1)).toEqual(perCall(h.scratch));
+	});
+
+	test("eviction is chunked: the tail's front holds still across many steps", () => {
+		const h = head();
+		const branch: AgentMessage[] = [...h.all];
+		const fronts: string[] = [];
+		for (let step = 1; step <= 60; step++) {
+			branch.push(assistantToolCall(`t${step}`), toolResult(`t${step}`, "x".repeat(2000)));
+			const out = projected([...branch], 32768, { windowTokens: 100_000 });
+			const front = out[3]!;
+			fronts.push(front.role === "toolResult" ? asToolResult(front).toolCallId : JSON.stringify(front).slice(0, 40));
+		}
+		// Per-step eviction would move the front on every step after the first
+		// eviction; chunked eviction holds it for runs of steps.
+		let longestRun = 1;
+		let run = 1;
+		let moves = 0;
+		for (let i = 1; i < fronts.length; i++) {
+			if (fronts[i] === fronts[i - 1]) {
+				run++;
+				longestRun = Math.max(longestRun, run);
+			} else {
+				run = 1;
+				moves++;
+			}
+		}
+		expect(longestRun).toBeGreaterThanOrEqual(5);
+		expect(moves).toBeLessThanOrEqual(12);
+	});
+
+	test("the projected prompt stays under the budget and sawtooths at evictions", () => {
+		const h = head();
+		const windowTokens = 100_000;
+		const windowBytes = windowTokens * 4;
+		const budget = windowBytes * (DEFAULT_PARAMS.promptBudgetPercent / 100);
+		const branch: AgentMessage[] = [...h.all];
+		const sizes: number[] = [];
+		for (let step = 1; step <= 60; step++) {
+			branch.push(assistantToolCall(`t${step}`), toolResult(`t${step}`, "x".repeat(2000)));
+			const out = projected([...branch], 32768, { windowTokens });
+			const total = out.reduce((sum, message) => sum + byteSize(message), 0);
+			// The budget may be exceeded by at most the newest message's size,
+			// which the per-result cap bounds.
+			expect(total).toBeLessThanOrEqual(budget + byteSize(branch.at(-1)!));
+			sizes.push(total);
+		}
+		// Sawtooth: at least one eviction drops the prompt by more than one
+		// step's growth.
+		const stepGrowth = byteSize(assistantToolCall("t")) + byteSize(toolResult("t", "x".repeat(2000)));
+		expect(sizes.some((size, i) => i > 0 && sizes[i - 1]! - size > stepGrowth)).toBe(true);
+	});
+
+	test("eviction never removes the newest message, however large it is", () => {
+		const h = head();
+		const huge = toolResult("t1", "x".repeat(50_000));
+		// The cap is raised out of the way so the eviction claim stands alone.
+		const out = projected([...h.all, userMsg("old"), huge], 1_000_000, { windowTokens: 1000 });
+
+		// The budget is negative at this window, so everything but the newest
+		// message evicts; the newest rides however far over it is.
+		expect(out).toHaveLength(5);
+		expect(asToolResult(out[3]!).toolCallId).toBe("t1");
+		expect(asToolResult(out[3]!).content.slice(1)).toEqual(huge.content);
+	});
+});
+
+describe("project result cap", () => {
+	test("an oversized tailed result is capped at observationBytes from the end and carries the marker", () => {
 		const h = head();
 		const result = toolResult("call-9", "a".repeat(400), "bash");
 		const out = projected([...h.all, assistantToolCall("call-9", "bash"), result], 300);
-		const capped = asToolResult(out[5]!);
+		const capped = asToolResult(out[4]!);
 		const marker = capped.content.at(-1)!;
 
-		expect(out[5]).not.toBe(result);
+		expect(out[4]).not.toBe(result);
 		expect(capped.toolCallId).toBe("call-9");
 		expect(marker.type).toBe("text");
 		const markerText = marker.type === "text" ? marker.text : "";
 		expect(markerText).toMatch(
-			/^\[skill-state: observation cap 300 bytes exceeded; cut \d+ bytes from the end of this bash result \(call-9\); re-run the tool on a narrower range to read the rest\]$/,
+			/^\[skill-state: result cap 300 bytes exceeded; cut \d+ bytes from the end of this bash result \(call-9\); re-run the tool on a narrower range to read the rest\]$/,
 		);
 		const cut = Number(markerText.match(/cut (\d+) bytes/)![1]);
 		// The tag line is content[0]; the trimmed original text follows it.
 		const kept = capped.content[1]!;
 		expect(kept.type).toBe("text");
 		expect(cut).toBe(400 - Buffer.byteLength(kept.type === "text" ? kept.text : ""));
-		expect(textBytes(out.filter((m) => m.role === "toolResult"))).toBeLessThanOrEqual(300);
+		expect(textBytes([out[4]!])).toBeLessThanOrEqual(340);
 	});
 
 	test("under the cap the stored text passes through behind the tag line", () => {
 		const h = head();
 		const result = toolResult("t1", "small");
-		const out = projected([...h.all, assistantToolCall("t1"), result], 32768);
+		const out = projected([...h.all, assistantToolCall("t1"), result]);
 
-		expect(out[5]).not.toBe(result);
-		expect(asToolResult(out[5]!).content).toEqual([{ type: "text", text: "[#ecd6 read]\n" }, { type: "text", text: "small" }]);
+		expect(out[4]).not.toBe(result);
+		expect(asToolResult(out[4]!).content).toEqual([{ type: "text", text: "[#ecd6 read]\n" }, { type: "text", text: "small" }]);
 	});
 
 	test("multi-byte UTF-8 is cut on code point boundaries without replacement chars", () => {
 		const h = head();
 		const result = toolResult("t1", "€".repeat(200));
 		const out = projected([...h.all, assistantToolCall("t1"), result], 300);
-		const capped = asToolResult(out[5]!);
+		const capped = asToolResult(out[4]!);
 		const text = capped.content
 			.map((b) => (b.type === "text" ? b.text : ""))
 			.join("");
 
 		expect(text).not.toContain("�");
-		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(300);
+		// The floor is one tag line plus one marker; the kept text stays under
+		// the cap with the marker the floor forces.
+		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(340);
 	});
 
-	test("two oversized results are both cut as needed", () => {
+	test("the cap is per result: under-cap results never touch it even when the total exceeds it", () => {
+		const h = head();
+		const r1 = toolResult("t1", "1".repeat(250));
+		const r2 = toolResult("t2", "2".repeat(250), "bash");
+		const out = projected([...h.all, assistant([
+			{ type: "toolCall", id: "t1", name: "read", arguments: {} },
+			{ type: "toolCall", id: "t2", name: "read", arguments: {} },
+		]), r1, r2], 300)!;
+
+		// Each result fits its own cap, so neither is cut even though the two
+		// together exceed 300 bytes: the cap is per result, not cumulative.
+		expect(asToolResult(out[4]!).content).toEqual([{ type: "text", text: "[#ecd6 read]\n" }, { type: "text", text: "1".repeat(250) }]);
+		expect(asToolResult(out[5]!).content).toEqual([{ type: "text", text: "[#eb43 bash]\n" }, { type: "text", text: "2".repeat(250) }]);
+	});
+
+	test("two oversized results are both cut, each to its own cap", () => {
 		const h = head();
 		const r1 = toolResult("t1", "1".repeat(300));
 		const r2 = toolResult("t2", "2".repeat(300), "bash");
 		const out = projected([...h.all, assistant([
 			{ type: "toolCall", id: "t1", name: "read", arguments: {} },
 			{ type: "toolCall", id: "t2", name: "read", arguments: {} },
-		]), r1, r2], 350)!;
-		const capped1 = asToolResult(out[5]!);
-		const capped2 = asToolResult(out[6]!);
+		]), r1, r2], 150)!;
+		const capped1 = asToolResult(out[4]!);
+		const capped2 = asToolResult(out[5]!);
+
+		expect(out[4]).not.toBe(r1);
+		expect(out[5]).not.toBe(r2);
 		const marker1 = capped1.content.at(-1)!;
 		const marker2 = capped2.content.at(-1)!;
-
-		expect(out[5]).not.toBe(r1);
-		expect(out[6]).not.toBe(r2);
 		expect(marker1.type === "text" && marker1.text).toContain("this read result (t1)");
 		expect(marker2.type === "text" && marker2.text).toContain("this bash result (t2)");
-		expect(textBytes(out.filter((m) => m.role === "toolResult"))).toBeLessThanOrEqual(350);
+		expect(textBytes([capped1])).toBeLessThanOrEqual(190);
+		expect(textBytes([capped2])).toBeLessThanOrEqual(190);
 	});
 
-	test("below one marker per result, every result is cut to its whole marker (the cap's floor)", () => {
+	test("below one tag line plus one marker, every result is cut to its floor", () => {
 		const h = head();
 		const r1 = toolResult("t1", "1".repeat(300));
 		const r2 = toolResult("t2", "2".repeat(300), "bash");
 		const out = projected([...h.all, assistant([
 			{ type: "toolCall", id: "t1", name: "read", arguments: {} },
 			{ type: "toolCall", id: "t2", name: "read", arguments: {} },
-		]), r1, r2], 100)!;
-		const capped = [asToolResult(out[5]!), asToolResult(out[6]!)];
+		]), r1, r2], 30)!;
+		const capped = [asToolResult(out[4]!), asToolResult(out[5]!)];
 
 		for (const [i, result] of capped.entries()) {
 			expect(result.content).toHaveLength(2);
@@ -474,24 +368,26 @@ describe("project observation cap", () => {
 			const marker = result.content[1]!;
 			expect(marker.type === "text" && marker.text).toMatch(new RegExp(`cut \\d+ bytes from the end of this ${tool} result`));
 		}
-		expect(textBytes(capped)).toBeGreaterThan(100);
 	});
 
-	test("the user turn is never truncated", () => {
+	test("tag bytes count toward the cap: content under the cap alone is over it once tagged", () => {
 		const h = head();
-		const turn = userMsg("u".repeat(5000));
-		const out = projected([...h.all, turn], 100);
+		// 290 bytes sits under the 300 cap; the 13-byte tag line pushes it over.
+		const out = projected([...h.all, assistantToolCall("t1"), toolResult("t1", "x".repeat(290))], 300)!;
+		const capped = asToolResult(out[4]!);
 
-		expect(out[4]).toBe(turn);
+		expect(capped.content[0]).toEqual({ type: "text", text: "[#ecd6 read]\n" });
+		expect(capped.content.at(-1)).toMatchObject({ type: "text", text: expect.stringContaining("result cap 300 bytes exceeded") });
 	});
 
-	test("a total exactly at the cap is over it once the tag line is counted", () => {
+	test("the tag line composes with truncation: tag stays the first line, marker at the cut end", () => {
 		const h = head();
-		const result = toolResult("t1", "x".repeat(300));
-		const out = projected([...h.all, assistantToolCall("t1"), result], 300);
+		const out = projected([...h.all, assistantToolCall("call-9", "bash"), toolResult("call-9", "a".repeat(400), "bash")], 300);
+		const capped = asToolResult(out[4]!);
 
-		expect(out[5]).not.toBe(result);
-		expect(asToolResult(out[5]!).content.at(-1)).toMatchObject({ type: "text", text: expect.stringContaining("observation cap 300 bytes exceeded") });
+		expect(capped.content[0]).toEqual({ type: "text", text: "[#82af bash]\n" });
+		const marker = capped.content.at(-1)!;
+		expect(marker.type === "text" && marker.text).toContain("result cap 300 bytes exceeded");
 	});
 
 	test("non-text blocks are neither counted nor cut", () => {
@@ -510,173 +406,48 @@ describe("project observation cap", () => {
 			{ type: "toolCall", id: "t2", name: "bash", arguments: {} },
 		]), image, text], 300)!;
 
-		// The image result is windowed too: its projected copy gains the tag
+		// The image result is tailed too: its projected copy gains the tag
 		// line, the image block itself rides uncounted and uncut behind it.
-		expect(out[5]).not.toBe(image);
-		expect(asToolResult(out[5]!).content[0]).toEqual({ type: "text", text: "[#ecd6 read]\n" });
-		expect(asToolResult(out[5]!).content[1]).toEqual({ type: "image", data: "A".repeat(1000), mimeType: "image/png" });
-		expect(out[6]).not.toBe(text);
-		expect(textBytes([out[6]!])).toBeLessThanOrEqual(300);
-	});
-});
-
-describe("project observation window", () => {
-	test("window 3 pins the three most recent pairs in chronological order and drops older pairs", () => {
-		const h = head();
-		const droppedCall = assistantToolCall("t0");
-		const droppedResult = toolResult("t0", "old");
-		const call1 = assistantToolCall("t1");
-		const result1 = toolResult("t1", "first");
-		const call2 = assistantToolCall("t2", "bash");
-		const result2 = toolResult("t2", "second", "bash");
-		const call3 = assistantToolCall("t3");
-		const result3 = toolResult("t3", "third");
-		const out = projected(
-			[...h.all, droppedCall, droppedResult, call1, result1, call2, result2, call3, result3],
-			32768,
-			3,
-		)!;
-
-		expect(out).toHaveLength(10);
-		expect(out[4]).toBe(call1);
-		expect(out[5]).not.toBe(result1);
-		expect(asToolResult(out[5]!).content[0]).toEqual({ type: "text", text: "[#ecd6 read]\n" });
-		expect(out[6]).toBe(call2);
-		expect(out[7]).not.toBe(result2);
-		expect(asToolResult(out[7]!).content[0]).toEqual({ type: "text", text: "[#eb43 bash]\n" });
-		expect(out[8]).toBe(call3);
-		expect(out[9]).not.toBe(result3);
+		expect(out[4]).not.toBe(image);
+		expect(asToolResult(out[4]!).content[0]).toEqual({ type: "text", text: "[#ecd6 read]\n" });
+		expect(asToolResult(out[4]!).content[1]).toEqual({ type: "image", data: "A".repeat(1000), mimeType: "image/png" });
+		expect(out[5]).not.toBe(text);
+		expect(textBytes([out[5]!])).toBeLessThanOrEqual(340);
 	});
 
-	test("a mismatched older pair stops the walk and keeps the newer pairs", () => {
-		const h = head();
-		const call1 = assistantToolCall("t1");
-		const result1 = toolResult("t1", "first");
-		const call2 = assistantToolCall("t2");
-		const result2 = toolResult("t2", "second");
-		const out = projected(
-			[...h.all, assistantToolCall("t0"), toolResult("tZ", "mismatch"), call1, result1, call2, result2],
-			32768,
-			3,
-		)!;
+	test("project never mutates its input, including under eviction and truncation", () => {
+		const truncated = [...head().all, assistantToolCall("t1"), toolResult("t1", "y".repeat(500))];
+		const snapshot = structuredClone(truncated);
+		projected(truncated, 200);
+		expect(truncated).toEqual(snapshot);
 
-		expect(out).toHaveLength(8);
-		expect(out[4]).toBe(call1);
-		expect(asToolResult(out[5]!).toolCallId).toBe("t1");
-		expect(out[6]).toBe(call2);
-		expect(asToolResult(out[7]!).toolCallId).toBe("t2");
-	});
-
-	test("an older pair whose nearest message is not an assistant stops the walk", () => {
-		const h = head();
-		const call1 = assistantToolCall("t1");
-		const result1 = toolResult("t1", "first");
-		const call2 = assistantToolCall("t2");
-		const result2 = toolResult("t2", "second");
-		const out = projected([...h.all, userMsg("plain turn"), call1, result1, call2, result2], 32768, 3);
-
-		expect(out).toHaveLength(8);
-		expect(out[4]).toBe(call1);
-		expect(asToolResult(out[7]!).toolCallId).toBe("t2");
-	});
-
-	test("an older assistant with no results of its own stops the walk", () => {
-		const h = head();
-		const call2 = assistantToolCall("t2");
-		const result2 = toolResult("t2", "second");
-		const out = projected([...h.all, assistantToolCall("t1"), call2, result2], 32768, 3);
-
-		expect(out).toHaveLength(6);
-		expect(out[4]).toBe(call2);
-		expect(asToolResult(out[5]!).toolCallId).toBe("t2");
-	});
-
-	test("a window wider than the available pairs projects the pairs that exist", () => {
-		const h = head();
-		const call1 = assistantToolCall("t1");
-		const result1 = toolResult("t1", "first");
-		const call2 = assistantToolCall("t2");
-		const result2 = toolResult("t2", "second");
-		const out = projected([...h.all, call1, result1, call2, result2], 32768, 5);
-
-		expect(out).toHaveLength(8);
-		expect(out[4]).toBe(call1);
-		expect(asToolResult(out[7]!).toolCallId).toBe("t2");
-	});
-
-	test("the cap covers the whole window: both pairs are cut, largest first", () => {
-		const h = head();
-		const r1 = toolResult("t1", "1".repeat(300));
-		const r2 = toolResult("t2", "2".repeat(300), "bash");
-		const out = projected(
-			[...h.all, assistantToolCall("t1"), r1, assistantToolCall("t2", "bash"), r2],
-			350,
-			2,
-		)!;
-		const capped1 = asToolResult(out[5]!);
-		const capped2 = asToolResult(out[7]!);
-
-		expect(out[5]).not.toBe(r1);
-		expect(out[7]).not.toBe(r2);
-		expect(capped1.content.at(-1)).toMatchObject({ type: "text", text: expect.stringContaining("this read result (t1)") });
-		expect(capped2.content.at(-1)).toMatchObject({ type: "text", text: expect.stringContaining("this bash result (t2)") });
-		expect(textBytes(out.filter((m) => m.role === "toolResult"))).toBeLessThanOrEqual(350);
-	});
-
-	test("below one marker per result across the window, every result is cut to its whole marker", () => {
-		const h = head();
-		const r1 = toolResult("t1", "1".repeat(300));
-		const r2 = toolResult("t2", "2".repeat(300), "bash");
-		const out = projected(
-			[...h.all, assistantToolCall("t1"), r1, assistantToolCall("t2", "bash"), r2],
-			100,
-			2,
-		)!;
-		const capped = [asToolResult(out[5]!), asToolResult(out[7]!)];
-
-		for (const [i, result] of capped.entries()) {
-			expect(result.content).toHaveLength(2);
-			const tag = result.content[0]!;
-			const tool = i === 0 ? "read" : "bash";
-			// The tag line survives the floor: it is what still identifies the
-			// result and what the window notice names.
-			expect(tag.type === "text" && tag.text).toMatch(new RegExp(`^\\[#\\w{4} ${tool}\\]`));
-			const marker = result.content[1]!;
-			expect(marker.type === "text" && marker.text).toMatch(new RegExp(`cut \\d+ bytes from the end of this ${tool} result`));
-		}
-		expect(textBytes(capped)).toBeGreaterThan(100);
-	});
-
-	test("project never mutates its input with a wider window, including under truncation", () => {
-		const messages = [
-			...head().all,
-			assistantToolCall("t1"),
-			toolResult("t1", "y".repeat(500)),
-			assistantToolCall("t2"),
-			toolResult("t2", "z".repeat(500)),
-			assistantToolCall("t3"),
-			toolResult("t3", "w".repeat(500)),
-		];
-		const snapshot = structuredClone(messages);
-		projected(messages, 200, 3);
-		expect(messages).toEqual(snapshot);
+		const evicted = [...head().all, userMsg("old"), assistantToolCall("t2"), toolResult("t2", "z")];
+		const snapshot2 = structuredClone(evicted);
+		projected(evicted, 32768, { windowTokens: 1000 });
+		expect(evicted).toEqual(snapshot2);
 	});
 });
 
 describe("project pair tags", () => {
-	test("every windowed result's projected text starts with its pair-tag line", () => {
+	test("every tailed result's projected text starts with its pair-tag line, recomputed from the call id alone", () => {
 		const h = head();
-		const out = projected(
-			[...h.all, assistantToolCall("t1"), toolResult("t1", "first"), assistantToolCall("t2", "bash"), toolResult("t2", "second", "bash")],
-			32768,
-			3,
-		)!;
-		const r1 = asToolResult(out[5]!);
-		const r2 = asToolResult(out[7]!);
+		const messages: AgentMessage[] = [
+			...h.all,
+			assistantToolCall("t1"),
+			toolResult("t1", "first"),
+			assistantToolCall("t2", "bash"),
+			toolResult("t2", "second", "bash"),
+		];
+		const first = projected([...messages]);
+		const second = projected([...messages]);
+		const tagsOf = (out: AgentMessage[]) => out.filter((m) => m.role === "toolResult").map((m) => asToolResult(m).content[0]);
 
-		expect(r1.content[0]).toEqual({ type: "text", text: "[#ecd6 read]\n" });
-		expect(r1.content[1]).toEqual({ type: "text", text: "first" });
-		expect(r2.content[0]).toEqual({ type: "text", text: "[#eb43 bash]\n" });
+		// No memo state: the same branch re-derives identical tags.
+		expect(tagsOf(second)).toEqual(tagsOf(first));
+		expect(tagsOf(first)).toEqual([
+			{ type: "text", text: "[#ecd6 read]\n" },
+			{ type: "text", text: "[#eb43 bash]\n" },
+		]);
 	});
 
 	test("stored tool results pass through untouched: the projection copies, never mutates", () => {
@@ -684,115 +455,52 @@ describe("project pair tags", () => {
 		const stored = toolResult("t1", "x");
 		const snapshot = structuredClone(stored);
 
-		projected([...h.all, assistantToolCall("t1"), stored], 32768)!;
+		projected([...h.all, assistantToolCall("t1"), stored]);
 
 		expect(stored).toEqual(snapshot);
 	});
-
-	test("the tag line composes with truncation: tag stays the first line, marker at the cut end", () => {
-		const h = head();
-		const out = projected([...h.all, assistantToolCall("call-9", "bash"), toolResult("call-9", "a".repeat(400), "bash")], 300)!;
-		const capped = asToolResult(out[5]!);
-
-		expect(capped.content[0]).toEqual({ type: "text", text: "[#82af bash]\n" });
-		const marker = capped.content.at(-1)!;
-		expect(marker.type === "text" && marker.text).toContain("observation cap 300 bytes exceeded");
-	});
-
-	test("tag bytes count toward the cap: content under the cap alone is over it once tagged", () => {
-		const h = head();
-		// 290 bytes sits under the 300 cap; the 13-byte tag line pushes it over.
-		const out = projected([...h.all, assistantToolCall("t1"), toolResult("t1", "x".repeat(290))], 300)!;
-		const capped = asToolResult(out[5]!);
-
-		expect(capped.content[0]).toEqual({ type: "text", text: "[#ecd6 read]\n" });
-		expect(capped.content.at(-1)).toMatchObject({ type: "text", text: expect.stringContaining("observation cap 300 bytes exceeded") });
-	});
-
-	test("no window means no tags: a user-turn step and a head-only step carry no pair tag", () => {
-		const h = head();
-		const userOut = projected([...h.all, assistantText("ask"), userMsg("answer")], 32768)!;
-		const headOut = projected([...h.all, assistantText("thinking")], 32768)!;
-
-		for (const out of [userOut, headOut]) {
-			expect(out.some((m) => m.role === "toolResult")).toBe(false);
-			for (const message of out) {
-				if (message.role !== "toolResult") continue;
-				expect(message.content[0]).not.toMatch(/^\[#/);
-			}
-		}
-	});
 });
 
-describe("project flat band", () => {
-	test("projected length and size at step 30 match step 5 within a fixed constant", () => {
-		const messages: AgentMessage[] = [...head().all];
-		let seed = 42;
-		const rand = () => {
-			seed = (seed * 1103515245 + 12345) % 2147483648;
-			return seed / 2147483648;
-		};
-		let early: AgentMessage[] | undefined;
-		let late: AgentMessage[] | undefined;
-		for (let step = 1; step <= 30; step++) {
-			messages.push(custom(DROPPED_CUSTOM_TYPES[Math.floor(rand() * 10)]!));
-			if (rand() < 0.5) messages.push(userMsg(`note ${step}`));
-			messages.push(assistantToolCall(`t${step}`));
-			messages.push(toolResult(`t${step}`, "x".repeat(2048)));
-			if (step % 3 === 0) messages.push(scratchMsg({ step }));
-			if (step === 5) early = projected(messages, 8192);
-			if (step === 30) late = projected(messages, 8192);
-		}
-
-		// Four head messages plus the pinned pair, at every step.
-		expect(early).toHaveLength(6);
-		expect(late).toHaveLength(6);
-		expect(textBytes(late!)).toBeLessThanOrEqual(textBytes(early!) + 64);
-	});
-});
-
-describe("project degradation", () => {
-	// The degraded branch of project: the head is intact but the newest tool
-	// pair cannot be built. The walk collects newest first, so no pair
-	// survives an unbuildable newest pair and the degraded window is empty.
-	function degraded(messages: AgentMessage[], observationBytes = 32768, observationWindow?: number): { head: AgentMessage[] } {
-		const out = observationWindow === undefined ? project(messages, observationBytes) : project(messages, observationBytes, observationWindow);
+describe("project degradation and fallback", () => {
+	// The degraded branch of project: the head is intact but nothing is
+	// stored behind it. The projection returns the head and never history.
+	function degraded(messages: AgentMessage[]): { head: AgentMessage[] } {
+		const out = project(messages, messages, { ...DEFAULT_PARAMS }, undefined);
 		if (typeof out === "string") throw new Error(`expected a degraded projection, got the failure ${out}`);
 		if (Array.isArray(out)) throw new Error("expected a degraded projection, got a plain projection");
 		return out;
 	}
 
-	test("a result answering no toolCall in the pinned assistant degrades to the head instead of failing", () => {
+	test("a head with nothing stored behind it degrades to the head alone", () => {
 		const h = head();
-		const out = degraded([...h.all, assistantToolCall("t1"), toolResult("t1", "ok"), toolResult("t2", "stray")], 32768);
+		const out = degraded([...h.all]);
 
 		expect(out.head).toEqual([h.rules, h.procedureSpec, h.core, perCall(h.scratch)]);
-	});
-
-	test("trailing results without a preceding assistant call degrade to the head", () => {
-		const h = head();
-		const orphan = [h.rules, h.procedureSpec, h.core, perCall(h.scratch)];
-
-		expect(degraded([...h.all, userMsg("hi"), toolResult("t1", "orphan")], 32768).head).toEqual(orphan);
-		expect(degraded([...h.all, assistantText("no calls"), toolResult("t1", "orphan")], 32768).head).toEqual(orphan);
-	});
-
-	test("a blocked batch's tail, an assistant whose calls produced no results, degrades to the head", () => {
-		const h = head();
-		const out = degraded([...h.all, assistantToolCall("t1"), assistantToolCall("t2", "bash")], 32768);
-
-		expect(out.head).toEqual([h.rules, h.procedureSpec, h.core, perCall(h.scratch)]);
-	});
-
-	test("a degraded projection is never ordinary history: head messages only and the byte-stable head", () => {
-		const h = head();
-		const out = degraded([...h.all, assistantToolCall("t1"), toolResult("other", "mismatch")], 32768, 3);
-
-		expect(out.head).toHaveLength(4);
-		for (const message of out.head) expect(message.role).toBe("custom");
-		// The stored head is the byte-stable one: rules by reference, the
-		// scratch as its per-call copy, so the cache ceiling is unchanged.
 		expect(out.head[0]).toBe(h.rules);
 		expect(out.head[3]).toEqual(perCall(h.scratch));
+	});
+
+	test("live-state blocks behind the head leave the tail empty: still degraded", () => {
+		const h = head();
+		const out = degraded([...h.all, custom("goal-mode-context"), custom("ttsr-injection")]);
+
+		expect(out.head).toEqual([h.rules, h.procedureSpec, h.core, perCall(h.scratch)]);
+	});
+
+	test("a missing head message fails the projection as incomplete-head", () => {
+		const complete = [...head().all, userMsg("turn")];
+		for (const drop of [0, 1, 2, 3]) {
+			const short = complete.filter((_, i) => i !== drop);
+			expect(project(short, short, { ...DEFAULT_PARAMS }, undefined)).toBe("incomplete-head");
+		}
+	});
+
+	test("a legacy single state message never completes the head: the projection reports incomplete-head", () => {
+		const h = head();
+		const legacy = [...h.all.slice(0, 2), custom(LEGACY_STATE_MESSAGE_TYPE, "{}", { state: { goal: "x" } })];
+		const withLegacy = [...legacy, userMsg("turn")];
+		expect(project(withLegacy, withLegacy, { ...DEFAULT_PARAMS }, undefined)).toBe("incomplete-head");
+		const mixed = [...h.all.slice(0, 2), h.core, legacy[2]!, userMsg("turn")];
+		expect(project(mixed, mixed, { ...DEFAULT_PARAMS }, undefined)).toBe("incomplete-head");
 	});
 });

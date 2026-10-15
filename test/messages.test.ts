@@ -2,7 +2,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { announcedSkillNames, consolidationNudgeMessage, degradationNoticeMessage, extractStatePayload, fallbackNoticeMessage, isStateCoreMessage, isStateScratchMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, rulesMessage, SKILL_PROMPT_MESSAGE_TYPE, skillInvocationName, STATE_UPDATE_TOOL_NAME, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage, windowNoticeMessage } from "../src/messages";
-import { DEFAULT_PARAMS } from "../src/state";
 
 describe("consolidationNudgeMessage", () => {
 	test("is a developer message asking for a state_update consolidation, with no fence, so it never becomes an elide target", () => {
@@ -32,18 +31,17 @@ describe("fallbackNoticeMessage", () => {
 });
 
 describe("degradationNoticeMessage", () => {
-	test("is a developer message naming the empty window, the blocked-or-missing results, the intact state and the re-emit ask", () => {
+	test("is a developer message naming the missing transcript, the intact state and the continue ask", () => {
 		const notice = degradationNoticeMessage();
 		expect(notice).toEqual({
 			role: "developer",
-			content: expect.stringContaining("observation window is empty"),
+			content: expect.stringContaining("No recent transcript is in the prompt"),
 			timestamp: expect.any(Number),
 		});
 		if (!("content" in notice) || typeof notice.content !== "string") throw new Error("developer message without text content");
-		expect(notice.content).toContain("blocked");
-		expect(notice.content).toContain("missing");
-		expect(notice.content).toContain("state is intact");
-		expect(notice.content).toContain("Re-emit");
+		expect(notice.content).toContain("head only");
+		expect(notice.content).toContain("intact and current");
+		expect(notice.content).toContain("Continue from the state");
 		// The projection gap never borrows the procedure's degrade wording.
 		expect(notice.content).not.toContain("degrade");
 	});
@@ -56,33 +54,29 @@ describe("OPERATING_RULES", () => {
 	});
 });
 
-describe("rulesMessage with the procedure's params", () => {
-	test("interpolates the procedure's observation window count into the appended window rules", () => {
-		const message = rulesMessage({ ...DEFAULT_PARAMS, observationWindow: 6 });
-		if (typeof message !== "object" || typeof message.content !== "string") throw new Error("rules payload without text content");
-		const content = message.content;
-
-		expect(content).toContain("Your observation window holds the last 6 tool pairs, oldest first; older pairs leave the prompt as new results arrive.");
-		expect(content).toContain("Each windowed tool result carries a pair tag like [#a3f2 read]; the window notice after the window lists the tags oldest first — the first tags drop soonest.");
-		expect(content).toContain("The state is a working record, not a log: keep entries short, drop what later facts supersede, null deletes a key you no longer need.");
-	});
-
-	test("appends the three additions after the shared rules body, in order", () => {
-		const message = rulesMessage(DEFAULT_PARAMS);
+describe("rulesMessage", () => {
+	test("appends the tail rules, the pair-tag convention and the state-hygiene line to the shared body, in order", () => {
+		const message = rulesMessage();
 		if (typeof message !== "object" || typeof message.content !== "string") throw new Error("rules payload without text content");
 		const content = message.content;
 
 		expect(content.startsWith(OPERATING_RULES)).toBe(true);
-		const windowRule = content.indexOf("Your observation window holds the last 3 tool pairs");
-		const tagRule = content.indexOf("Each windowed tool result carries a pair tag");
+		expect(content).toContain("Your prompt carries the tail: the most recent stored messages behind the state core, oldest first; older messages leave the prompt when it outgrows its budget.");
+		expect(content).toContain("Each tailed tool result carries a pair tag like [#a3f2 read]; the notice after the tail lists the tags oldest first — the first tags evict soonest.");
+		expect(content).toContain("The state is a working record, not a log: keep entries short, drop what later facts supersede, null deletes a key you no longer need.");
+		const tailRule = content.indexOf("Your prompt carries the tail");
+		const tagRule = content.indexOf("Each tailed tool result carries a pair tag");
 		const hygieneRule = content.indexOf("The state is a working record, not a log");
-		expect(windowRule).toBeGreaterThan(-1);
-		expect(tagRule).toBeGreaterThan(windowRule);
+		expect(tailRule).toBeGreaterThan(-1);
+		expect(tagRule).toBeGreaterThan(tailRule);
 		expect(hygieneRule).toBeGreaterThan(tagRule);
+		// No window count is interpolated: the tail's size is a budget, not a
+		// fixed count.
+		expect(content).not.toMatch(/window holds the last \d+/);
 	});
 
 	test("carries no fence, so the stored rules message is never an elide target", () => {
-		const message = rulesMessage(DEFAULT_PARAMS);
+		const message = rulesMessage();
 		if (typeof message !== "object" || typeof message.content !== "string") throw new Error("rules payload without text content");
 
 		expect(message.content.split("\n").some((line: string) => line.trimStart().startsWith("```"))).toBe(false);
@@ -90,7 +84,7 @@ describe("rulesMessage with the procedure's params", () => {
 });
 
 describe("windowNoticeMessage", () => {
-	test("is one developer line listing the window's tags oldest first with the drop rule", () => {
+	test("is one developer line listing the tail's tags oldest first with the eviction rule", () => {
 		const notice = windowNoticeMessage([
 			{ tag: "a3f2", toolName: "read" },
 			{ tag: "b71c", toolName: "grep" },
@@ -98,7 +92,7 @@ describe("windowNoticeMessage", () => {
 
 		expect(notice.role).toBe("developer");
 		if (!("content" in notice) || typeof notice.content !== "string") throw new Error("notice without text content");
-		expect(notice.content).toBe("window oldest→newest: #a3f2 read, #b71c grep — oldest drop first as new results arrive");
+		expect(notice.content).toBe("tail oldest→newest: #a3f2 read, #b71c grep — oldest evict first when the prompt outgrows its budget");
 	});
 });
 

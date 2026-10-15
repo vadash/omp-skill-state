@@ -1,6 +1,6 @@
 # omp-skill-state
 
-An omp plugin that runs a procedural skill against an explicit execution state. Each provider call sends the model only the triple `(P, t, O_t)`: the skill body, the current state, the current step's observation. This per-step rewrite is the **projection**; it replaces the prompt and never the stored transcript.
+An omp plugin that runs a procedural skill against an explicit execution state. Each provider call sends the model the head `(P, t)` — the skill body and the current state — plus the tail: the run's recent conversation under a prompt budget. This per-step rewrite is the **projection**; it replaces the prompt and never the stored transcript.
 
 Two invariants hold in every change:
 

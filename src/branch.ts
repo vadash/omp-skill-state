@@ -1,6 +1,7 @@
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import { PROCEDURE_SPEC_MESSAGE_TYPE, extractStatePayload, isStateCoreMessage, isStateScratchMessage, skillInvocationName } from "./messages";
 import { isPlainObject } from "./types";
+import type { AgentMessage } from "./types";
 import type { ExecutionState } from "./state";
 
 // Custom message content is a string or text blocks; the invocation's P is
@@ -97,4 +98,22 @@ export function currentStepCut(entries: readonly SessionEntry[]): string | undef
 		if (entry.type === "message" && entry.message?.role === "assistant") return entry.id;
 	}
 	return undefined;
+}
+
+// The branch as the message list the projection tails: message entries pass
+// their message through, custom_message entries become the custom messages
+// the context event would carry — `attribution` included, exactly as the
+// harness's own entry→message conversion restores it, so a projected stored
+// custom stays byte-equal to its harness counterpart and the prefix cache
+// holds. The tail reads the branch rather than the context event's list, so
+// a harness compaction cut cannot shorten it.
+export function branchMessages(entries: readonly SessionEntry[]): AgentMessage[] {
+	const messages: AgentMessage[] = [];
+	for (const entry of entries) {
+		if (entry.type === "message") messages.push(entry.message);
+		else if (entry.type === "custom_message") {
+			messages.push({ role: "custom", customType: entry.customType, content: entry.content, display: entry.display, timestamp: Date.parse(entry.timestamp), ...(entry.details === undefined ? {} : { details: entry.details }), ...(entry.attribution === undefined ? {} : { attribution: entry.attribution }) } as AgentMessage);
+		}
+	}
+	return messages;
 }

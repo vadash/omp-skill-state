@@ -3,7 +3,6 @@ import { rm } from "node:fs/promises";
 import path from "node:path";
 import type { Skill } from "@oh-my-pi/pi-coding-agent";
 import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, rulesMessage } from "../src/messages";
-import { DEFAULT_PARAMS } from "../src/state";
 import { coreStateEntry, invocationEntry, procedureBranch, specEntry, stateEntries } from "./entries";
 import { fakeOmp } from "./fake-session";
 import { disengageNotices, engagedSession, engageAsideTypes, engageNotices, makeSkillSet, nudgeIn, patchStep, procedureSchema, projectingSession, smallcapSchema } from "./harness";
@@ -38,7 +37,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 
 	test("engage sends the rules, the procedure spec and the initial state core and scratch as four asides", async () => {
 		const { s } = await engagedSession([procedure]);
-		const rules = rulesMessage(DEFAULT_PARAMS);
+		const rules = rulesMessage();
 		if (typeof rules !== "object" || typeof rules.content !== "string") throw new Error("rules payload without text content");
 
 		expect(s.sends.map((sent) => sent.payload)).toEqual([
@@ -401,7 +400,7 @@ describe("omp-skill-state first-step rules", () => {
 	// The `procedure` fixture declares no x-state, so the delivered copy and
 	// the head copy both carry the default window count.
 	const rulesContent = (() => {
-		const rules = rulesMessage(DEFAULT_PARAMS);
+		const rules = rulesMessage();
 		if (typeof rules !== "object" || typeof rules.content !== "string") throw new Error("rules payload without text content");
 		return rules.content;
 	})();
@@ -440,7 +439,7 @@ describe("omp-skill-state first-step rules", () => {
 			(message): message is Record<string, unknown> =>
 				typeof message === "object" && message !== null && "customType" in message && message.customType === RULES_MESSAGE_TYPE,
 		);
-		expect(rules).toEqual({ role: "custom", customType: RULES_MESSAGE_TYPE, content: rulesContent, display: false, details: undefined, timestamp: expect.any(Number) });
+		expect(rules).toEqual({ role: "custom", customType: RULES_MESSAGE_TYPE, content: rulesContent, display: false, details: undefined, timestamp: expect.any(Number), attribution: "agent" });
 	});
 
 	test("step 2 projects from the stored head: the last rules copy wins", async () => {
@@ -496,14 +495,17 @@ describe("omp-skill-state idle disengage", () => {
 	test("the nudge is per-call: nothing is stored and nothing is sent", async () => {
 		const { s } = await projectingSession(warnProcedure);
 
-		await s.step("step 2");
+		// The step right after the boundary is degraded (the tail is still
+		// empty) and policy-neutral; the two steps after it count idle.
+		await s.step("the degraded step after the boundary");
 		await s.step("step 3");
-		const prompt = await s.step("step 4");
+		await s.step("step 4");
+		const prompt = await s.step("step 5");
 		const notices = nudgeIn(prompt);
 		// The window notice rides first, the idle cutoff last.
 		expect(notices).toHaveLength(2);
 		expect(notices.map((notice) => String(notice.content))).toEqual([
-			expect.stringContaining("window oldest→newest"),
+			expect.stringContaining("tail oldest→newest"),
 			expect.stringContaining("unchanged for 2 consecutive steps"),
 		]);
 		expect(s.notices).toEqual([...engageNotices("warnproc"), ...disengageNotices("warnproc", "idle for 3 steps")]);
@@ -514,8 +516,11 @@ describe("omp-skill-state idle disengage", () => {
 	test("after an idle disengage the step is ordinary", async () => {
 		const { s } = await projectingSession(idleProcedure);
 
-		await s.step("step 1");
+		// Degraded boundary step, then two counted idle steps: the second ends
+		// the procedure.
+		await s.step("the degraded step after the boundary");
 		await s.step("step 2");
+		await s.step("step 3");
 		expect(s.notices).toEqual([...engageNotices("idleproc"), ...disengageNotices("idleproc", "idle for 2 steps")]);
 
 		await s.step("recording", patchStep({ goal: "x" }));

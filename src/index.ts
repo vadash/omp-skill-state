@@ -1,6 +1,6 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Text } from "@oh-my-pi/pi-coding-agent";
-import { contentText, scanBranch } from "./branch";
+import { contentText, branchMessages, scanBranch } from "./branch";
 import { STATE_UPDATE_TOOL_NAME, STATE_UPDATE_DESCRIPTION, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, announcedSkillNames, rulesMessage, skillInvocationName } from "./messages";
 import { commitStep, compactionFor, headMessages, newProcedure, recordReply, stateMessages, stepPrompt } from "./procedure";
 import type { Procedure } from "./procedure";
@@ -193,10 +193,9 @@ export default function (pi: ExtensionAPI): void {
 		if (ctx.agent.kind !== "main") return undefined;
 		for (const name of announcedSkillNames(event.prompt)) {
 			const loaded = await loadStateSchema(name, pi.pi.getActiveSkills());
-			// Byte-equal to the head's rules because both deliveries build from
-			// params loaded from the same schema file: deterministic reload, not
-			// one shared object — engage loads independently.
-			if (loaded.ok) return { message: rulesMessage(loaded.params) };
+			// Byte-equal to the head's rules: both deliveries build the same
+			// payload. The schema check is the engagement filter.
+			if (loaded.ok) return { message: rulesMessage() };
 		}
 		return undefined;
 	});
@@ -300,7 +299,8 @@ export default function (pi: ExtensionAPI): void {
 
 	// The projection rewrites only the prompt; the stored transcript stays
 	// complete. undefined keeps the ordinary context: safe fallback when not
-	// engaged, in a subagent, or when the head is not in place yet. Nudges
+	// engaged, in a subagent, or when the head is not in place yet. The tail
+	// reads the branch and the budget reads the model's live window; nudges
 	// ride on the per-call prompt only: never stored, never re-sent from
 	// history. The fallback notice rides the same way, once per unprojected
 	// episode. A step whose prompt carries no head gets undefined back (after
@@ -308,7 +308,8 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("context", (event, ctx) => {
 		const procedure = current(ctx);
 		if (procedure === undefined) return undefined;
-		const messages = stepPrompt(procedure, event.messages);
+		const usage = ctx.getContextUsage();
+		const messages = stepPrompt(procedure, event.messages, branchMessages(ctx.sessionManager.getBranch()), usage?.contextWindow);
 		return messages === undefined ? undefined : { messages };
 	});
 

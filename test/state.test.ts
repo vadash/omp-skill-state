@@ -41,7 +41,7 @@ describe("loadStateSchema", () => {
 
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
-		expect(loaded.params).toEqual({ observationBytes: 4096, observationWindow: 3, idleSteps: 5, retries: 2, stateBytes: 0 });
+		expect(loaded.params).toEqual({ observationBytes: 4096, promptBudgetPercent: 30, evictionChunkPercent: 25, idleSteps: 5, retries: 2, stateBytes: 0 });
 		expect(loaded.schema.properties?.goal).toEqual({ type: "string" });
 	});
 });
@@ -64,11 +64,13 @@ describe("parseStateSchema", () => {
 		expect(loaded.params).toEqual({ ...DEFAULT_PARAMS, idleSteps: 7 });
 	});
 
-	test("reads the observation window and floors values below one", () => {
-		const withWindow = parse({ "x-state": { observationWindow: 3 } });
-		const zero = parse({ "x-state": { observationWindow: 0 } });
-		expect(withWindow).toMatchObject({ ok: true, params: { ...DEFAULT_PARAMS, observationWindow: 3 } });
-		expect(zero).toMatchObject({ ok: true, params: { ...DEFAULT_PARAMS, observationWindow: 1 } });
+	test("reads the budget percents and clamps them into 1..100", () => {
+		const defaults = parse({});
+		const low = parse({ "x-state": { promptBudgetPercent: 0, evictionChunkPercent: -10 } });
+		const high = parse({ "x-state": { promptBudgetPercent: 250, evictionChunkPercent: 100 } });
+		expect(defaults).toMatchObject({ ok: true, params: { ...DEFAULT_PARAMS, promptBudgetPercent: 30, evictionChunkPercent: 25 } });
+		expect(low).toMatchObject({ ok: true, params: { ...DEFAULT_PARAMS, promptBudgetPercent: 1, evictionChunkPercent: 1 } });
+		expect(high).toMatchObject({ ok: true, params: { ...DEFAULT_PARAMS, promptBudgetPercent: 100, evictionChunkPercent: 100 } });
 	});
 
 	test("reads the state cap and clamps values below zero to the disabled default", () => {

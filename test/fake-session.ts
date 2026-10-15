@@ -132,6 +132,10 @@ export class FakeSession {
 	lastContextMessages: unknown[] | undefined;
 	lastCompaction: CompactionOutput | undefined;
 	idle = false;
+	// The context-usage read the context handler consults for the window size.
+	// The default is the common large-context tier; a test overrides it to
+	// watch the tail budget move.
+	contextUsage: { tokens: number; contextWindow: number; percent: number } | undefined = { tokens: 0, contextWindow: 262_144, percent: 0 };
 	private readonly internals: Internals;
 	// Sends that land at the next step boundary (busy) rather than at once (idle).
 	private pending: Sent[] = [];
@@ -243,15 +247,19 @@ export class FakeSession {
 		return prompt;
 	}
 
-	// A user prompt arriving mid-run: a context call whose message list ends in
-	// the user turn. No reply follows; the test asserts what the model would see.
+	// A user prompt arriving mid-run: the input lands on the branch the way
+	// the harness appends it before the provider call, then a context call
+	// whose message list ends in the user turn. No reply follows; the test
+	// asserts what the model would see.
 	async userTurn(text: string): Promise<unknown[] | undefined> {
-		const messages = [...this.branchMessages(), { role: "user", content: text, timestamp: Date.now() }];
-		this.lastContextMessages = messages;
-		const out = (await this.dispatch("context", { type: "context", messages })) as { messages?: unknown[] } | undefined;
-		const prompt = out?.messages;
-		this.prompts.push(prompt);
-		return prompt;
+		this.branch.push({
+			type: "message",
+			id: this.nextId(),
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: { role: "user", content: text, timestamp: Date.now() },
+		} as SessionEntry);
+		return await this.context();
 	}
 
 	// One compaction: the harness fires session_before_compact, applies the
@@ -359,16 +367,20 @@ export class FakeSession {
 			ui: { notify: (message: string, type?: string) => this.notices.push({ message, type }) },
 			sessionManager: { getSessionId: () => this.id, getBranch: () => this.branch },
 			isIdle: () => this.idle,
+			getContextUsage: () => this.contextUsage,
 		} as unknown as ExtensionContext;
 	}
 
-	// The message list a provider call sees: the stored entries in order.
+	// The message list a provider call sees: the stored entries in order,
+	// custom_message entries converted the way the harness converts them —
+	// `attribution` and the entry's own timestamp carried through, so a
+	// rebuilt custom compares deep-equal to the projection's branch rebuild.
 	private branchMessages(): unknown[] {
 		const messages: unknown[] = [];
 		for (const entry of this.branch) {
 			if (entry.type === "message") messages.push(entry.message);
 			else if (entry.type === "custom_message") {
-				messages.push({ role: "custom", customType: entry.customType, content: entry.content, display: entry.display, details: entry.details, timestamp: Date.now() });
+				messages.push({ role: "custom", customType: entry.customType, content: entry.content, display: entry.display, details: entry.details, timestamp: Date.parse(entry.timestamp), ...(entry.attribution === undefined ? {} : { attribution: entry.attribution }) });
 			}
 		}
 		return messages;
@@ -384,6 +396,10 @@ export class FakeSession {
 			content: payload.content,
 			display: payload.display,
 			details: payload.details,
+			// The harness's sendMessage defaults the stored attribution to
+			// "agent" (session-manager appendCustomMessageEntry); the fake
+			// stores the same default so rebuilt customs compare equal.
+			attribution: payload.attribution ?? "agent",
 		} as SessionEntry);
 	}
 

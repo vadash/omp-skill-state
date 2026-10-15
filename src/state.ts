@@ -21,13 +21,14 @@ export interface StateSchema extends JsonSchema {
 
 export interface StateParams {
 	observationBytes: number;
-	observationWindow: number;
+	promptBudgetPercent: number;
+	evictionChunkPercent: number;
 	stateBytes: number;
 	idleSteps: number;
 	retries: number;
 }
 
-export const DEFAULT_PARAMS: StateParams = { observationBytes: 65536, observationWindow: 3, stateBytes: 0, idleSteps: 5, retries: 3 };
+export const DEFAULT_PARAMS: StateParams = { observationBytes: 65536, promptBudgetPercent: 30, evictionChunkPercent: 25, stateBytes: 0, idleSteps: 5, retries: 3 };
 
 export type SchemaLoad =
 	| { ok: true; schema: StateSchema; params: StateParams }
@@ -91,10 +92,14 @@ function readParams(raw: unknown): StateParams {
 	if (!isPlainObject(raw)) return { ...DEFAULT_PARAMS };
 	const pick = (value: unknown, fallback: number): number =>
 		typeof value === "number" && Number.isFinite(value) ? value : fallback;
+	// A percent outside 1..100 is nonsense in either direction: below 1 the
+	// tail budget could never hold a message, above 100 the prompt would
+	// overflow the window by construction.
+	const percent = (value: unknown, fallback: number): number => Math.min(100, Math.max(1, pick(value, fallback)));
 	return {
 		observationBytes: pick(raw.observationBytes, DEFAULT_PARAMS.observationBytes),
-		// A window of zero or fewer pairs would drop even the newest observation, so it clamps to one.
-		observationWindow: Math.max(1, pick(raw.observationWindow, DEFAULT_PARAMS.observationWindow)),
+		promptBudgetPercent: percent(raw.promptBudgetPercent, DEFAULT_PARAMS.promptBudgetPercent),
+		evictionChunkPercent: percent(raw.evictionChunkPercent, DEFAULT_PARAMS.evictionChunkPercent),
 		// A cap of zero or less disables the nudge: the cap is opt-in per skill.
 		stateBytes: Math.max(0, pick(raw.stateBytes, DEFAULT_PARAMS.stateBytes)),
 		idleSteps: pick(raw.idleSteps, DEFAULT_PARAMS.idleSteps),

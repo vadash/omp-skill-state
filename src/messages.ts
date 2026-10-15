@@ -1,6 +1,6 @@
 import type { CustomMessagePayload } from "@oh-my-pi/pi-coding-agent";
 import { isPlainObject } from "./types";
-import type { ExecutionState, StateParams } from "./state";
+import type { ExecutionState } from "./state";
 import type { AgentMessage } from "./types";
 
 export const STATE_CORE_MESSAGE_TYPE = "sh.omp.skill-state.core";
@@ -16,13 +16,33 @@ export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 // so they cannot drift.
 export const STATE_UPDATE_TOOL_NAME = "state_update";
 
-// Runtime operating rules, model-facing: history is hidden, so the state is the
-// only record of the past, and the state_update tool is the only write path.
-// Fence-free like every stored message: the harness's elide pass rewrites
-// fenced blocks in place. The tool name is interpolated so the rules can never
-// drift from the registered definition.
+// The legacy single state message an older runtime version stored: never a
+// head message and never tail-eligible, wherever it sits on the branch.
+export const LEGACY_STATE_MESSAGE_TYPE = "sh.omp.skill-state.state";
+
+// The live-state blocks other harness features inject around the model. They
+// are runtime machinery, not conversation, so the tail drops them everywhere;
+// every other stored message is tail-eligible.
+export const LIVE_STATE_CUSTOM_TYPES = [
+	"goal-mode-context",
+	"plan-mode-context",
+	"plan-mode-reference",
+	"eager-todo-prelude",
+	"eager-task-prelude",
+	"mid-run-todo-nudge",
+	"ttsr-injection",
+	"todo-error-reminder",
+	"experimental-context-notes-reminder",
+] as const;
+
+// Runtime operating rules, model-facing: older conversation leaves the prompt
+// as the tail evicts it, so the execution state is the durable record of the
+// past, and the state_update tool is the only write path. Fence-free like
+// every stored message: the harness's elide pass rewrites fenced blocks in
+// place. The tool name is interpolated so the rules can never drift from the
+// registered definition.
 export const OPERATING_RULES = `\
-While a procedure runs, past conversation is hidden from you: the execution state is the only record of what happened.
+While a procedure runs, older conversation leaves your prompt: the execution state is the durable record of what happened, and only the most recent messages stay visible.
 
 To change the state, call the ${STATE_UPDATE_TOOL_NAME} tool directly with a single patch object holding the change:
 
@@ -53,21 +73,17 @@ export const STATE_UPDATE_DESCRIPTION =
 // One rules message, the same object shape everywhere the rules are delivered:
 // the first-step copy from before_agent_start and the stored head asides are
 // built here so they are byte-equal by construction and the provider's cache
-// prefix never sees a difference between them. Both call sites pass the same
-// loaded params object — the one engage hands to the procedure — so the
-// interpolated window count cannot drift between the two deliveries.
-export function rulesMessage(params: StateParams): CustomMessagePayload {
-	return { customType: RULES_MESSAGE_TYPE, content: operatingRules(params.observationWindow), display: false };
+// prefix never sees a difference between them.
+export function rulesMessage(): CustomMessagePayload {
+	return { customType: RULES_MESSAGE_TYPE, content: operatingRules(), display: false };
 }
 
-// The window awareness appended to the shared rules body: the exact window
-// count from the procedure's own params, the pair-tag convention and the
-// state-hygiene line, in that order. The count is interpolated so a skill's
-// schema and its instructions cannot drift apart.
-export function operatingRules(observationWindow: number): string {
+// The tail awareness appended to the shared rules body: what the prompt
+// carries, the pair-tag convention and the state-hygiene line, in that order.
+export function operatingRules(): string {
 	return `${OPERATING_RULES}\
-Your observation window holds the last ${observationWindow} tool pairs, oldest first; older pairs leave the prompt as new results arrive.
-Each windowed tool result carries a pair tag like [#a3f2 read]; the window notice after the window lists the tags oldest first — the first tags drop soonest.
+Your prompt carries the tail: the most recent stored messages behind the state core, oldest first; older messages leave the prompt when it outgrows its budget.
+Each tailed tool result carries a pair tag like [#a3f2 read]; the notice after the tail lists the tags oldest first — the first tags evict soonest.
 The state is a working record, not a log: keep entries short, drop what later facts supersede, null deletes a key you no longer need.
 `;
 }
@@ -166,17 +182,17 @@ export function consolidationNudgeMessage(): AgentMessage {
 	};
 }
 
-// The window notice (CONTEXT.md): one per-call developer line after the
-// observation window, listing the projected pairs' tags and tools oldest
-// first with the drop rule. Data only: it never predicts which pair expires,
-// because the drop count equals the next step's result count. The step policy
-// appends it before the nudges, so the data about the window precedes the
-// policy asks built on it.
+// The window notice (CONTEXT.md): one per-call developer line after the tail,
+// listing the tailed tool results' tags and tools oldest first with the drop
+// rule. Data only: it never predicts which result evicts, because the chunked
+// eviction keeps the front still between evictions. The step policy appends
+// it before the nudges, so the data about the tail precedes the policy asks
+// built on it.
 export function windowNoticeMessage(window: readonly { tag: string; toolName: string }[]): AgentMessage {
 	const list = window.map((pair) => `#${pair.tag} ${pair.toolName}`).join(", ");
 	return {
 		role: "developer",
-		content: `window oldest→newest: ${list} — oldest drop first as new results arrive`,
+		content: `tail oldest→newest: ${list} — oldest evict first when the prompt outgrows its budget`,
 		timestamp: Date.now(),
 	};
 }
@@ -186,8 +202,7 @@ export function windowNoticeMessage(window: readonly { tag: string; toolName: st
 // nudges: appended to the prompt only, never stored, never re-sent from
 // history. The step policy latches it, so one unprojected episode stays one
 // notice no matter how many steps it spans. The only failure reason is an
-// incomplete head: an unpairable newest pair degrades in place instead
-// (ADR 0005).
+// incomplete head: an empty tail degrades in place instead (ADR 0005).
 export function fallbackNoticeMessage(): AgentMessage {
 	return {
 		role: "developer",
@@ -196,18 +211,18 @@ export function fallbackNoticeMessage(): AgentMessage {
 	};
 }
 
-// The notice a degraded step carries (ADR 0005): the head is intact but the
-// newest tool pair could not be built, so the step runs on the head alone
-// with an empty observation window. Per-call by construction, like the
-// nudges: appended to the prompt only, never stored, never re-sent from
-// history. It rides every degraded step with no latch, because a degraded
-// model sees only the head and cannot know why its window is empty. The
-// wording keeps this projection gap apart from the procedure's
-// retries-exhausted degrade, a different failure.
+// The notice a degraded step carries (ADR 0005, narrowed by ADR 0010): the
+// head is intact but nothing is stored behind it, so the step's prompt has no
+// recent transcript in it. Per-call by construction, like the nudges:
+// appended to the prompt only, never stored, never re-sent from history. It
+// rides every degraded step with no latch, because a degraded model sees only
+// the head and cannot know why the tail is empty. The wording keeps this
+// projection gap apart from the procedure's retries-exhausted degrade, a
+// different failure.
 export function degradationNoticeMessage(): AgentMessage {
 	return {
 		role: "developer",
-		content: `This step's observation window is empty: the newest tool results are missing (a blocked batch leaves no results) or none of them answers this step's tool calls. The execution state is intact and current; nothing was lost. Re-emit the tool call you intended, and the window fills again from its results.`,
+		content: `No recent transcript is in the prompt this step: it carries the procedure head only (operating rules, skill, execution state). The execution state is intact and current; nothing was lost. Continue from the state.`,
 		timestamp: Date.now(),
 	};
 }

@@ -1,6 +1,6 @@
 # Skill State
 
-A runtime for omp that executes a procedural skill against an explicit execution state and a bounded window on the conversation, instead of a growing transcript. It exists because prompt size and stale facts both grow with execution length in ordinary history-based runtimes.
+A runtime for omp that executes a procedural skill against an explicit execution state and a bounded tail of the conversation, instead of a growing transcript. It exists because prompt size and stale facts both grow with execution length in ordinary history-based runtimes.
 
 ## Language
 
@@ -94,11 +94,11 @@ Reading dropped history back on demand, verbatim, through the `state_recall` too
 _Avoid_: retrieval, search, lookup
 
 **Pair tag**:
-The short label minted per windowed tool pair: four hex digits derived from the tool call id, prepended to the projected tool result's text as `[#xxxx tool]`. Stable for the pair's lifetime in the window; the stored transcript never carries it. Modeled on the harness's hashline tags, but not one.
+The short label minted per tailed tool result: four hex digits derived from the tool call id, prepended to the projected tool result's text as `[#xxxx tool]`. Recomputed from the id every projection, so it is stable for as long as the result rides the tail; the stored transcript never carries it. Modeled on the harness's hashline tags, but not one.
 _Avoid_: hex header, block id, hashline tag
 
 **Window notice**:
-The per-call developer line appended after the observation window each step, listing the window's pair tags oldest first. It states the drop rule — the oldest pairs leave as new results arrive — and never predicts which pair expires, because the drop count equals the next step's result count. Unlike a nudge it fires on every tool-result step, not when a threshold is met; like a nudge it is never stored.
+The per-call developer line appended after the tail each step, listing the tail's tagged tool results oldest first. It states the eviction rule — the oldest messages leave first when the prompt outgrows its budget — and never predicts which message expires. Unlike a nudge it fires on every step that tailed a tool result, not when a threshold is met; like a nudge it is never stored.
 _Avoid_: expiry line, TTL banner, watermark
 
 **Degraded step**:

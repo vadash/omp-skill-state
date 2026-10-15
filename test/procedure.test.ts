@@ -19,12 +19,18 @@ function headContext(procedure: Procedure): AgentMessage[] {
 	return headMessages(procedure).map((payload) => ({ role: "custom" as const, timestamp: Date.now(), ...(payload as object) })) as unknown as AgentMessage[];
 }
 
+// The one user turn stored behind the head, as any engaged run has. Without
+// it the step is degraded, a different branch of the seam.
+function headWithTurn(procedure: Procedure): AgentMessage[] {
+	return [...headContext(procedure), { role: "user", content: "go on", timestamp: Date.now() }];
+}
+
 // A procedure whose latest prompt carried the head: the model saw the rules,
 // so a step without a state edit is idle. The flag is set the only way
 // production sets it, through the stepPrompt seam.
 function projected(params: Partial<StateParams> = {}, state: ExecutionState = {}): Procedure {
 	const p = procedure(params, state);
-	if (stepPrompt(p, headContext(p)) === undefined) throw new Error("head did not project");
+	if (stepPrompt(p, headWithTurn(p)) === undefined) throw new Error("head did not project");
 	return p;
 }
 
@@ -200,7 +206,7 @@ describe("recordReply and idle steps", () => {
 		for (let i = 0; i < 3; i++) expect(recordReply(p, empty())).toEqual({ kind: "none" });
 		expect(p.idle).toBe(0);
 
-		if (stepPrompt(p, headContext(p)) === undefined) throw new Error("head did not project");
+		if (stepPrompt(p, headWithTurn(p)) === undefined) throw new Error("head did not project");
 		expect(recordReply(p, empty())).toEqual({ kind: "none" });
 		expect(recordReply(p, empty())).toEqual({ kind: "none" });
 		expect(recordReply(p, empty())).toEqual({ kind: "none" });
@@ -248,7 +254,7 @@ describe("recordReply and idle steps", () => {
 		recordReply(p, empty());
 		expect(p.idle).toBe(1);
 
-		if (stepPrompt(p, headContext(p)) === undefined) throw new Error("head did not project");
+		if (stepPrompt(p, headWithTurn(p)) === undefined) throw new Error("head did not project");
 		recordReply(p, empty());
 		recordReply(p, empty());
 		recordReply(p, empty());
@@ -303,12 +309,11 @@ describe("commitStep", () => {
 });
 
 describe("stepPrompt nudges", () => {
-	// The tail a projected prompt carries beyond its head: the turn's nudges.
+	// The developer messages one step's prompt carries beyond its projection.
 	function nudgesFor(procedure: Procedure): AgentMessage[] {
-		const head = headContext(procedure);
-		const out = stepPrompt(procedure, head);
+		const out = stepPrompt(procedure, headWithTurn(procedure));
 		if (out === undefined) throw new Error("head did not project");
-		return out.slice(head.length);
+		return out.filter((message) => message.role === "developer");
 	}
 
 	// The nudge rides with a build-time timestamp; match the text, not the clock.
@@ -470,7 +475,7 @@ describe("stepPrompt fallback notice", () => {
 		const p = procedure();
 
 		expect(noticesIn(stepPrompt(p, []))).toHaveLength(1);
-		if (stepPrompt(p, headContext(p)) === undefined) throw new Error("head did not project");
+		if (stepPrompt(p, headWithTurn(p)) === undefined) throw new Error("head did not project");
 		expect(p.projected).toBe(true);
 
 		// Fallback again: a fresh notice, latched anew for the new episode.
@@ -514,18 +519,18 @@ describe("stepPrompt window notice", () => {
 
 		const texts = devTexts(out);
 		expect(texts).toHaveLength(2);
-		expect(texts[0]).toBe("window oldest→newest: #ecd6 read — oldest drop first as new results arrive");
+		expect(texts[0]).toBe("tail oldest→newest: #ecd6 read — oldest evict first when the prompt outgrows its budget");
 		expect(texts[1]).toContain("grown past its size cap");
 	});
 
-	test("the notice lists the whole projected window oldest first, tags re-minted from the call ids", () => {
+	test("the notice lists every tailed result oldest first, tags re-minted from the call ids", () => {
 		const p = procedure();
 		const h = headContext(p);
 
 		const out = stepPrompt(p, [...h, callMsg("t1"), resultMsg("t1", "a"), callMsg("t2"), resultMsg("t2", "b"), callMsg("t3"), resultMsg("t3", "c")]);
 		if (out === undefined) throw new Error("head did not project");
 
-		expect(devTexts(out)).toEqual(["window oldest→newest: #ecd6 read, #eb43 read, #e9b0 read — oldest drop first as new results arrive"]);
+		expect(devTexts(out)).toEqual(["tail oldest→newest: #ecd6 read, #eb43 read, #e9b0 read — oldest evict first when the prompt outgrows its budget"]);
 	});
 
 	test("the notice rides before the idle warning at the threshold step", () => {
@@ -541,7 +546,7 @@ describe("stepPrompt window notice", () => {
 
 		const texts = devTexts(out);
 		expect(texts).toHaveLength(2);
-		expect(texts[0]).toMatch(/^window oldest→newest: /);
+		expect(texts[0]).toMatch(/^tail oldest→newest: /);
 		expect(texts[1]).toContain("unchanged for 2 consecutive steps");
 	});
 
@@ -571,32 +576,30 @@ describe("stepPrompt window notice", () => {
 		const p = procedure();
 		const h = headContext(p);
 
-		const out = stepPrompt(p, [...h, callMsg("t1"), resultMsg("other", "mismatch")]);
+		// Nothing is stored behind the head: the step is degraded.
+		const out = stepPrompt(p, [...h]);
 		if (out === undefined) throw new Error("the degraded step returned nothing");
 
 		const texts = devTexts(out);
 		expect(texts).toHaveLength(1);
-		expect(texts[0]).toContain("observation window is empty");
+		expect(texts[0]).toContain("No recent transcript");
 		expect(out.some((message) => message.role === "toolResult")).toBe(false);
 	});
 });
 
-// A degraded step's context: the head followed by an assistant whose call
-// went unanswered, as a blocked batch leaves the branch. Returns the prompt
-// and its notice text.
+// A degraded step's context: the head with nothing stored behind it. Returns
+// the prompt and its notice text.
 function degradedStep(procedure: Procedure): { prompt: AgentMessage[]; notice: string } {
-	const h = headContext(procedure);
-	const out = stepPrompt(procedure, [...h, ...healthyTail("t1", "other", "mismatch")]);
+	const out = stepPrompt(procedure, headContext(procedure));
 	if (out === undefined) throw new Error("the degraded step returned nothing");
 	const notice = out.find((message) => message.role === "developer");
 	if (notice === undefined || !("content" in notice) || typeof notice.content !== "string") throw new Error("degraded step without its notice");
 	return { prompt: out, notice: notice.content };
 }
 
-// The pair messages one step leaves behind, as the harness stores them. A
-// mismatched result id makes the newest pair unbuildable: the blocked-batch
-// shape. A matching id is a healthy step.
-function healthyTail(callId: string, resultId = callId, text = "ok"): AgentMessage[] {
+// The pair messages one step leaves behind, as the harness stores them: a
+// healthy tail the next projection carries.
+function healthyTail(callId: string, text = "ok"): AgentMessage[] {
 	const call: AgentMessage = {
 		role: "assistant",
 		content: [{ type: "toolCall", id: callId, name: "read", arguments: {} }],
@@ -609,7 +612,7 @@ function healthyTail(callId: string, resultId = callId, text = "ok"): AgentMessa
 	};
 	const result: AgentMessage = {
 		role: "toolResult",
-		toolCallId: resultId,
+		toolCallId: callId,
 		toolName: "read",
 		content: [{ type: "text", text }],
 		isError: false,
@@ -643,7 +646,7 @@ describe("stepPrompt degradation notice", () => {
 		degradedStep(p);
 		const second = degradedStep(p);
 
-		expect(second.notice).toContain("observation window is empty");
+		expect(second.notice).toContain("No recent transcript");
 	});
 
 	test("the first projected step carries no degradation notice, and a later degraded step rides it again", () => {
@@ -654,11 +657,11 @@ describe("stepPrompt degradation notice", () => {
 		if (clean === undefined) throw new Error("the projected step returned nothing");
 		const cleanDevs = clean.filter((message) => message.role === "developer");
 		expect(cleanDevs).toHaveLength(1); // the window notice only
-		expect(String("content" in cleanDevs[0]! ? cleanDevs[0]!.content : "")).toContain("window oldest");
+		expect(String("content" in cleanDevs[0]! ? cleanDevs[0]!.content : "")).toContain("tail oldest");
 		expect(p.projected).toBe(true);
 
 		const again = degradedStep(p);
-		expect(again.notice).toContain("observation window is empty");
+		expect(again.notice).toContain("No recent transcript");
 	});
 
 	test("a degraded step is policy-neutral: no idle advance, no retry added, the reply judged as any reply", () => {
@@ -693,7 +696,7 @@ describe("headMessages", () => {
 		const p = procedure({}, { goal: "x", plan: ["a"] });
 
 		expect(headMessages(p)).toEqual([
-			rulesMessage(DEFAULT_PARAMS),
+			rulesMessage(),
 			{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: "Running skill recon", display: false, details: { name: "recon" } },
 			coreMessage({ goal: "x" }),
 			scratchMessage({ plan: ["a"] }),

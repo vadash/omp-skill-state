@@ -1,7 +1,7 @@
 ---
 name: zstate
 disable-model-invocation: true
-description: "Engage the skill-state runtime for the task given in the same invocation. While it runs, every model call sees only the skill text, the execution state and the current step's observation, never the growing transcript; the model rewrites the state each step, so a long task keeps a fixed prompt size and carries no stale facts. Invoke it first and give the task in the same prompt, for example /skill:zstate <task>."
+description: "Engage the skill-state runtime for the task given in the same invocation. While it runs, every model call sees the skill text, the execution state and a bounded tail of the most recent conversation under a prompt budget, never the growing transcript; the model records what matters in the state each step, so a long task keeps a bounded prompt and carries no stale facts. Invoke it first and give the task in the same prompt, for example /skill:zstate <task>."
 ---
 
 # Zstate: skill-state mode
@@ -10,7 +10,7 @@ This skill defines no task. It engages the skill-state runtime and tells you how
 
 The task is the `User:` line at the end of this prompt. In your first `state_update` call, copy it verbatim into `goal`, set `working_dir`, and set `next_step` to your first action. If there is no `User:` line, there is no task: say so and stop.
 
-Past conversation is hidden from you while this runs. The execution state is the only record of the past; the runtime's operating rules say how to edit it. The operating rules state exactly how many tool pairs the observation window holds and when its oldest pairs leave, so commit anything that must outlive the window in the same step that observed it.
+Past conversation is mostly hidden from you while this runs: your prompt carries the execution state plus the tail, the most recent stored messages behind the state core, under a prompt budget; older messages leave the prompt as the tail evicts them. The state is the only durable record, so commit anything that must outlive the tail in the same step that observed it.
 
 Anything the task names, you read once and keep in the state: another skill through `read skill://<name>`, a file, an issue. Copy the requirements that bind this run into `constraints`, phrased so they stand alone.
 

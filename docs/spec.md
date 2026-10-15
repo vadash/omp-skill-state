@@ -3,7 +3,7 @@
 An omp plugin that runs a procedural skill against an explicit execution state instead of a growing transcript.
 Target: `omp-skill-state`, shipped as an omp plugin. No file under the harness source tree is modified.
 
-Status: v0.3.0 is implemented and verified against a long real session; the acceptance run's figures are in `docs/verification.md`. The universal redesign is decided and **not implemented**: sections marked `[V4]` carry its target text, ADR 0010-0012 record its decisions, and section 20 is its design record.
+Status: implemented, the universal redesign included. ADR 0010-0012 record its decisions and section 20 is its design record. The figures in `docs/verification.md` are the earlier runtime's (runs G and H predate the redesign); the post-redesign acceptance runs are pending and are recorded there.
 
 ---
 
@@ -11,7 +11,7 @@ Status: v0.3.0 is implemented and verified against a long real session; the acce
 
 A conversation-based runtime sends the model the skill text plus every past reasoning trace, action and observation. Prompt size therefore grows with the number of steps, and obsolete facts stay in context after they stop being true.
 
-This runtime sends the model the immutable procedure spec, the current execution state and the recent conversation under a byte budget `[V4]`, and nothing else. Reasoning leaves the prompt as the window moves past it, and the stored transcript is kept in full; only the prompt is bounded.
+This runtime sends the model the immutable procedure spec, the current execution state and the recent conversation under a prompt budget — a percent of the model's context window — and nothing else. Reasoning leaves the prompt as the window moves past it, and the stored transcript is kept in full; only the prompt is bounded.
 
 Non-goals:
 
@@ -29,11 +29,11 @@ A_t = (P, t, T_t)
 
 - `P` — the procedure spec: the skill body as the harness renders it for the user invocation (body, skill directory, user arguments), immutable for the run.
 - `t` — the execution state: a JSON object satisfying the state schema.
-- `T_t` — the tail `[V4]`: the most recent stored messages of the branch under the prompt budget, whose newest messages are the current step's observation `O_t`. Before V4 this term was `O_t` alone — the newest tool pair and the current user turn under a byte cap — and everything older was absent from the prompt.
+- `T_t` — the tail: the most recent stored messages of the branch under the prompt budget, whose newest messages are the current step's observation `O_t`. Earlier runtimes pinned `O_t` alone — the newest tool pair and the current user turn under a byte cap — and left everything older absent from the prompt.
 
 The model replies with a state patch `Δt`, tool calls, or both. The runtime validates `Δt`, merges it into `t`, and lets the tool calls run.
 
-Consequence `[V4]`: the prompt is bounded by the budget and the transcript by the steps, so the prompt stops growing with execution length while the transcript does not. The pre-V4 runtime claimed `O(1)` in the number of steps; the tail gives that up deliberately (ADR 0010), because the state alone could not carry a user turn it did not anticipate or a fact whose relevance arrived late.
+Consequence: the prompt is bounded by the budget and the transcript by the steps, so the prompt stops growing with execution length while the transcript does not. The runtime before the tail claimed `O(1)` in the number of steps; the tail gives that up deliberately (ADR 0010), because the state alone could not carry a user turn it did not anticipate or a fact whose relevance arrived late.
 
 ## 3. Lifecycle
 
@@ -62,7 +62,7 @@ Arm and engage happen together in practice. The split matters only because armin
 The runtime engages when all of these hold:
 
 1. A user-invoked skill prompt is present in the conversation. The test is the harness's own: a message with `customType === "skill-prompt"` and `attribution === "user"`. A model-initiated `read skill://…` never counts.
-2. That skill is a procedure skill: it ships a `state.schema.json` beside its `SKILL.md` (section 5). `[V4]` The file is the opt-in marker; a file that declares no properties selects the runtime's default schema.
+2. That skill is a procedure skill: it ships a `state.schema.json` beside its `SKILL.md` (section 5). The file is the opt-in marker; a file that declares no properties selects the runtime's default schema.
 3. The message is in the main agent. Subagent sessions stay inert.
 
 Detection is direct: `/skill:<name>` produces a message whose `details` carry `name` and `path`. The runtime reads `state.schema.json` from the skill's directory. It resolves the path as a sibling of the skill file, and reads it through `skill://<name>/state.schema.json`, which the harness already resolves inside the skill's base directory.
@@ -117,7 +117,7 @@ Rules:
 }
 ```
 
-The schema is authored once per domain, not per task. A skill without `state.schema.json` is an ordinary skill and never engages — the file is the opt-in marker. `[V4]` A file that declares no `properties` selects the runtime's default schema: `goal`, `working_dir`, `constraints`, `plan`, `findings`, `open_questions`, `next_step` and the `knowledge` bag, with `plan`, `findings`, `open_questions` and `next_step` volatile. A skill that ships only `x-state` params therefore needs no authored fields, and a mode-entry skill fits in one file plus one marker.
+The schema is authored once per domain, not per task. A skill without `state.schema.json` is an ordinary skill and never engages — the file is the opt-in marker. A file that declares no `properties` selects the runtime's default schema: `goal`, `working_dir`, `constraints`, `plan`, `findings`, `open_questions`, `next_step` and the `knowledge` bag, with `plan`, `findings`, `open_questions` and `next_step` volatile. A skill that ships only `x-state` params therefore needs no authored fields, and a mode-entry skill fits in one file plus one marker.
 
 `x-state.volatile` names the declared keys expected to change on most steps. They ride in the scratch state; every other declared key stays in the state core (sections 6 and 7). Non-string entries of the list are dropped. Without an explicit list the runtime applies a heuristic that protects the cache prefix: array-typed declared keys and the planning keys (`plan`, `next_step`, `findings`, `open_questions`, `scratch`) are volatile, and every other declared key is core.
 
@@ -153,7 +153,7 @@ Persistence: after each accepted patch the runtime sends the state as two custom
 
 The run's final state is the live state at `agent_end`. The runtime polls `ctx.isIdle()` every 20 ms for up to 2 s and then sends both state messages, core then scratch, as next-turn messages (`deliverAs: "nextTurn"`): the harness then appends them to context and history at once, with no turn started. Sent any earlier, while the harness is still inside the loop, a next-turn message is only held in memory until the next prompt, and `/resume`, `/new` or quitting before that prompt loses it. A queued follow-up prompt keeps the session busy past the budget, in which case the messages are sent anyway and the harness holds them for that prompt. The waiting copy is dropped if a patch is accepted in the meantime (it is stale) or if the engagement ends in that window (a session switch or `/clear`: a message sent after it would land in the wrong context).
 
-`[V4]` Each commit is mirrored through `pi.appendEntry` as well: an entry the harness never sends to the LLM, carrying the same partitions and the same write stamp as the messages it mirrors. A re-derive reads the mirror, and a stored state message that disagrees with it is repaired by re-sending the head (ADR 0012). The messages stay the projection's source because the cache breakpoint anchors on them (section 7).
+Each commit is mirrored through `pi.appendEntry` as well: an entry the harness never sends to the LLM, carrying the same partitions and the same write stamp as the messages it mirrors. A re-derive reads the mirror, and a stored state message that disagrees with it is repaired by re-sending the head (ADR 0012). The messages stay the projection's source because the cache breakpoint anchors on them (section 7).
 
 ## 7. The projection
 
@@ -162,11 +162,11 @@ On every `context` event while engaged, the runtime returns a replacement messag
 1. The runtime's operating rules, a custom message passed through unchanged.
 2. `P`, the skill body as rendered for the invocation, a custom message passed through unchanged. The rendered skill prompt is used rather than the raw file so the user's invocation arguments stay in every step.
 3. The state core, the declared keys the schema does not list as volatile, as labelled plain JSON — plain text by design, so the `elide` pass described in section 10 never targets it — the latest stored core message passed through unchanged. Changes only when a patch changes a core key.
-4. **The tail** `[V4]`: the most recent stored messages of the branch, returned as the stored objects themselves, oldest first, under the prompt budget (section 9). It begins after the head's own messages — the rules, `P`, the core and the scratch — and after every injected live-state block, so the tail is the run's real conversation: user turns, assistant text and tool calls, tool results, skill-prompt customs, `state_update` calls and their results. Its newest messages are the step's observation `O_t`, which is why there is no separate observation window.
+4. **The tail**: the most recent stored messages of the branch, returned as the stored objects themselves, oldest first, under the prompt budget (section 9). It begins after the rules, `P` and the state core, sits before the scratch state — the head's four messages bracket it — and carries no injected live-state block, so the tail is the run's real conversation: user turns, assistant text and tool calls, tool results, skill-prompt customs, `state_update` calls and their results. Its newest messages are the step's observation `O_t`, which is why there is no separate observation window.
 5. The scratch state, the volatile-listed keys plus every undeclared key, the latest stored scratch message returned as a shallow clone of itself with one added detail field, `details.perCall`. The copy deliberately differs from its stored counterpart so the harness marks it per-call (below); the field lives outside the content, so the model sees the same bytes either way. Its rendered content changes whenever the scratch keys do.
-6. Pair tags and the window notice, derived from the tail `[V4]`. Each tailed tool result's projected copy carries a **pair tag**: four lowercase hex digits derived deterministically from the tool call id alone — FNV-1a, no memo state — prepended as the result's first text line, `[#xxxx tool]`. A re-derive after `/resume` or a rewind recomputes identical tags, so the model's references stay coherent across a resume. The tag bytes count toward the result cap (they are prepended before capping), the truncation marker stays at the cut end, and neither the markers nor the tag line are ever cut: the cap's floor is one tag line plus one marker per result. The step prompt then carries a per-call **window notice**: one developer line listing the tailed results' tags and tools oldest first — `window oldest→newest: #a3f2 read, #b71c grep — oldest drop first as new results arrive` — with the drop rule stated as a rule, never as a prediction: which result evicts depends on the next step's result count, unknowable at projection time. It rides the existing per-call seam (section 16), before the consolidation ask and the idle ask, and is absent whenever the tail carries no tool result — the first step, a degraded step, or a step whose prompt carries no head. Stored results never carry tags and the notice is never stored: the transcript stays the unmutated record of the run.
+6. Pair tags and the window notice, derived from the tail. Each tailed tool result's projected copy carries a **pair tag**: four lowercase hex digits derived deterministically from the tool call id alone — FNV-1a, no memo state — prepended as the result's first text line, `[#xxxx tool]`. A re-derive after `/resume` or a rewind recomputes identical tags, so the model's references stay coherent across a resume. The tag bytes count toward the result cap (they are prepended before capping), the truncation marker stays at the cut end, and neither the markers nor the tag line are ever cut: the cap's floor is one tag line plus one marker per result. The step prompt then carries a per-call **window notice**: one developer line listing the tailed results' tags and tools oldest first — `tail oldest→newest: #a3f2 read, #b71c grep — oldest evict first when the prompt outgrows its budget` — with the drop rule stated as a rule, never as a prediction: which result evicts depends on the next step's result count, unknowable at projection time. It rides the existing per-call seam (section 16), before the consolidation ask and the idle ask, and is absent whenever the tail carries no tool result — the first step, a degraded step, or a step whose prompt carries no head. Stored results never carry tags and the notice is never stored: the transcript stays the unmutated record of the run.
 
-Items 1 to 3 are the head: stored transcript messages, not synthesised text; the tail is stored transcript too, which is what makes it cacheable. The projection returns the stored objects themselves, with two exceptions: the scratch's per-call clone above, and the tailed tool results, whose projected copies gain a pair-tag line. The head is sent at engage and again after every compaction while engaged (`session_compact`), because the harness's cut can land after the original copies; the re-sent copies are byte-equal to the first except for the scratch clone, and the projection takes the last stored message of each type. The tail needs no such re-send: it is read from the branch, not from the harness's context, so a compaction cut cannot shorten it.
+The head is four messages: the rules, `P`, the state core and the scratch state, with the tail sitting between the core and the scratch. The rules, `P` and the core are stored transcript messages returned byte-unchanged; the scratch is stored transcript too but rides as its per-call copy (item 5); the tail is stored transcript as well, which is what makes it cacheable. The projection returns the stored objects themselves, with two exceptions: the scratch's per-call clone above, and the tailed tool results, whose projected copies gain a pair-tag line. The head is sent at engage and again after every compaction while engaged (`session_compact`), because the harness's cut can land after the original copies; the re-sent copies are byte-equal to the first except for the scratch clone, and the projection takes the last stored message of each type. The tail needs no such re-send: it is read from the branch, not from the harness's context, so a compaction cut cannot shorten it.
 
 The order is not free. The scratch is volatile, so a per-call region placed early would poison every byte behind it; the tail sits after the core and before the scratch so the cached prefix reaches through it (ADR 0011).
 
@@ -209,24 +209,30 @@ The finish protocol is unchanged: a reply with no tool call still ends the run. 
 
 No JSON repair exists on this channel. Tool arguments are protocol-level JSON, so the freehand block's malformed-JSON failure class (the paper's measured ~12% on small models) does not exist here, and silent repair could produce different state than the model meant, where the block-retry-degrade path reports exact errors.
 
+The `state_recall` tool (ADR 0010) is the read-back channel, registered beside `state_update` at factory load with the same treatment — `strict: true`, zero approval, `loadMode: "essential"`, `concurrency: "exclusive"`, one wrapper argument, here `query`. It reads the current session's own transcript file, matches the query against the entries' text — a case-insensitive substring match, taken in file order — and returns the matches oldest first, verbatim: nothing is summarised. The matches are packed greedily under a cumulative cap of 16,384 bytes (`RECALL_RESULT_BYTES`); the first match that would overflow the cap ends the pack, and when matches were left out the result carries, after the matches and outside the cap, the marker `recall cap 16384 bytes reached — oldest matches shown; narrow the query to see the rest`. A session with no transcript file on disk has nothing to recall and the tool answers with an empty result, not an error. Recall is never engagement-gated, and it reads the current session's transcript only (section 19).
+
 ## 9. Caps
 
 ### Result cap
 
-A tailed tool result's own text is capped at `observationBytes`, default 65536. `[V4]` The tail's total is bounded by the prompt budget below.
+A tailed tool result's own text is capped at `observationBytes`, default 65536. The tail's total is bounded by the prompt budget below.
 
 - The cap applies to the result's text, not to the tail as a whole.
 - Over the cap, the runtime truncates from the end of the result and inserts a marker naming what was cut and how to re-read it.
 - Markers are never cut, and neither is the pair-tag line (section 7): the tag is what still identifies a fully cut result and what the window notice names. The cap's floor is one tag line plus one marker.
 - The cap is per result, not cumulative; the budget is the cumulative bound.
 
-### Tail budget `[V4]`
+### Tail budget
 
-The tail is bounded by the prompt budget: `promptBudgetPercent` of the model's context window (`ctx.getContextUsage()`), default 30, minus the head, the scratch state and a reserve. When the projected tail would exceed it, the runtime evicts from the front in one chunk of `evictionChunkPercent` of the budget (default 25), so the front of the tail is stable for many steps and the cached prefix survives between evictions (ADR 0011). Eviction never touches the head, the scratch, or the newest message.
+The tail is bounded by the prompt budget: `promptBudgetPercent` of the model's context window (`ctx.getContextUsage()`), default 30, minus the head, the scratch state and a reserve. While the projected tail exceeds that budget, the runtime evicts from the front one chunk at a time, the chunk being `evictionChunkPercent` of the budget (default 25) and always at least one message, so the front of the tail is stable for many steps and the cached prefix survives between evictions (ADR 0011). Eviction never touches the head, the scratch, or the newest message, so the prompt may exceed the budget by the newest message's size; the per-result cap bounds that excess.
 
 ### State cap
 
 The execution state is capped at `stateBytes` — the summed byte length of the two rendered state messages, the core's and the scratch's — default 0, which disables the cap; set per skill in `x-state`. The cap is soft: while the state measures over it, the next projected step's prompt carries a per-call developer nudge asking the model to consolidate the state with a `state_update` patch (drop superseded findings; `null` deletes a key). The nudge fires once per over-cap episode and re-arms when a commit lands the state back under the cap. The cap never blocks a step or a patch, and it never disengages or degrades the procedure: it is a signal, not a limit.
+
+### Recall cap
+
+The `state_recall` result is capped at 16,384 bytes (`RECALL_RESULT_BYTES`), cumulative over the packed matches; the marker naming the cap rides after the matches, outside the cap (section 8).
 
 ## 10. Compaction
 
@@ -253,7 +259,7 @@ Three triggers, all leading to the same reset (clear `t`, clear engaged flag, st
 2. **Context reset.** `/clear` keeps the session and drops messages in place, and emits nothing to extensions. The `input` event runs before command interpretation and does see the raw text, so the runtime disengages on `/clear` directly.
 3. **Session change.** A switch, a rewind or a fork all land in a different session id, so `session_before_switch` and `session_before_branch` end the outgoing engagement with the usual disengage notice. `session_switch`, `session_branch` and `session_tree` then re-derive engagement from the branch now loaded: a rewind that lands after the invocation re-engages with that branch's state, one that lands before it stays inert, and a fork re-derives like any other branch.
 
-**Idleness does not end the procedure.** `[V4]` While the state goes unchanged the model's edits are not required for the run to stay coherent, so the runtime never stands down on its own: `idleSteps` consecutive steps with no patch or with a patch that leaves the state unchanged raise one per-call developer ask per episode, naming how long the state has stood still and asking the model to record a meaningful fact — a reminder, never a deadline — and the ask is never stored and never re-sent from history. A step whose provider call carried no stored head does not count: the first step carries the rules through the `before_agent_start` delivery (section 7) but runs before the engage asides land, and the step after a compaction can run before the re-sent head lands, so the rules are missing from its prompt in that case — no head means no count and no ask.
+**Idleness does not end the procedure.** While the state goes unchanged the model's edits are not required for the run to stay coherent, so the runtime never stands down on its own: `idleSteps` consecutive steps with no patch or with a patch that leaves the state unchanged raise one per-call developer ask per episode, naming how long the state has stood still and asking the model to record a meaningful fact — a reminder, never a deadline — and the ask is never stored and never re-sent from history. A step whose provider call carried no stored head does not count: the first step carries the rules through the `before_agent_start` delivery (section 7) but runs before the engage asides land, and the step after a compaction can run before the re-sent head lands, so the rules are missing from its prompt in that case — no head means no count and no ask.
 
 The remaining exit is **degrade**, from section 8, which is a failure path rather than a normal ending.
 
@@ -277,9 +283,9 @@ Extension factories are rebound into every subagent session, so the handler runs
 | Missing or malformed schema | load | do not engage; notify |
 | Oversized tool result | result cap | truncate from the end of the result, insert a marker |
 | Provider rejects the prompt shape | provider error surfaced to the session | the harness's own retry and compaction paths apply; the runtime does not intercept them |
-| Model stops updating the state | `idleSteps` idle steps | one idle ask per episode; the procedure stays engaged `[V4]` |
+| Model stops updating the state | `idleSteps` idle steps | one idle ask per episode; the procedure stays engaged |
 | Head message missing on rebuild | invocation without a following procedure-spec message or either state message | stay inert: there is no head to project |
-| Empty tail | head intact, no messages behind it | project the head and a degradation notice `[V4]` |
+| Empty tail | head intact, no messages behind it | project the head and a degradation notice |
 
 Degrade is terminal for the session. The user gets ordinary history-based execution back, which is always correct, only more expensive.
 
@@ -287,14 +293,14 @@ Degrade is terminal for the session. The user gets ordinary history-based execut
 
 | Parameter | Default | Source |
 | --- | --- | --- |
-| `promptBudgetPercent` `[V4]` | 30 | schema `x-state`, else runtime default |
-| `evictionChunkPercent` `[V4]` | 25 | schema `x-state`, else runtime default |
+| `promptBudgetPercent` | 30 | schema `x-state`, else runtime default |
+| `evictionChunkPercent` | 25 | schema `x-state`, else runtime default |
 | `observationBytes` | 65536 | schema `x-state`, else runtime default |
-| `idleSteps` | 5 | schema `x-state` |
-| `retries` | 3 | schema `x-state` |
+| `idleSteps` | 5 | schema `x-state`, else runtime default |
+| `retries` | 3 | schema `x-state`, else runtime default |
 | `stateBytes` | 0 (disabled) | schema `x-state`, else runtime default |
 | `volatile` | heuristic: array-typed and planning keys | schema `x-state.volatile`, else runtime heuristic |
-| `observationWindow` | deleted `[V4]` | the tail replaced it (section 7) |
+| `observationWindow` | deleted | the tail replaced it (section 7) |
 | dropped blocks | all live-state blocks | fixed in v1 |
 
 ## 16. Harness surfaces used
@@ -351,6 +357,7 @@ omp-skill-state/
   src/procedure.ts      the procedure record and the step policy (patch outcomes, head, compaction)
   src/state.ts          the execution state module: schema and params loading, patch validation, merge and apply, the core/scratch split (volatileKeys, splitState)
   src/messages.ts       the message vocabulary: the head message types, the invocation constant and its predicate, the announcement pair, the state renderer and the core and scratch state builders
+  src/recall.ts         the recall read: pure match-and-pack over the transcript's JSONL lines, oldest first, under the 16,384-byte cap
   src/types.ts          shared types: the harness message union and the structural object predicate
   test/*.test.ts        unit tests (bun test), one per source module; test/adapter-*.test.ts drive the factory through the fake session, one file per concern
   test/fake-session.ts  the fake omp session for the adapter tests (branch, delivery timing, sends)
@@ -389,9 +396,9 @@ Against a real session (run G and the nudge probe in `docs/verification.md`; the
 - `t` survives `/resume` and a rewind.
 - compaction while engaged produces a state summary and makes no summarizer call, and speculative compaction is off from that point.
 - `/new` and `/clear` both disengage.
-- prompt size stays inside the budget across a long run: assert the reported input tokens per step stay under `promptBudgetPercent` of the window and sawtooth at evictions. `[V4]`
+- prompt size stays inside the budget across a long run: assert the reported input tokens per step stay under `promptBudgetPercent` of the window and sawtooth at evictions.
 
-`[V4]` The redesign adds claims to the same suites: the tail's assembly (order, the head's own messages excluded, the live-state filter, the budget, chunked eviction), the degraded step (head intact, tail empty), the durable mirror and its repair path, the budget read from `ctx.getContextUsage()`, and the recall tool's read and its result cap.
+The same suites also carry the redesign's claims: the tail's assembly (order, the head's own messages excluded, the live-state filter, the budget, chunked eviction), the degraded step (head intact, tail empty), the durable mirror and its repair path, the budget read from `ctx.getContextUsage()`, and the recall tool's read and its result cap.
 
 ## 19. Out of scope
 
@@ -432,4 +439,4 @@ Five decisions, three ADRs:
 - **The durable mirror** (ADR 0012): the state keeps its stored messages as the projection's source and gains an `appendEntry` mirror that no harness pass rewrites.
 - **Adopted from the abandoned branch**: state reads order by write stamp with branch position as the final tiebreak (the `beta` branch's ADR 0008), because a parked next-turn send can land after a newer commit and time-travel the projection. Its module split is not adopted: this change moves those boundaries anyway.
 
-Nothing here is implemented. The sections marked `[V4]` are the target; the rest of the document describes the shipped v0.3.0. Acceptance widens to four classes — an ordinary coding session, a long research run, trajectory-as-objective work (an audit, "what changed and why", debug provenance), and a multi-skill session — and each is verified by a real session the user records and whose transcript is read afterwards, not by a synthetic session harness.
+Everything in this document is implemented. Acceptance for the redesign waits on four classes of real session — an ordinary coding session, a long research run, trajectory-as-objective work (an audit, "what changed and why", debug provenance), and a multi-skill session with a mid-run second-skill invocation — each recorded by the user and read afterwards, not a synthetic session harness; the measured figures land in `docs/verification.md` and are pending until then.

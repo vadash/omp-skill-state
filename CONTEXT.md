@@ -73,6 +73,10 @@ _Avoid_: checkpoint, checkpoint pair, head pair
 The entry `pi.appendEntry` writes for each committed state. It never enters the model's prompt; re-derive reads it and repairs a stored state message that disagrees with it.
 _Avoid_: backup, journal, sidecar
 
+**Write stamp**:
+The counter every commit increments and stamps onto its state messages and its mirror entry. State reads order by it, with branch position as the final tiebreak, and a re-derive prefers the mirror, repairing a stored state message that disagrees with it.
+_Avoid_: sequence number, version, timestamp
+
 **Observation**:
 The environment output for the current step, `Oₜ`. It is the newest part of the tail — the most recent stored messages in the prompt.
 _Avoid_: result, output, feedback

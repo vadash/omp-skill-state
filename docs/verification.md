@@ -1,6 +1,6 @@
 # Verification: run H over the shipped tool channel
 
-Real-session acceptance evidence for the shipped runtime. Run H exercises the top-level `state_update` tool, the observation window, the nudges and the split head in one procedure; a print-mode probe establishes why the run is driven through the TUI. Run G is kept as the measured baseline the new channel is compared against.
+Real-session acceptance evidence. Both recorded runs are evidence for the pre-redesign runtime: they predate the universal redesign (ADR 0010-0012), and run H exercised the observation window the tail has since replaced, plus the old idle nudge whose wording said it would disengage (quoted in the run H section below). Run H exercises the top-level `state_update` tool, the observation window, the nudges and the split head in one procedure; a print-mode probe establishes why the run is driven through the TUI. Run G is kept as the measured baseline the new channel is compared against.
 
 ## Setup
 
@@ -52,6 +52,12 @@ Run G rode the superseded `xd://state_update` mount; its measurements are kept a
 ## Comparison
 
 Run H's settled pin band 9536–10304 sits 192–960 tokens under run G's 10496 (−1.8 % to −9.1 %). Both profiles share the prefix structure (system prompt, tools, rules, procedure spec, state core); the delta is consistent with the harness moving 18.10.2 → 18.10.3 between the runs' profiles and run H's shorter stable stretch. The head split's benefit survives the channel change: the prompt stays flat while the state turns over, and every projected step once the head settles reads cache-positive (G: 57/58 with three cold steps; H: 14/14).
+
+## Pending: the post-redesign acceptance runs
+
+No post-redesign figures exist yet. The pending re-measurements, taken on the acceptance runs below: the cache pin, with run H's 9536–10304 band as the floor (ADR 0011's layout lets the cached prefix reach through the tail); the tail's budget behaviour, prompt inside the budget with a sawtooth at evictions; the mirror repair on a resume whose stored head disagrees with it; and `state_recall`'s read-back with its cap marker.
+
+The four acceptance classes also await the user's recorded sessions, whose transcripts are read afterwards: an ordinary coding session, a long research run, a trajectory-as-objective run (an audit, "what changed and why", debug provenance), and a multi-skill session with a mid-run second-skill invocation. The measured cache-read figures and the prompt-size-inside-budget check are recorded with those transcripts and stay pending until they exist.
 
 ## Not covered
 

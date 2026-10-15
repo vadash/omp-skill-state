@@ -120,29 +120,29 @@ describe("renderStateContent", () => {
 });
 
 describe("coreMessage", () => {
-	test("carries the rendered core partition and details.state for re-derive", () => {
-		expect(coreMessage({ goal: "x" })).toEqual({
+	test("carries the rendered core partition, details.state and the write stamp for re-derive", () => {
+		expect(coreMessage({ goal: "x" }, 3)).toEqual({
 			customType: STATE_CORE_MESSAGE_TYPE,
 			content: renderStateContent({ goal: "x" }),
 			display: true,
-			details: { state: { goal: "x" } },
+			details: { state: { goal: "x" }, stamp: 3 },
 		});
 	});
 });
 
 describe("scratchMessage", () => {
-	test("carries the rendered scratch partition and details.state for re-derive", () => {
-		expect(scratchMessage({ plan: ["a"] })).toEqual({
+	test("carries the rendered scratch partition, details.state and the write stamp for re-derive", () => {
+		expect(scratchMessage({ plan: ["a"] }, 2)).toEqual({
 			customType: STATE_SCRATCH_MESSAGE_TYPE,
 			content: renderStateContent({ plan: ["a"] }),
 			display: true,
-			details: { state: { plan: ["a"] } },
+			details: { state: { plan: ["a"] }, stamp: 2 },
 		});
 	});
 
 	test("an empty scratch renders as a stored empty-object message", () => {
-		expect(scratchMessage({})).toEqual({ customType: STATE_SCRATCH_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {} } });
-		expect(coreMessage({})).toEqual({ customType: STATE_CORE_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {} } });
+		expect(scratchMessage({}, 0)).toEqual({ customType: STATE_SCRATCH_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {}, stamp: 0 } });
+		expect(coreMessage({}, 0)).toEqual({ customType: STATE_CORE_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {}, stamp: 0 } });
 	});
 });
 

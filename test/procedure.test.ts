@@ -61,6 +61,7 @@ describe("newProcedure", () => {
 			schema,
 			params: DEFAULT_PARAMS,
 			state: {},
+			stamp: 0,
 			invalidPatches: 0,
 			idle: 0,
 			capNudged: false,
@@ -287,6 +288,41 @@ describe("commitStep", () => {
 		const p = procedure({}, { goal: "x" });
 
 		expect(commitStep(p, { goal: "x" })).toEqual({ result: "no change to the execution state", sends: [] });
+	});
+
+	test("a commit builds the mirror with the messages: same partitions, same stamp, and the stamp bumps", () => {
+		const p = projected();
+		recordReply(p, empty());
+
+		const committed = commitStep(p, { goal: "x" });
+
+		if ("error" in committed) throw new Error(committed.error);
+		expect(committed.mirror).toEqual({ core: { goal: "x" }, scratch: {}, stamp: 1 });
+		expect(committed.sends).toEqual([coreMessage({ goal: "x" }, 1), scratchMessage({}, 1)]);
+		expect(p.stamp).toBe(1);
+	});
+
+	test("each commit carries the next stamp, so two commits order by write stamp", () => {
+		const p = projected();
+
+		const first = commitStep(p, { goal: "x" });
+		const second = commitStep(p, { goal: "y" });
+
+		if ("error" in first || "error" in second) throw new Error("commit rejected");
+		expect(first.mirror?.stamp).toBe(1);
+		expect(second.mirror?.stamp).toBe(2);
+	});
+
+	test("head and final-state sends carry the current stamp and bump nothing", () => {
+		const p = projected({}, { goal: "seed" });
+
+		expect(stateMessages(p)).toEqual([coreMessage({ goal: "seed" }, 0), scratchMessage({}, 0)]);
+		expect(p.stamp).toBe(0);
+
+		const committed = commitStep(p, { goal: "y" });
+		if ("error" in committed) throw new Error(committed.error);
+		expect(headMessages(p).slice(2)).toEqual([coreMessage({ goal: "y" }, 1), scratchMessage({}, 1)]);
+		expect(p.stamp).toBe(1);
 	});
 
 	test("sequential per-call commits land where the fold landed, even across a change and its revert", () => {
@@ -742,16 +778,16 @@ describe("headMessages", () => {
 		expect(headMessages(p)).toEqual([
 			rulesMessage(),
 			{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: "Running skill recon", display: false, details: { name: "recon" } },
-			coreMessage({ goal: "x" }),
-			scratchMessage({ plan: ["a"] }),
+			coreMessage({ goal: "x" }, 0),
+			scratchMessage({ plan: ["a"] }, 0),
 		]);
 	});
 
 	test("an empty core still renders as a stored empty-object message", () => {
 		const p = procedure({}, { plan: ["a"] });
 
-		expect(headMessages(p)[2]).toEqual(coreMessage({}));
-		expect(headMessages(p)[3]).toEqual(scratchMessage({ plan: ["a"] }));
+		expect(headMessages(p)[2]).toEqual(coreMessage({}, 0));
+		expect(headMessages(p)[3]).toEqual(scratchMessage({ plan: ["a"] }, 0));
 	});
 
 	test("the head is byte-equal across calls for the same state", () => {
@@ -762,7 +798,7 @@ describe("headMessages", () => {
 		expect(headMessages(p)).toEqual(head);
 	});
 
-	test("a scratch-only patch leaves the core payload byte-equal and rewrites the scratch", () => {
+	test("a scratch-only patch leaves the core content byte-equal and rewrites the scratch", () => {
 		const p = procedure({}, { goal: "x" });
 		const coreBefore = headMessages(p)[2];
 
@@ -770,8 +806,13 @@ describe("headMessages", () => {
 		recordReply(p, reply);
 		commit(p, reply);
 
-		expect(headMessages(p)[2]).toEqual(coreBefore);
-		expect(headMessages(p)[3]).toEqual(scratchMessage({ plan: ["next"] }));
+		const coreAfter = headMessages(p)[2];
+		if (typeof coreAfter !== "object" || typeof coreBefore !== "object" || !("content" in coreAfter) || !("content" in coreBefore)) throw new Error("state message lost its payload shape");
+		// Same render, bumped stamp: the content the model and the cache see
+		// is byte-identical, only details.stamp moved.
+		expect(coreAfter.content).toBe(coreBefore.content);
+		expect(coreMessage({ goal: "x" }, 1)).toEqual(coreAfter);
+		expect(headMessages(p)[3]).toEqual(scratchMessage({ plan: ["next"] }, 1));
 	});
 
 	test("a core-key patch changes the core payload", () => {
@@ -783,7 +824,7 @@ describe("headMessages", () => {
 		commit(p, reply);
 
 		expect(headMessages(p)[2]).not.toEqual(coreBefore);
-		expect(headMessages(p)[2]).toEqual(coreMessage({ goal: "y" }));
+		expect(headMessages(p)[2]).toEqual(coreMessage({ goal: "y" }, 1));
 	});
 });
 

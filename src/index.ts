@@ -1,7 +1,7 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Text } from "@oh-my-pi/pi-coding-agent";
-import { contentText, branchMessages, scanBranch } from "./branch";
-import { STATE_UPDATE_TOOL_NAME, STATE_UPDATE_DESCRIPTION, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, announcedSkillNames, rulesMessage, skillInvocationName } from "./messages";
+import { branchMessages, contentText, highestStamp, scanBranch } from "./branch";
+import { STATE_UPDATE_TOOL_NAME, STATE_UPDATE_DESCRIPTION, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, STATE_MIRROR_ENTRY_TYPE, announcedSkillNames, rulesMessage, skillInvocationName } from "./messages";
 import { commitStep, compactionFor, headMessages, newProcedure, recordReply, stateMessages, stepPrompt } from "./procedure";
 import type { Procedure } from "./procedure";
 import { loadStateSchema } from "./state";
@@ -96,6 +96,13 @@ export default function (pi: ExtensionAPI): void {
 			// call when it was invalid; commitStep's repeat is defensive only.
 			const step = commitStep(procedure, params.patch);
 			if ("error" in step) return { content: [{ type: "text", text: step.error }], isError: true };
+			// An empty patch is no commit: no mirror, no send.
+			if (step.sends.length === 0) return { content: [{ type: "text", text: step.result }] };
+			// The durable mirror lands before the sends: the record of this
+			// commit is on the branch already, while the messages wait for the
+			// boundary flush. Entry data the harness never sends to the LLM
+			// (ADR 0012), and never a sendMessage payload.
+			pi.appendEntry(STATE_MIRROR_ENTRY_TYPE, step.mirror);
 			// Aside delivery lands the state at the next step boundary, before
 			// the next provider call, without interrupting the in-flight batch.
 			// A commit stores both partitions, state core first.
@@ -105,9 +112,12 @@ export default function (pi: ExtensionAPI): void {
 	};
 	pi.registerTool(stateUpdate);
 
-	// Every procedure starts here with fresh counters, from a new invocation and
-	// from a re-derive alike. Both notices are UI-only and never enter model context.
-	function engage(ctx: ExtensionContext, sessionId: string, name: string, spec: string, loaded: { schema: StateSchema; params: StateParams }, state: ExecutionState): Procedure {
+	// Every procedure starts here with fresh counters. The stamp seed comes
+	// from the caller: a fresh engage seeds the branch's highest stamp, a
+	// re-derive the effective stamp it read (its mirror's, or its newest
+	// pair's), so the next commit orders above everything stored. Both
+	// notices are UI-only and never enter model context.
+	function engage(ctx: ExtensionContext, sessionId: string, name: string, spec: string, loaded: { schema: StateSchema; params: StateParams }, state: ExecutionState, stampSeed = 0): Procedure {
 		// Registering a session_before_compact handler disables speculative
 		// compaction for the session and pi.on has no counterpart, so the handler
 		// can never be removed (ADR 0001): it is registered lazily, on the first
@@ -120,7 +130,7 @@ export default function (pi: ExtensionAPI): void {
 				return compactionFor(procedure, event.preparation, event.branchEntries);
 			});
 		}
-		const procedure = newProcedure(name, spec, loaded.schema, loaded.params, state);
+		const procedure = newProcedure(name, spec, loaded.schema, loaded.params, state, stampSeed);
 		procedures.set(sessionId, procedure);
 		ctx.ui.notify(`skill-state: procedure "${name}" engaged`, "info");
 		ctx.ui.notify("skill-state: history is hidden from the model while engaged; finish with /new", "info");
@@ -136,17 +146,22 @@ export default function (pi: ExtensionAPI): void {
 
 	// Re-derives engagement from what is stored on the branch, so a cold load, a
 	// /resume, a rewind or a tree navigation land on the procedure state that
-	// branch actually carries. The head asides (rules, P, state core, scratch
-	// state) are already on the branch and are never re-sent: the projection
-	// takes the last of each type, and a fresh aside would shadow the real
-	// stored state.
+	// branch actually carries. The mirror is the effective state and seeds the
+	// record's write stamp (ADR 0012). The stored head asides (rules, P, state
+	// core, scratch state) are never re-sent, with one exception: when the
+	// newest mirror disagrees with the stored state messages, the head is
+	// repaired by re-sending it (idle-aware delivery, like the compaction
+	// re-head). The repair re-send is a re-send, not a commit: no stamp bump,
+	// no mirror. In every other case a fresh aside would only shadow the real
+	// stored state the projection takes the last of each type from.
 	async function rederive(ctx: ExtensionContext, trigger: string): Promise<void> {
 		if (ctx.agent.kind !== "main") return;
 		const found = scanBranch(ctx.sessionManager.getBranch());
 		if (found !== undefined) {
 			const loaded = await loadStateSchema(found.name, pi.pi.getActiveSkills());
 			if (loaded.ok) {
-				engage(ctx, ctx.sessionManager.getSessionId(), found.name, found.spec, loaded, found.state);
+				const procedure = engage(ctx, ctx.sessionManager.getSessionId(), found.name, found.spec, loaded, found.state, found.stamp);
+				if (found.repair) sendHead(procedure, { deliverAs: ctx.isIdle() ? "nextTurn" : "aside" });
 				return;
 			}
 		}
@@ -275,7 +290,10 @@ export default function (pi: ExtensionAPI): void {
 		// P is the rendered skill prompt the harness already produced for this
 		// invocation; it keeps the user's invocation args in every step and needs
 		// no second file read.
-		const procedure = engage(ctx, sessionId, name, contentText(message.content), loaded, {});
+		// The seed is the branch's highest stamp: an ended run's stamped state
+		// messages and parked sends stay on the branch, and a seed of 0 would
+		// hand the prompt to them until this run out-committed the last one.
+		const procedure = engage(ctx, sessionId, name, contentText(message.content), loaded, {}, highestStamp(ctx.sessionManager.getBranch()));
 		// The asides pin the stored head the projection takes from step 2 on;
 		// the first step's rules already went out with the invocation batch,
 		// through before_agent_start.

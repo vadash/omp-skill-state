@@ -3,7 +3,7 @@ import { rm } from "node:fs/promises";
 import path from "node:path";
 import type { Skill } from "@oh-my-pi/pi-coding-agent";
 import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, rulesMessage } from "../src/messages";
-import { coreStateEntry, invocationEntry, procedureBranch, specEntry, stateEntries } from "./entries";
+import { coreStateEntry, invocationEntry, mirrorEntry, procedureBranch, scratchStateEntry, specEntry, stateEntries } from "./entries";
 import { fakeOmp } from "./fake-session";
 import { disengageNotices, engagedSession, engageAsideTypes, engageNotices, makeSkillSet, nudgeIn, patchStep, procedureSchema, projectingSession, smallcapSchema } from "./harness";
 
@@ -43,8 +43,8 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		expect(s.sends.map((sent) => sent.payload)).toEqual([
 			{ customType: RULES_MESSAGE_TYPE, content: rules.content, display: false },
 			{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: "Running skill procedure", display: false, details: { name: "procedure" } },
-			{ customType: STATE_CORE_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {} } },
-			{ customType: STATE_SCRATCH_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {} } },
+			{ customType: STATE_CORE_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {}, stamp: 0 } },
+			{ customType: STATE_SCRATCH_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {}, stamp: 0 } },
 		]);
 		expect(s.sends.map((sent) => sent.options)).toEqual([
 			{ deliverAs: "aside" },
@@ -190,7 +190,12 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 
 	test("/resume of an engaged session re-derives its state and re-engages without resending the head", async () => {
 		const { omp, s } = await engagedSession([procedure]);
-		const target = omp.session("s2", { branch: procedureBranch("procedure", {}, { goal: "x" }) });
+		// The mirror agrees with the newest stored pair, so there is nothing
+		// to repair: the re-derive re-sends nothing and seeds the mirror's
+		// stamp, ordering the next commit above everything stored.
+		const target = omp.session("s2", {
+			branch: [...procedureBranch("procedure", {}, { goal: "x" }), mirrorEntry({ core: { goal: "x" }, scratch: {}, stamp: 1 })],
+		});
 
 		await s.switchTo(target, "resume");
 
@@ -199,6 +204,74 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 		expect(target.sends).toEqual([]);
 		await target.step("recording", patchStep({ extra: 1 }));
 		expect(target.storedStates.at(-1)).toEqual({ goal: "x", extra: 1 });
+		// The repair re-send is the only send a re-derive may make, and it
+		// happened not to; the commit's own mirror is the only new one.
+		expect(target.mirrors).toEqual([{ core: { goal: "x" }, scratch: {}, stamp: 1 }, { core: { goal: "x" }, scratch: { extra: 1 }, stamp: 2 }]);
+	});
+
+	test("a stored head that disagrees with the newest mirror is repaired: the head is re-sent, unmirrored", async () => {
+		const { omp, s } = await engagedSession([procedure]);
+		// The stored pair shows the tampered state; the mirror holds the real
+		// one. A resume must engage the mirror state and re-send the head so
+		// the branch's visible state matches again.
+		const target = omp.session("s2", {
+			branch: [
+				invocationEntry("procedure"),
+				specEntry("procedure"),
+				coreStateEntry({ goal: "tampered" }, { state: { goal: "tampered" }, stamp: 0 }),
+				scratchStateEntry({}, { state: {}, stamp: 0 }),
+				mirrorEntry({ core: { goal: "mirror" }, scratch: {}, stamp: 1 }),
+			],
+		});
+		target.setIdle(true);
+
+		await s.switchTo(target, "resume");
+
+		expect(target.notices).toEqual(engageNotices("procedure"));
+		expect(target.sends.map((sent) => sent.payload.customType)).toEqual(engageAsideTypes);
+		// The head carries the mirror's state and stamp; the re-send is a
+		// re-send, not a commit, so no mirror rides.
+		expect(target.sends.map((sent) => sent.payload.details)).toEqual([
+			undefined,
+			{ name: "procedure" },
+			{ state: { goal: "mirror" }, stamp: 1 },
+			{ state: {}, stamp: 1 },
+		]);
+		expect(target.sends.map((sent) => sent.options)).toEqual([{ deliverAs: "nextTurn" }, { deliverAs: "nextTurn" }, { deliverAs: "nextTurn" }, { deliverAs: "nextTurn" }]);
+		expect(target.mirrors).toEqual([{ core: { goal: "mirror" }, scratch: {}, stamp: 1 }]);
+		// The next commit builds on the mirror state, above the seed stamp.
+		await target.step("recording", patchStep({ extra: 1 }));
+		expect(target.storedStates.at(-1)).toEqual({ goal: "mirror", extra: 1 });
+		expect(target.mirrors.at(-1)).toEqual({ core: { goal: "mirror" }, scratch: { extra: 1 }, stamp: 2 });
+	});
+
+	test("a fresh engage after an ended run seeds above the stamps the run left", async () => {
+		// Run A ended and its stamped state messages stay on the branch. A
+		// second invocation engages fresh; the head it sends must seed at the
+		// branch's highest stamp, or stamp-first ordering hands the prompt to
+		// the ended run's copies — the exact time-travel the stamp guards.
+		const omp = fakeOmp([procedure]);
+		const s = omp.session("s1", {
+			branch: [
+				invocationEntry("procedure"),
+				specEntry("procedure"),
+				coreStateEntry({ goal: "ended" }, { state: { goal: "ended" }, stamp: 3 }),
+				scratchStateEntry({}, { state: {}, stamp: 3 }),
+			],
+		});
+
+		await s.invoke("procedure");
+		await s.step("warm-up", { tools: [] });
+		const prompt = await s.step("recording", { tools: [] });
+		if (prompt === undefined) throw new Error("the step returned no prompt");
+
+		const cores = prompt.filter((message): message is { role: "custom"; customType: string } => typeof message === "object" && message !== null && "role" in message && message.role === "custom" && "customType" in message && message.customType === STATE_CORE_MESSAGE_TYPE);
+		expect(cores).toHaveLength(1);
+		const core = cores[0]!;
+		if (!("details" in core)) throw new Error("the projected core carries no details");
+		// The fresh head carries the fresh state and ties the ended run's
+		// stamp, winning it on the later position.
+		expect(core.details).toEqual({ state: {}, stamp: 3 });
 	});
 
 	test("/new starts the next session inert", async () => {

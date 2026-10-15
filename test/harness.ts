@@ -57,12 +57,12 @@ export async function projectingSession(skill: Skill, id = "s1") {
 }
 
 // The two stored state messages a commit sends, in order, as the fake records
-// them.
-export const stateSends = (state: ExecutionState, deliverAs: "aside" | "nextTurn", schema: StateSchema = procedureSchema) => {
+// them. The stamp is the commit's write stamp; engage-path sends carry 0.
+export const stateSends = (state: ExecutionState, deliverAs: "aside" | "nextTurn", stamp = 0, schema: StateSchema = procedureSchema) => {
 	const { core, scratch } = splitState(state, schema);
 	return [
-		{ payload: coreMessage(core) as Record<string, unknown>, options: { deliverAs } },
-		{ payload: scratchMessage(scratch) as Record<string, unknown>, options: { deliverAs } },
+		{ payload: coreMessage(core, stamp) as Record<string, unknown>, options: { deliverAs } },
+		{ payload: scratchMessage(scratch, stamp) as Record<string, unknown>, options: { deliverAs } },
 	];
 };
 

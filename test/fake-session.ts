@@ -1,8 +1,9 @@
 import type { ExtensionAPI, ExtensionContext, SessionEntry, Skill, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { zod } from "@oh-my-pi/pi-coding-agent";
-import { statePairs } from "../src/branch";
+import { stateMirrors, statePairs } from "../src/branch";
 import extension from "../src/index";
 import { SKILL_PROMPT_MESSAGE_TYPE, skillAnnouncement } from "../src/messages";
+import type { StateMirror } from "../src/messages";
 import type { ExecutionState } from "../src/state";
 import { ZERO_USAGE } from "./entries";
 
@@ -94,6 +95,11 @@ export function fakeOmp(skills: Skill[]): FakeOmp {
 		// The injected schema builder, as the real harness provides it: the
 		// factory builds state_update's parameters with it at load.
 		zod,
+		// The harness's durable-entry write: synchronously persisted to the
+		// dispatching (or, from a timer, the most recent) session.
+		appendEntry(customType: string, data?: unknown) {
+			(internals.current ?? internals.last)?.appendEntry(customType, data);
+		},
 		pi: { getActiveSkills: () => skills },
 	} as unknown as ExtensionAPI;
 	extension(pi);
@@ -153,6 +159,20 @@ export class FakeSession {
 	// so the fake's view cannot drift from re-derive.
 	get storedStates(): ExecutionState[] {
 		return statePairs(this.branch).map(({ core, scratch }) => ({ ...core, ...scratch }));
+	}
+
+	// The branch's durable mirrors (ADR 0012), in order — read through the
+	// runtime's own mirror read, so the fake's view cannot drift from
+	// re-derive either.
+	get mirrors(): StateMirror[] {
+		return stateMirrors(this.branch);
+	}
+
+	// The harness's appendEntry: the entry is on the branch at once, busy or
+	// idle — the real harness persists synchronously, unlike sendMessage's
+	// boundary flush.
+	appendEntry(customType: string, data?: unknown): void {
+		this.branch.push({ type: "custom", id: this.nextId(), parentId: null, timestamp: new Date(0).toISOString(), customType, data } as SessionEntry);
 	}
 
 	setIdle(value: boolean): void {

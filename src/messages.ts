@@ -20,6 +20,21 @@ export const STATE_UPDATE_TOOL_NAME = "state_update";
 // head message and never tail-eligible, wherever it sits on the branch.
 export const LEGACY_STATE_MESSAGE_TYPE = "sh.omp.skill-state.state";
 
+// The durable mirror of each commit (ADR 0012): an ENTRY type the harness
+// stores through pi.appendEntry and never sends to the LLM. Not a message
+// type: it never rides sendMessage, never renders, and is in no message-type
+// list, because no message ever carries it.
+export const STATE_MIRROR_ENTRY_TYPE = "sh.omp.skill-state.mirror";
+
+// One commit's mirror: the same partitions and the same write stamp as the
+// messages the commit sent, so a re-derive can read the state from it and
+// detect a stored state message rewritten behind the runtime's back.
+export interface StateMirror {
+	core: ExecutionState;
+	scratch: ExecutionState;
+	stamp: number;
+}
+
 // The live-state blocks other harness features inject around the model. They
 // are runtime machinery, not conversation, so the tail drops them everywhere;
 // every other stored message is tail-eligible.
@@ -126,14 +141,17 @@ export function renderStateContent(state: ExecutionState): string {
 }
 
 // details.state lets later re-derives rebuild t from the branch without
-// re-parsing the content. The execution state is stored as two messages (the
-// state core and the scratch state, ADR 0003), each holding its partition.
-export function coreMessage(core: ExecutionState): CustomMessagePayload {
-	return { customType: STATE_CORE_MESSAGE_TYPE, content: renderStateContent(core), display: true, details: { state: core } };
+// re-parsing the content; details.stamp carries the commit's write stamp, so
+// state reads order by write stamp with branch position as the tiebreak. The
+// execution state is stored as two messages (the state core and the scratch
+// state, ADR 0003), each holding its partition. Details never reach the LLM,
+// so the model-visible content stays byte-identical.
+export function coreMessage(core: ExecutionState, stamp: number): CustomMessagePayload {
+	return { customType: STATE_CORE_MESSAGE_TYPE, content: renderStateContent(core), display: true, details: { state: core, stamp } };
 }
 
-export function scratchMessage(scratch: ExecutionState): CustomMessagePayload {
-	return { customType: STATE_SCRATCH_MESSAGE_TYPE, content: renderStateContent(scratch), display: true, details: { state: scratch } };
+export function scratchMessage(scratch: ExecutionState, stamp: number): CustomMessagePayload {
+	return { customType: STATE_SCRATCH_MESSAGE_TYPE, content: renderStateContent(scratch), display: true, details: { state: scratch, stamp } };
 }
 
 // Domain predicates and the payload accessor for the stored state messages:
@@ -157,6 +175,25 @@ export function extractStatePayload(details: unknown): ExecutionState | undefine
 	// plain-object check above is the whole contract.
 	const partition = state as ExecutionState;
 	return partition;
+}
+
+// The write stamp a stored state message carries, 0 when it has none or an
+// unusable one: a message written before stamps, or by anything else, orders
+// below every stamped message.
+export function extractStateStamp(details: unknown): number {
+	const stamp = isPlainObject(details) ? details.stamp : undefined;
+	return typeof stamp === "number" && Number.isFinite(stamp) ? stamp : 0;
+}
+
+// The mirror a mirror entry carries, or undefined when the entry was not
+// written by this runtime: only its own entries hold a plain-object payload
+// with two partitions and a finite stamp, and that check is the boundary.
+export function extractMirrorPayload(data: unknown): StateMirror | undefined {
+	if (!isPlainObject(data)) return undefined;
+	const { core, scratch, stamp } = data;
+	if (!isPlainObject(core) || !isPlainObject(scratch)) return undefined;
+	if (typeof stamp !== "number" || !Number.isFinite(stamp)) return undefined;
+	return { core: core as ExecutionState, scratch: scratch as ExecutionState, stamp };
 }
 
 // The idle ask the model sees after idleSteps consecutive steps without a

@@ -22,7 +22,7 @@ describe("omp-skill-state default-schema selection", () => {
 		await s.step("recording", patchStep(patch));
 
 		expect(s.blocked).toEqual([]);
-		expect(s.sends.slice(4)).toEqual(stateSends(patch, "aside", selected.schema));
+		expect(s.sends.slice(4)).toEqual(stateSends(patch, "aside", 1, selected.schema));
 		expect(s.storedStates).toEqual([{}, patch]);
 	});
 
@@ -31,8 +31,8 @@ describe("omp-skill-state default-schema selection", () => {
 
 		await s.step("recording", patchStep({ goal: "land the fix", knowledge: { port: 8080 }, plan: ["write tests"] }));
 
-		expect(s.sends[4]?.payload.details).toEqual({ state: { goal: "land the fix", knowledge: { port: 8080 } } });
-		expect(s.sends[5]?.payload.details).toEqual({ state: { plan: ["write tests"] } });
+		expect(s.sends[4]?.payload.details).toEqual({ state: { goal: "land the fix", knowledge: { port: 8080 } }, stamp: 1 });
+		expect(s.sends[5]?.payload.details).toEqual({ state: { plan: ["write tests"] }, stamp: 1 });
 	});
 
 	test("a model skill read of the schema-less marker stays inert", async () => {

@@ -111,6 +111,30 @@ function perCall(stored: AgentMessage): AgentMessage {
 // The prompt order: rules, spec, core, tail, scratch copy. The tail length
 // varies, so the scratch copy is located from the end.
 describe("project tail assembly", () => {
+	test("a parked older-stamped state message after a newer one does not time-travel the prompt", () => {
+		// The core/scratch halves pick by write stamp, position as the final
+		// tiebreak (ADR 0012): a parked next-turn send of the older commit
+		// landing after the newer pair must not overwrite the prompt's state.
+		const newerCore = custom(STATE_CORE_MESSAGE_TYPE, JSON.stringify({ goal: "new" }), { state: { goal: "new" }, stamp: 2 });
+		const newerScratch = custom(STATE_SCRATCH_MESSAGE_TYPE, "{}", { state: {}, stamp: 2 });
+		const parkedCore = custom(STATE_CORE_MESSAGE_TYPE, JSON.stringify({ goal: "old" }), { state: { goal: "old" }, stamp: 1 });
+		const parkedScratch = custom(STATE_SCRATCH_MESSAGE_TYPE, "{}", { state: {}, stamp: 1 });
+		const messages = [rulesMsg(), procedureSpecMsg(), newerCore, newerScratch, parkedCore, parkedScratch, userMsg("go on")];
+
+		const out = projected(messages);
+
+		expect(out[2]).toBe(newerCore);
+		expect(out.at(-1)).toEqual(perCall(newerScratch));
+	});
+
+	test("unstamped state messages keep positional-last: the messages predate stamps", () => {
+		const messages = [rulesMsg(), procedureSpecMsg(), coreMsg({ goal: "only" }), scratchMsg({}), coreMsg({ goal: "later" }), scratchMsg({}), userMsg("go on")];
+
+		const out = projected(messages);
+
+		expect(out[2]).toBe(messages[4]);
+		expect(out.at(-1)).toEqual(perCall(messages[5]));
+	});
 	test("a step's prompt carries the run's recent conversation behind the state core, byte-identical to stored", () => {
 		const h = head();
 		const turn = userMsg("the task, restated mid-run");

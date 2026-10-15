@@ -2,6 +2,7 @@ import type { CustomMessagePayload, SessionBeforeCompactEvent, SessionBeforeComp
 import { currentStepCut } from "./branch";
 import type { AgentMessage } from "./types";
 import { PROCEDURE_SPEC_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, degradationNoticeMessage, fallbackNoticeMessage, idleNudgeMessage, renderStateContent, rulesMessage, scratchMessage, windowNoticeMessage } from "./messages";
+import type { StateMirror } from "./messages";
 import { pairTag, project } from "./projection";
 import { applyPatch, splitState } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
@@ -16,6 +17,11 @@ export interface Procedure {
 	schema: StateSchema;
 	params: StateParams;
 	state: ExecutionState;
+	// The write stamp, monotonic per record: fresh engage starts at the seed
+	// (0 for a new invocation, the branch's effective stamp for a re-derive)
+	// and every commit increments it before the messages are built, so commit
+	// N carries stamp N and every stored state message orders by it.
+	stamp: number;
 	// The validation error of the current step's patch. While set, every tool
 	// call of the step is blocked with it; the next reply clears it.
 	pendingError?: string;
@@ -52,9 +58,11 @@ export interface Procedure {
 }
 
 // Every procedure starts with fresh counters, from a new invocation and from a
-// re-derive alike.
-export function newProcedure(name: string, spec: string, schema: StateSchema, params: StateParams, state: ExecutionState): Procedure {
-	return { name, spec, schema, params, state, invalidPatches: 0, idle: 0, capNudged: false, idleNudged: false, fallbackNoticed: false, projected: false, step: 0, nudgedAt: -1, nudgesMemo: [] };
+// re-derive alike. The stamp seed is 0 for a new invocation; a re-derive
+// passes the branch's effective stamp so the next commit orders above
+// everything already stored.
+export function newProcedure(name: string, spec: string, schema: StateSchema, params: StateParams, state: ExecutionState, stampSeed = 0): Procedure {
+	return { name, spec, schema, params, state, stamp: stampSeed, invalidPatches: 0, idle: 0, capNudged: false, idleNudged: false, fallbackNoticed: false, projected: false, step: 0, nudgedAt: -1, nudgesMemo: [] };
 }
 
 // What one reply did to the procedure. The factory acts on it: an ok step's
@@ -138,26 +146,36 @@ function breakIdle(procedure: Procedure): void {
 
 // The one write path for a merged state: every commit goes through this. A
 // commit is a patch that changed the state, so it breaks the quiet episode
-// through breakIdle, like every other episode breaker.
+// through breakIdle, like every other episode breaker. The stamp increments
+// before any message is built, so commit N carries stamp N.
 function commitPatch(procedure: Procedure, state: ExecutionState): void {
 	procedure.state = state;
+	procedure.stamp++;
 	breakIdle(procedure);
 }
 
 // The state_update execute's whole policy: apply the call's patch to the
 // committed state and, on a real change, commit it and build the two stored
-// state messages to send. The fold in recordReply validated this patch
-// against the same intermediate state, so the repeat here is defensive only
-// (spec section 8.4): an impossible failure comes back as the exact error in
-// a failed tool result.
-export function commitStep(procedure: Procedure, patch: unknown): { result: string; sends: CustomMessagePayload[] } | { error: string } {
+// state messages to send together with their durable mirror. The mirror's
+// partitions are the same statePartitions read the sends are built from and
+// carry the same stamp, so the record cannot disagree with the messages at
+// build time (ADR 0012); they disagree only after an external rewrite. The
+// fold in recordReply validated this patch against the same intermediate
+// state, so the repeat here is defensive only (spec section 8.4): an
+// impossible failure comes back as the exact error in a failed tool result.
+export function commitStep(procedure: Procedure, patch: unknown): { result: string; sends: CustomMessagePayload[]; mirror?: StateMirror } | { error: string } {
 	const applied = applyPatch(procedure.state, patch, procedure.schema);
 	if (!applied.ok) return { error: applied.error };
 	// A patch that leaves the state as it was is an empty patch: no commit,
-	// no send.
+	// no send, no mirror.
 	if (!applied.changed) return { result: "no change to the execution state", sends: [] };
 	commitPatch(procedure, applied.state);
-	return { result: "execution state updated", sends: stateMessages(procedure) };
+	const { core, scratch } = statePartitions(procedure);
+	return {
+		result: "execution state updated",
+		sends: [coreMessage(core, procedure.stamp), scratchMessage(scratch, procedure.stamp)],
+		mirror: { core, scratch, stamp: procedure.stamp },
+	};
 }
 
 // Over the soft state cap, the consolidation ask rides once per episode:
@@ -265,10 +283,11 @@ function statePartitions(procedure: Procedure): { core: ExecutionState; scratch:
 
 // The two stored state messages of the current state, core first. Shared by
 // the head, the patch aside and the final-state send, so every stored
-// checkpoint has the same shape.
+// checkpoint has the same shape. Re-sends are not commits: they carry the
+// current stamp and bump nothing.
 export function stateMessages(procedure: Procedure): CustomMessagePayload[] {
 	const { core, scratch } = statePartitions(procedure);
-	return [coreMessage(core), scratchMessage(scratch)];
+	return [coreMessage(core, procedure.stamp), scratchMessage(scratch, procedure.stamp)];
 }
 
 // The head: the operating rules, P, the state core and the scratch state, one

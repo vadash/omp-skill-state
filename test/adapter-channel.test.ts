@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, jest, test } from "bun:test";
 import { rm } from "node:fs/promises";
-import { STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, STATE_UPDATE_DESCRIPTION, STATE_UPDATE_TOOL_NAME, coreMessage, renderStateContent } from "../src/messages";
+import { STATE_CORE_MESSAGE_TYPE, STATE_MIRROR_ENTRY_TYPE, STATE_SCRATCH_MESSAGE_TYPE, STATE_UPDATE_DESCRIPTION, STATE_UPDATE_TOOL_NAME, coreMessage, renderStateContent } from "../src/messages";
 import { newProcedure, recordReply } from "../src/procedure";
 import { DEFAULT_PARAMS } from "../src/state";
 import type { ExecutionState } from "../src/state";
@@ -63,10 +63,47 @@ describe("omp-skill-state patch loop", () => {
 		await s.step("recording", patchStep({ goal: "x" }));
 
 		expect(s.sends).toHaveLength(6);
-		expect(s.sends.slice(4)).toEqual(stateSends({ goal: "x" }, "aside"));
+		expect(s.sends.slice(4)).toEqual(stateSends({ goal: "x" }, "aside", 1));
 		expect(s.blocked).toEqual([]);
 		// Stored at the step boundary, before the next provider call.
 		expect(s.storedStates).toEqual([{}, { goal: "x" }]);
+	});
+
+	test("every accepted commit appends a mirror entry with the same partitions and stamp, ahead of its pair", async () => {
+		const { s } = await engagedSession([procedure]);
+
+		await s.step("first", patchStep({ goal: "x" }));
+		await s.step("second", patchStep({ note: "y" }));
+		// An empty patch is no commit: no mirror, no send.
+		await s.step("idle", patchStep({ goal: "x" }));
+
+		expect(s.mirrors).toEqual([
+			{ core: { goal: "x" }, scratch: {}, stamp: 1 },
+			{ core: { goal: "x" }, scratch: { note: "y" }, stamp: 2 },
+		]);
+		// The durable record lands during the execute, the pair flushes at the
+		// step boundary, so each mirror entry sits before its own pair.
+		const positions = s.branch.map((entry) => (entry.type === "custom" && entry.customType === STATE_MIRROR_ENTRY_TYPE ? "mirror" : entry.type === "custom_message" && (entry.customType === STATE_CORE_MESSAGE_TYPE || entry.customType === STATE_SCRATCH_MESSAGE_TYPE) ? "state" : "other"));
+		expect(positions.indexOf("mirror")).toBeLessThan(positions.indexOf("state"));
+		expect(positions.lastIndexOf("mirror")).toBeLessThan(positions.lastIndexOf("state"));
+	});
+
+	test("the mirror never reaches the model: it is entry data, in no send and no prompt", async () => {
+		const { s } = await engagedSession([procedure]);
+
+		await s.step("recording", patchStep({ goal: "x" }));
+
+		expect(s.sends.map((sent) => sent.payload.customType)).not.toContain(STATE_MIRROR_ENTRY_TYPE);
+		for (const prompt of s.prompts) {
+			for (const message of prompt ?? []) {
+				if (typeof message === "object" && message !== null && "customType" in message) {
+					expect(message.customType).not.toBe(STATE_MIRROR_ENTRY_TYPE);
+				}
+			}
+		}
+		// The harness's appendEntry writes a custom entry, not a message, and
+		// the fake's branch conversion never turns one into a prompt message.
+		expect(s.branch.filter((entry) => entry.type === "custom")).toHaveLength(1);
 	});
 
 	test("an invalid patch blocks every call of the batch, the state_update call included, with the exact validation error", async () => {
@@ -98,7 +135,12 @@ describe("omp-skill-state patch loop", () => {
 		// against the state the first commit left (re-reading the parked state
 		// instead would make z no change: no commit, no send).
 		expect(s.storedStates).toEqual([{}, { goal: "z" }, { goal: "y" }, { goal: "z" }]);
-		expect(s.sends.slice(6)).toEqual([...stateSends({ goal: "y" }, "aside"), ...stateSends({ goal: "z" }, "aside")]);
+		expect(s.sends.slice(6)).toEqual([...stateSends({ goal: "y" }, "aside", 2), ...stateSends({ goal: "z" }, "aside", 3)]);
+		// One mirror per accepted patch, in commit order.
+		expect(s.mirrors.slice(1)).toEqual([
+			{ core: { goal: "y" }, scratch: {}, stamp: 2 },
+			{ core: { goal: "z" }, scratch: {}, stamp: 3 },
+		]);
 		expect(s.blocked).toEqual([]);
 		// The commits land where the one fold landed (CONTEXT.md "Fold"/"Commit" equivalence).
 		expect(s.storedStates.at(-1)).toEqual(fold.state);
@@ -162,14 +204,14 @@ describe("omp-skill-state patch loop", () => {
 			s.setIdle(true);
 			jest.advanceTimersByTime(20);
 			expect(s.sends).toHaveLength(8);
-			expect(s.sends.slice(6)).toEqual(stateSends({ goal: "x" }, "nextTurn"));
+			expect(s.sends.slice(6)).toEqual(stateSends({ goal: "x" }, "nextTurn", 1));
 			// Idle delivery lands on the branch at once, without a turn.
 			expect(s.storedStates.at(-1)).toEqual({ goal: "x" });
 
 			// A later run end settles the live state again: agent_end always
 			// snapshots procedure.state.
 			await s.step("again", { tools: [] });
-			expect(s.sends.slice(8)).toEqual(stateSends({ goal: "x" }, "nextTurn"));
+			expect(s.sends.slice(8)).toEqual(stateSends({ goal: "x" }, "nextTurn", 1));
 		} finally {
 			jest.useRealTimers();
 		}
@@ -183,7 +225,7 @@ describe("omp-skill-state patch loop", () => {
 			// A queued prompt ran another step before the session went idle.
 			await s.step("recording", patchStep({ goal: "y" }));
 			expect(s.sends).toHaveLength(6);
-			expect(s.sends[4]!.payload).toEqual(coreMessage({ goal: "y" }) as Record<string, unknown>);
+			expect(s.sends[4]!.payload).toEqual(coreMessage({ goal: "y" }, 1) as Record<string, unknown>);
 
 			s.setIdle(true);
 			jest.advanceTimersByTime(5000);
@@ -284,7 +326,7 @@ describe("omp-skill-state state_update registration", () => {
 		expect(result.isError).toBeUndefined();
 		// The asides flushed at the next step boundary.
 		await s.step("flush");
-		expect(s.sends.slice(4)).toEqual(stateSends({ goal: "x" }, "aside"));
+		expect(s.sends.slice(4)).toEqual(stateSends({ goal: "x" }, "aside", 1));
 		expect(s.storedStates).toEqual([{}, { goal: "x" }]);
 	});
 

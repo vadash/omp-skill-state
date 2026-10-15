@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { CustomMessagePayload, SessionEntry } from "@oh-my-pi/pi-coding-agent";
-import { contentText, currentStepCut, scanBranch, statePairs } from "../src/branch";
+import { contentText, currentStepCut, scanBranch, stateMirrors, statePairs } from "../src/branch";
 import { STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE } from "../src/messages";
+import type { StateMirror } from "../src/messages";
 import { commitStep, headMessages, newProcedure, stateMessages } from "../src/procedure";
 import { DEFAULT_PARAMS } from "../src/state";
 import type { ExecutionState, StateSchema } from "../src/state";
-import { assistantEntry, coreStateEntry, invocationEntry, scratchStateEntry, specEntry, stateEntry } from "./entries";
+import { assistantEntry, coreStateEntry, invocationEntry, mirrorEntry, scratchStateEntry, specEntry, stateEntry } from "./entries";
 
 let seq = 0;
 const nextId = () => `e${seq++}`;
@@ -32,13 +33,13 @@ describe("scanBranch", () => {
 	test("a user invocation followed by its spec, a core and a scratch message re-derives the merged state", () => {
 		const found = scanBranch([invocationEntry("recon"), specEntry("recon"), coreStateEntry({ goal: "x", working_dir: "." }), scratchStateEntry({ plan: ["a"] })]);
 
-		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x", working_dir: ".", plan: ["a"] } });
+		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x", working_dir: ".", plan: ["a"] }, repair: false, stamp: 0 });
 	});
 
 	test("an empty scratch state still counts: the merged state is the core alone", () => {
 		const found = scanBranch([invocationEntry("recon"), specEntry("recon"), coreStateEntry({ goal: "x" }), scratchStateEntry({})]);
 
-		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x" } });
+		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x" }, repair: false, stamp: 0 });
 	});
 
 	test("the latest complete pair wins: a re-sent head supersedes the earlier one", () => {
@@ -73,7 +74,7 @@ describe("scanBranch", () => {
 		expect(scanBranch(branch)).toBeUndefined();
 
 		const found = scanBranch([...branch, specEntry("other"), coreStateEntry({ goal: "new" }), scratchStateEntry({})]);
-		expect(found).toEqual({ name: "other", spec: "Running skill other", state: { goal: "new" } });
+		expect(found).toEqual({ name: "other", spec: "Running skill other", state: { goal: "new" }, repair: false, stamp: 0 });
 	});
 
 	test("an agent-attributed invocation and one without a name never count", () => {
@@ -131,6 +132,97 @@ describe("scanBranch", () => {
 		]);
 
 		expect(found?.state).toEqual({ goal: "x", plan: ["a"] });
+	});
+
+	test("the newest mirror re-derives its state and seeds its stamp, with repair when the stored pair is older", () => {
+		// A crash between the mirror and its pair's boundary flush: the mirror
+		// (stamp 1) is the state, the stored pair (stamp 0) is what the head
+		// shows, so the disagreement is repaired by re-sending the head.
+		const found = scanBranch([
+			invocationEntry("recon"),
+			specEntry("recon"),
+			coreStateEntry({ goal: "stored" }),
+			scratchStateEntry({}),
+			mirrorEntry({ core: { goal: "mirror" }, scratch: { extra: 1 }, stamp: 4 }),
+		]);
+
+		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "mirror", extra: 1 }, repair: true, stamp: 4 });
+	});
+
+	test("a mirror that agrees with the newest stored pair re-derives without repair", () => {
+		const found = scanBranch([
+			invocationEntry("recon"),
+			specEntry("recon"),
+			coreStateEntry({ goal: "x" }, { state: { goal: "x" }, stamp: 1 }),
+			scratchStateEntry({}, { state: {}, stamp: 1 }),
+			mirrorEntry({ core: { goal: "x" }, scratch: {}, stamp: 1 }),
+		]);
+
+		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x" }, repair: false, stamp: 1 });
+	});
+
+	test("a stored message whose content was rewritten behind the mirror's back is repaired", () => {
+		// The elide pass rewrites content in place; a surviving details.state
+		// with replaced content is exactly the disagreement ADR 0012 names.
+		const tamperedCore = { ...coreStateEntry({ goal: "x" }, { state: { goal: "x" }, stamp: 1 }), content: "an elide-pass placeholder" };
+
+		expect(scanBranch([invocationEntry("recon"), specEntry("recon"), tamperedCore, scratchStateEntry({}, { state: {}, stamp: 1 }), mirrorEntry({ core: { goal: "x" }, scratch: {}, stamp: 1 })])?.repair).toBe(true);
+	});
+
+	test("a parked older-stamped pair after a newer pair does not time-travel the re-derive", () => {
+		const found = scanBranch([
+			invocationEntry("recon"),
+			specEntry("recon"),
+			coreStateEntry({ goal: "new" }, { state: { goal: "new" }, stamp: 2 }),
+			scratchStateEntry({}, { state: {}, stamp: 2 }),
+			// A parked next-turn send of the older commit, flushed late.
+			coreStateEntry({ goal: "old" }, { state: { goal: "old" }, stamp: 1 }),
+			scratchStateEntry({}, { state: {}, stamp: 1 }),
+		]);
+
+		expect(found?.state).toEqual({ goal: "new" });
+		expect(found?.stamp).toBe(2);
+	});
+
+	test("equal stamps fall back to branch position", () => {
+		const found = scanBranch([
+			invocationEntry("recon"),
+			specEntry("recon"),
+			coreStateEntry({ goal: "old" }, { state: { goal: "old" }, stamp: 1 }),
+			scratchStateEntry({}, { state: {}, stamp: 1 }),
+			coreStateEntry({ goal: "new" }, { state: { goal: "new" }, stamp: 1 }),
+			scratchStateEntry({}, { state: {}, stamp: 1 }),
+		]);
+
+		expect(found?.state).toEqual({ goal: "new" });
+	});
+
+	test("a mirror never resurrects an incomplete head", () => {
+		expect(scanBranch([invocationEntry("recon"), specEntry("recon"), mirrorEntry({ core: { goal: "x" }, scratch: {}, stamp: 1 })])).toBeUndefined();
+		expect(scanBranch([invocationEntry("recon"), mirrorEntry({ core: { goal: "x" }, scratch: {}, stamp: 1 }), coreStateEntry({ goal: "x" }), scratchStateEntry({})])).toBeUndefined();
+	});
+});
+
+describe("stateMirrors", () => {
+	test("reads the mirror entries in order and skips invalid payloads and other entries", () => {
+		const mirrors = stateMirrors([
+			invocationEntry("recon"),
+			mirrorEntry({ core: { goal: "x" }, scratch: {}, stamp: 1 }),
+			mirrorEntry({ core: {}, scratch: {}, stamp: "no" } as unknown as StateMirror),
+			mirrorEntry("garbage" as unknown as StateMirror),
+			assistantEntry("a1"),
+			customEntry("c1"),
+			mirrorEntry({ core: { goal: "y" }, scratch: { plan: ["a"] }, stamp: 2 }),
+		]);
+
+		expect(mirrors).toEqual([
+			{ core: { goal: "x" }, scratch: {}, stamp: 1 },
+			{ core: { goal: "y" }, scratch: { plan: ["a"] }, stamp: 2 },
+		]);
+	});
+
+	test("a branch without mirror entries has none", () => {
+		expect(stateMirrors([invocationEntry("recon"), specEntry("recon"), coreStateEntry({ goal: "x" }), scratchStateEntry({})])).toEqual([]);
 	});
 });
 

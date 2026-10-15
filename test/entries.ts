@@ -1,5 +1,6 @@
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, SKILL_PROMPT_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent } from "../src/messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, SKILL_PROMPT_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_MIRROR_ENTRY_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent } from "../src/messages";
+import type { StateMirror } from "../src/messages";
 import type { ExecutionState } from "../src/state";
 
 // Stored-branch entry builders, one home for the shape the fake session and
@@ -77,6 +78,12 @@ export function scratchStateEntry(state: ExecutionState, details: unknown = { st
 // shape and the merged state are what the reads under test consume.
 export function stateEntries(state: ExecutionState): SessionEntry[] {
 	return [coreStateEntry(state), scratchStateEntry({})];
+}
+
+// The durable mirror of one commit (ADR 0012): the custom entry type the
+// harness appends and never sends to the LLM.
+export function mirrorEntry(mirror: StateMirror): SessionEntry {
+	return { type: "custom", id: seedId(), parentId: null, timestamp: stamp(), customType: STATE_MIRROR_ENTRY_TYPE, data: mirror };
 }
 
 // What an engaged run leaves on the branch: the invocation, then the head

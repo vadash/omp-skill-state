@@ -239,6 +239,10 @@ describe("omp-skill-state projection (context seam)", () => {
 		const match = first.text.match(/^\[#([0-9a-f]{4}) read\]\n/);
 		return match === undefined ? undefined : { callId: message.toolCallId, tag: match[1] };
 	}
+	// Every projected result's pair tag, in prompt (tail) order.
+	function taggedIn(prompt: readonly unknown[]): Array<{ callId: string; tag: string }> {
+		return prompt.map((message) => pairTagOf(message)).filter((tagged) => tagged !== undefined);
+	}
 
 	test("engaged: the projected prompt carries pair tags and the window notice, and a resume re-derives identical tags", async () => {
 		const omp = fakeOmp([procedure]);
@@ -252,10 +256,7 @@ describe("omp-skill-state projection (context seam)", () => {
 
 		// The tailed results carry tag lines; the notice lists them oldest first.
 		const tags: Record<string, string> = {};
-		for (const message of prompt) {
-			const tagged = pairTagOf(message);
-			if (tagged !== undefined) tags[tagged.callId] = tagged.tag;
-		}
+		for (const tagged of taggedIn(prompt)) tags[tagged.callId] = tagged.tag;
 		const [oldestId, nextId] = Object.keys(tags);
 		if (oldestId === undefined || nextId === undefined) throw new Error("the prompt carried fewer than two tagged results");
 		const notices = nudgeIn(prompt);
@@ -268,11 +269,7 @@ describe("omp-skill-state projection (context seam)", () => {
 		await target.step("next", { results: ["more"] });
 		const resumed = await target.step("after", { tools: [] });
 		if (resumed === undefined) throw new Error("the resumed step returned no prompt");
-		const resumedTagged: Array<{ callId: string; tag: string }> = [];
-		for (const message of resumed) {
-			const tagged = pairTagOf(message);
-			if (tagged !== undefined) resumedTagged.push(tagged);
-		}
+		const resumedTagged = taggedIn(resumed);
 		// The tail carries every stored result: the pre-resume pairs plus the
 		// resumed step's own.
 		expect(resumedTagged).toHaveLength(3);
@@ -284,6 +281,42 @@ describe("omp-skill-state projection (context seam)", () => {
 		const resumedNotices = nudgeIn(resumed);
 		expect(resumedNotices).toHaveLength(1);
 		expect(String(resumedNotices[0]!.content)).toBe(`tail oldest→newest: #${tags[oldestId]} read, #${tags[nextId]} read, #${fresh.tag} read — oldest evict first when the prompt outgrows its budget`);
+	});
+
+	// A rewind re-derives from the branch the incoming session carries: the
+	// same stability claim as the resume above, from the branch event.
+	test("engaged: a rewind re-derives the tail and recomputes identical tags", async () => {
+		const omp = fakeOmp([procedure]);
+		const s = omp.session("s1");
+		await s.invoke("procedure");
+		await s.step("warm-up");
+		await s.step("working", { results: ["payload"] });
+		await s.step("more", { results: ["third"] });
+		// The rewind point: the branch as of this step, both results stored.
+		const rewindBranch = [...s.branch];
+		// The step that returns the prompt adds no tool result.
+		const prompt = await s.step("fourth", { tools: [] });
+		if (prompt === undefined) throw new Error("the fourth step returned no prompt");
+		const before = taggedIn(prompt);
+		expect(before).toHaveLength(2);
+
+		// A rewind re-derives from the branch and recomputes the same tags for
+		// the results it still stores. Re-derive engages on the branch event:
+		// the stored head is already on the branch, so the first step projects.
+		const rewound = omp.session("s2", { branch: rewindBranch });
+		await s.rewindTo(rewound);
+		const after = await rewound.step("after the rewind", { tools: [] });
+		if (after === undefined) throw new Error("the rewound step returned no prompt");
+		const afterTags = taggedIn(after);
+		// The rewound branch stores the two pre-rewind results, and their tags
+		// are byte-identical to the ones projected before the rewind.
+		expect(afterTags).toHaveLength(2);
+		expect(afterTags).toEqual(before);
+		const notices = nudgeIn(after);
+		expect(notices).toHaveLength(1);
+		// The notice names the re-derived tail's tags in order; its wording is
+		// the unit suites' claim.
+		expect(String(notices[0]!.content)).toContain(`#${before[0]!.tag} read, #${before[1]!.tag} read`);
 	});
 
 	test("the bundled zstate schema loads the extended limits", async () => {

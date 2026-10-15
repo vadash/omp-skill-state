@@ -397,8 +397,8 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 });
 
 describe("omp-skill-state first-step rules", () => {
-	// The `procedure` fixture declares no x-state, so the delivered copy and
-	// the head copy both carry the default window count.
+	// Both copies build from the same shared rules body, which no longer
+	// interpolates any per-skill parameter.
 	const rulesContent = (() => {
 		const rules = rulesMessage();
 		if (typeof rules !== "object" || typeof rules.content !== "string") throw new Error("rules payload without text content");

@@ -11,7 +11,7 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
 }
 
 // Why the projection fell back to ordinary context: the stored head is
-// incomplete. This is the only fallback reason, because an unpairable newest
-// pair degrades in place instead (ADR 0005). project returns it instead of a
-// projected prompt.
+// incomplete. This is the only fallback reason, because an empty tail behind
+// an intact head degrades in place instead (ADR 0010). project returns it
+// instead of a projected prompt.
 export type ProjectionFailure = "incomplete-head";

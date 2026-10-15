@@ -110,7 +110,7 @@ One provider call. A step's `state_update` patches fold in order into one merged
 _Avoid_: turn, iteration, round
 
 **Projection**:
-The per-step rewrite that replaces the message list sent to the model with the triple spec, state, observation. The stored transcript is never changed by it.
+The per-step rewrite that replaces the message list sent to the model with the head, the tail and the per-call notices. The stored transcript is never changed by it.
 _Avoid_: compaction, truncation, filtering
 
 **Head**:

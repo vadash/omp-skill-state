@@ -374,7 +374,7 @@ Unit, no harness needed:
 - merge operator: set, null-delete (any declared type), nested object merge, array replace, `$append` onto existing, missing and non-array keys, `$remove` onto existing, missing and non-array keys, removal of an absent item, absent-key preservation.
 - the state split: explicit `x-state.volatile` parsing (non-string entries dropped), the unannotated-schema heuristic (array-typed and planning keys volatile), and the disjoint core/scratch partition.
 - schema validation: each type, unknown keys under both `additionalProperties` values, non-object top level.
-- projection assembly: exact message order and roles; each dropped block type; the observation window; the byte cap and its marker.
+- projection assembly: exact message order and roles; each dropped block type; the tail, its pair tags and the window notice; the byte cap and its marker.
 - branch reads: the re-derive scan (latest invocation wins, an incomplete head is inert) and the compaction cut.
 - step policy: each reply outcome (none, ok, block, ended by degrade or idle), the counters and their resets, the fold-versus-per-call-commit equivalence, the nudge seam (project, note and nudge in one call, with cap episode, re-arm and idle warning by direct calls), the head and the compaction result.
 - first-step rules delivery on engage, and its absence for non-procedure prompts, agent-attributed invocations, subagents and mid-procedure batches.

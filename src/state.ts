@@ -190,7 +190,7 @@ function validateRootOperators(patch: Record<string, unknown>, schema: StateSche
 			// The operators are array semantics: a declared key of any other
 			// type rejects by rule, never by its own type error — a type error
 			// on the payload would send the model chasing the example text.
-			if (sub !== undefined && sub.type !== "array") return `state key "${target}" does not accept ${op}: the operators are legal only against array-typed keys`;
+			if (sub !== undefined && sub.type !== "array") return `state key "${target}" does not accept ${op}: the operators are legal only against array-typed keys; set "${target}" to the full value instead, or target an array-typed key for list growth`;
 			if (!Array.isArray(payload)) return `state key "${op}.${target}" must be an array of items, e.g. {"${op}": {"${target}": [items]}}`;
 			const error = sub === undefined ? checkDeepPatch(payload, `${op}.${target}`) : validateValue(payload, sub, `${op}.${target}`);
 			if (error !== null) return error;

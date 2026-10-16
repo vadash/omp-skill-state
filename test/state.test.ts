@@ -395,10 +395,10 @@ describe("validatePatch prototype keys", () => {
 describe("validatePatch $append scope", () => {
 	test("a key of any non-array declared type rejects the operators by rule, not by its type error", () => {
 		const object: StateSchema = { type: "object", properties: { meta: { type: "object", properties: {} } } };
-		expect(validatePatch({ "$append": { meta: ["x"] } }, object)).toBe('state key "meta" does not accept $append: the operators are legal only against array-typed keys');
+		expect(validatePatch({ "$append": { meta: ["x"] } }, object)).toBe('state key "meta" does not accept $append: the operators are legal only against array-typed keys; set "meta" to the full value instead, or target an array-typed key for list growth');
 		const string: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
-		expect(validatePatch({ "$append": { goal: ["x"] } }, string)).toBe('state key "goal" does not accept $append: the operators are legal only against array-typed keys');
-		expect(validatePatch({ "$remove": { goal: ["x"] } }, string)).toBe('state key "goal" does not accept $remove: the operators are legal only against array-typed keys');
+		expect(validatePatch({ "$append": { goal: ["x"] } }, string)).toBe('state key "goal" does not accept $append: the operators are legal only against array-typed keys; set "goal" to the full value instead, or target an array-typed key for list growth');
+		expect(validatePatch({ "$remove": { goal: ["x"] } }, string)).toBe('state key "goal" does not accept $remove: the operators are legal only against array-typed keys; set "goal" to the full value instead, or target an array-typed key for list growth');
 	});
 });
 
@@ -559,7 +559,7 @@ describe("validatePatch $remove", () => {
 describe("validatePatch $remove scope", () => {
 	test("an object-typed key rejects the remove operator", () => {
 		const schema: StateSchema = { type: "object", properties: { meta: { type: "object", properties: {} } } };
-		expect(validatePatch({ "$remove": { meta: ["x"] } }, schema)).toBe('state key "meta" does not accept $remove: the operators are legal only against array-typed keys');
+		expect(validatePatch({ "$remove": { meta: ["x"] } }, schema)).toBe('state key "meta" does not accept $remove: the operators are legal only against array-typed keys; set "meta" to the full value instead, or target an array-typed key for list growth');
 	});
 });
 

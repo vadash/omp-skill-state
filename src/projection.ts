@@ -1,5 +1,5 @@
 import { newestByStamp } from "./branch";
-import { LEGACY_STATE_MESSAGE_TYPE, LIVE_STATE_CUSTOM_TYPES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, extractStateStamp } from "./messages";
+import { LEGACY_STATE_MESSAGE_TYPE, LIVE_STATE_CUSTOM_TYPES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, extractStatePayload, extractStateStamp } from "./messages";
 import type { StateParams } from "./state";
 import { isPlainObject } from "./types";
 import type { AgentMessage, ProjectionFailure, TailedResultPair } from "./types";
@@ -76,6 +76,20 @@ function pairTag(toolCallId: string): string {
 // projected copy is modified; the stored result never carries the tag.
 function taggedResult(result: ToolResult): ToolResult {
 	return { ...result, content: [{ type: "text", text: `[#${pairTag(result.toolCallId)} ${result.toolName}]\n` }, ...result.content] };
+}
+
+// The anchor line the projected scratch copy appends: it names the core keys
+// the head still carries before the tail, because a long tail hid the core
+// from the model's attention and it re-emitted core state defensively. It
+// derives from the stored core partition, not live state, so a re-derive
+// recomputes the identical line, and it never touches the stored scratch
+// message, whose bytes the transcript and the cache prefix hold stable.
+function coreAnchorLine(core: Extract<AgentMessage, { role: "custom" }>): string | undefined {
+	const payload = extractStatePayload(core.details);
+	if (payload === undefined) return undefined;
+	const keys = Object.keys(payload);
+	if (keys.length === 0) return undefined;
+	return `Core keys — ${keys.join(", ")} — remain anchored above the tail`;
 }
 
 // The head's spine: the one head message sent only at engage and after a
@@ -188,12 +202,14 @@ export function project(
 	// Both state messages or inert; the stored pairing rule behind that has
 	// its one home in branch.ts (statePairs) — this is the presence check over
 	// the projected message list, a different shape, not a second walker.
-	if (rules === undefined || procedureSpec === undefined || core === undefined || scratchStored === undefined || scratchStored.role !== "custom") {
+	if (rules === undefined || procedureSpec === undefined || core === undefined || scratchStored === undefined || core.role !== "custom" || scratchStored.role !== "custom") {
 		return "incomplete-head";
 	}
 	const storedDetails = scratchStored.details;
+	const anchor = coreAnchorLine(core);
 	const scratchCopy: AgentMessage = {
 		...scratchStored,
+		content: anchor === undefined ? scratchStored.content : `${scratchStored.content}\n${anchor}`,
 		details: { ...(isPlainObject(storedDetails) ? storedDetails : {}), perCall: true },
 	};
 	const degraded: DegradedProjection = { head: [rules, procedureSpec, core, scratchCopy] };

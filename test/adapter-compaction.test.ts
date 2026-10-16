@@ -22,6 +22,7 @@ describe("omp-skill-state compaction ownership", () => {
 	test("after a compaction the head is sent again, byte-equal, so the projection survives the cut", async () => {
 		const omp = fakeOmp([procedure]);
 		const s = omp.session("s1");
+		const anchor = "Core keys — goal — remain anchored above the tail";
 		await s.invoke("procedure");
 		await s.step("recording", patchStep({ goal: "g" }));
 
@@ -40,7 +41,8 @@ describe("omp-skill-state compaction ownership", () => {
 		expect(degraded?.[0] as Record<string, unknown>).toMatchObject(s.sends[0]!.payload);
 		expect(degraded?.[1] as Record<string, unknown>).toMatchObject(s.sends[1]!.payload);
 		expect(degraded?.[2] as Record<string, unknown>).toMatchObject(s.sends[4]!.payload);
-		expect(degraded?.[3] as Record<string, unknown>).toMatchObject(s.sends[5]!.payload);
+		// The projected copy rides the anchor line; the stored bytes do not.
+		expect(degraded?.[3] as Record<string, unknown>).toMatchObject({ ...s.sends[5]!.payload, content: `${s.sends[5]!.payload.content as string}\n${anchor}` });
 		// The degradation notice, and no ordinary transcript behind the head.
 		expect(degraded).toHaveLength(5);
 		const notice = degraded?.[4];
@@ -56,7 +58,7 @@ describe("omp-skill-state compaction ownership", () => {
 		expect(after?.[0] as Record<string, unknown>).toMatchObject(s.sends[6]!.payload);
 		expect(after?.[1] as Record<string, unknown>).toMatchObject(s.sends[7]!.payload);
 		expect(after?.[2] as Record<string, unknown>).toMatchObject(s.sends[8]!.payload);
-		expect(after?.[3] as Record<string, unknown>).toMatchObject(s.sends[9]!.payload);
+		expect(after?.[3] as Record<string, unknown>).toMatchObject({ ...s.sends[9]!.payload, content: `${s.sends[9]!.payload.content as string}\n${anchor}` });
 		expect(after).toHaveLength(5);
 		const afterNotice = after?.[4];
 		if (typeof afterNotice !== "object" || afterNotice === null || !("content" in afterNotice) || typeof afterNotice.content !== "string") {

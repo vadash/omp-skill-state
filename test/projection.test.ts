@@ -96,16 +96,28 @@ function byteSize(message: AgentMessage): number {
 
 // The stored head: rules, procedure spec, state core, scratch state. The
 // projection returns the first three by reference and the scratch as a
-// per-call copy, so the expected scratch in an assertion is `perCall(h.scratch)`.
+// per-call copy, so the expected scratch in an assertion is `perCall(h.scratch)`;
+// when the seeded core partition is non-empty the copy's content also carries
+// that partition's anchor line, passed as its own literal.
 function head() {
 	const messages = [rulesMsg(), procedureSpecMsg(), coreMsg(), scratchMsg()];
 	return { rules: messages[0]!, procedureSpec: messages[1]!, core: messages[2]!, scratch: messages[3]!, all: messages };
 }
 
-function perCall(stored: AgentMessage): AgentMessage {
+function perCall(stored: AgentMessage, anchorLine?: string): AgentMessage {
 	if (stored.role !== "custom") throw new Error("scratch head message is not a custom message");
 	const details = isPlainObject(stored.details) ? stored.details : {};
-	return { ...stored, details: { ...details, perCall: true } };
+	return {
+		...stored,
+		...(anchorLine === undefined ? {} : { content: `${stored.content}\n${anchorLine}` }),
+		details: { ...details, perCall: true },
+	};
+}
+
+// Narrow a projected element to the custom role or fail the test; keeps member access typed.
+function asCustom(message: AgentMessage): Extract<AgentMessage, { role: "custom" }> {
+	if (message.role !== "custom") throw new Error(`expected a custom message, got role ${message.role}`);
+	return message;
 }
 
 // The prompt order: rules, spec, core, tail, scratch copy. The tail length
@@ -124,7 +136,7 @@ describe("project tail assembly", () => {
 		const out = projected(messages);
 
 		expect(out[2]).toBe(newerCore);
-		expect(out.at(-1)).toEqual(perCall(newerScratch));
+		expect(out.at(-1)).toEqual(perCall(newerScratch, "Core keys — goal — remain anchored above the tail"));
 	});
 
 	test("unstamped state messages keep positional-last: the messages predate stamps", () => {
@@ -133,7 +145,7 @@ describe("project tail assembly", () => {
 		const out = projected(messages);
 
 		expect(out[2]).toBe(messages[4]);
-		expect(out.at(-1)).toEqual(perCall(messages[5]));
+		expect(out.at(-1)).toEqual(perCall(messages[5], "Core keys — goal — remain anchored above the tail"));
 	});
 	test("a step's prompt carries the run's recent conversation behind the state core, byte-identical to stored", () => {
 		const h = head();
@@ -653,5 +665,54 @@ describe("project degradation and fallback", () => {
 		expect(project(withLegacy, withLegacy, { ...DEFAULT_PARAMS }, undefined)).toBe("incomplete-head");
 		const mixed = [...h.all.slice(0, 2), h.core, legacy[2]!, userMsg("turn")];
 		expect(project(mixed, mixed, { ...DEFAULT_PARAMS }, undefined)).toBe("incomplete-head");
+	});
+});
+
+describe("project scratch anchor line", () => {
+	const seeded = { goal: "refactor the parser", working_dir: "C:/repo", constraints: ["no new deps"], knowledge: { port: 8080 } };
+
+	test("the projected scratch copy names the live core keys anchored before the tail; the core rides unchanged", () => {
+		const core = coreMsg(seeded);
+		const scratch = asCustom(scratchMsg({ plan: ["a"] }));
+		const messages: AgentMessage[] = [rulesMsg(), procedureSpecMsg(), core, scratch, userMsg("turn"), assistantText("prose")];
+
+		const out = projected(messages);
+
+		expect(out[2]).toBe(core);
+		const copy = asCustom(out.at(-1)!);
+		expect(copy.content).toBe(`${scratch.content}\nCore keys — goal, working_dir, constraints, knowledge — remain anchored above the tail`);
+	});
+
+	test("a degraded step's head stays rules, spec, core, scratch in order and its scratch copy carries the line", () => {
+		const scratch = asCustom(scratchMsg({ plan: ["a"] }));
+		const messages: AgentMessage[] = [rulesMsg(), procedureSpecMsg(), coreMsg({ goal: "x", working_dir: "." }), scratch];
+
+		const out = project(messages, messages, { ...DEFAULT_PARAMS }, undefined);
+		if (typeof out === "string" || !("head" in out)) throw new Error("expected a degraded projection");
+
+		expect(out.head.map((m) => (m.role === "custom" ? m.customType : m.role))).toEqual([RULES_MESSAGE_TYPE, PROCEDURE_SPEC_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE]);
+		expect(asCustom(out.head[3]!).content).toBe(`${scratch.content}\nCore keys — goal, working_dir — remain anchored above the tail`);
+	});
+
+	test("the core message's content is byte-stable across projected steps with different tails", () => {
+		const core = asCustom(coreMsg(seeded));
+		const messages: AgentMessage[] = [rulesMsg(), procedureSpecMsg(), core, scratchMsg({ plan: ["a"] })];
+		const first = projected([...messages, userMsg("one"), assistantText("prose")]);
+		const second = projected([...messages, userMsg("one"), assistantText("prose"), assistantToolCall("t0"), toolResult("t0", "result")]);
+
+		expect(first[2]).toBe(core);
+		expect(second[2]).toBe(core);
+		expect(asCustom(first[2]!).content).toBe(core.content);
+		expect(asCustom(second[2]!).content).toBe(core.content);
+	});
+
+	test("an empty or missing core partition appends no line: the copy differs only by perCall", () => {
+		const h = head();
+		const out = projected([...h.all, userMsg("turn")]);
+		expect(out.at(-1)).toEqual(perCall(h.scratch));
+
+		const bare = [rulesMsg(), procedureSpecMsg(), custom(STATE_CORE_MESSAGE_TYPE, "not ours"), scratchMsg({})];
+		const bareOut = projected([...bare, userMsg("turn")]);
+		expect(bareOut.at(-1)).toEqual(perCall(bare[3]!));
 	});
 });

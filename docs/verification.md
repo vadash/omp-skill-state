@@ -41,6 +41,12 @@ Idle threshold: five reply-only prompts after the final answer walked the idle c
 
 Capture corpus (window t ≥ 2026-10-13T18:45Z): 16 request bodies, all `glm-5.3-flash`; `perCall` occurrences: 0.
 
+## Run I, the scratch anchor line (#54)
+
+Session `01a144b2-c6c1-7000-8d7c-e6480fa5f9d5` (`verification/sessions/2026-10-16T12-32-09-410Z_01a144b2-c6c1-7000-8d7c-e6480fa5f9d5.jsonl`, 2026-10-16), driven over the RPC path — `--mode rpc --no-ui`, one `prompt` frame carrying `/skill:zstate …` over the runh sandbox profile, omp 18.11.1, `glm-5.3-flash`, `--thinking low`, a throwaway workspace with a 110-line four-section fixture. The RPC dispatch produces the user-attributed skill-prompt message, so unlike print mode a procedure engages — print mode's cannot-engage finding stands, RPC joins the TUI as a driven path. Steps: 5 provider calls, 4 projected (the first is the engage step); `cacheRead > 0` on 4/4 projected steps; 0 compactions.
+
+Audit against the run `01a14435` failure the anchor line exists for: 3 `state_update` patches, none re-emitting core state — the engage patch wrote `goal`/`working_dir` (new values), the second wrote no core key at all, the third added one new `knowledge` member; 0 assistant-text mentions of compaction; the final answer came from the state alone (110 lines, four sections, correct against the fixture). Wire (capture corpus `capture-54`, 5 request bodies): the 4 projected ones carry the anchor line — `Core keys — goal, working_dir — …` on the three steps before the `knowledge` commit, `Core keys — goal, working_dir, knowledge — …` on the step after it, the line tracking the live core keys — and the stored transcript carries 0 copies.
+
 ## Run G, the baseline (numbers only)
 
 Run G rode the superseded `xd://state_update` mount; its measurements are kept as the baseline the new channel is compared against.

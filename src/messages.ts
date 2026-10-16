@@ -102,12 +102,15 @@ export function rulesMessage(): CustomMessagePayload {
 }
 
 // The tail awareness appended to the shared rules body: what the prompt
-// carries, the pair-tag convention and the state-hygiene line, in that order.
+// carries, the pair-tag convention, the recall read channel, the
+// state-hygiene line and the post-completion turn, in that order.
 export function operatingRules(): string {
 	return `${OPERATING_RULES}\
 Your prompt carries the tail: the most recent stored messages behind the state core, oldest first; older messages leave the prompt when it outgrows its budget.
 Each tailed tool result carries a pair tag like [#a3f2 read]; the notice after the tail lists the tags oldest first — the first tags evict soonest.
+What the tail has dropped stays readable through the ${STATE_RECALL_TOOL_NAME} tool: matching transcript text is returned verbatim, oldest first, under a byte cap, and a narrowed query sees the rest.
 The state is a working record, not a log: keep entries short, drop what later facts supersede, null deletes a key you no longer need.
+A user turn after the procedure's result is answerable conversation: new work inside it rides a ${STATE_UPDATE_TOOL_NAME} patch that continues the run.
 `;
 }
 

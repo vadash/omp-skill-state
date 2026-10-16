@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { announcedSkillNames, consolidationNudgeMessage, degradationNoticeMessage, extractStatePayload, fallbackNoticeMessage, idleNudgeMessage, isStateCoreMessage, isStateScratchMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, rulesMessage, SKILL_PROMPT_MESSAGE_TYPE, skillInvocationName, STATE_UPDATE_TOOL_NAME, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage, windowNoticeMessage } from "../src/messages";
+import { announcedSkillNames, consolidationNudgeMessage, degradationNoticeMessage, extractStatePayload, fallbackNoticeMessage, idleNudgeMessage, isStateCoreMessage, isStateScratchMessage, OPERATING_RULES, RULES_MESSAGE_TYPE, rulesMessage, SKILL_PROMPT_MESSAGE_TYPE, skillInvocationName, STATE_RECALL_TOOL_NAME, STATE_UPDATE_TOOL_NAME, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, skillAnnouncement, coreMessage, scratchMessage, windowNoticeMessage } from "../src/messages";
 
 describe("consolidationNudgeMessage", () => {
 	test("is a developer message asking for a state_update consolidation, with no fence, so it never becomes an elide target", () => {
@@ -88,6 +88,22 @@ describe("rulesMessage", () => {
 		// No window count is interpolated: the tail's size is a budget, not a
 		// fixed count.
 		expect(content).not.toMatch(/window holds the last \d+/);
+	});
+
+	test("names the recall read channel and the post-completion turn in the tail block, in order", () => {
+		const message = rulesMessage();
+		if (typeof message !== "object" || typeof message.content !== "string") throw new Error("rules payload without text content");
+		const content = message.content;
+
+		expect(content).toContain(`What the tail has dropped stays readable through the ${STATE_RECALL_TOOL_NAME} tool: matching transcript text is returned verbatim, oldest first, under a byte cap, and a narrowed query sees the rest.`);
+		expect(content).toContain(`A user turn after the procedure's result is answerable conversation: new work inside it rides a ${STATE_UPDATE_TOOL_NAME} patch that continues the run.`);
+		const tagRule = content.indexOf("Each tailed tool result carries a pair tag");
+		const recallRule = content.indexOf(`the ${STATE_RECALL_TOOL_NAME} tool`);
+		const hygieneRule = content.indexOf("The state is a working record, not a log");
+		const postCompletionRule = content.indexOf("A user turn after the procedure's result is answerable conversation");
+		expect(recallRule).toBeGreaterThan(tagRule);
+		expect(hygieneRule).toBeGreaterThan(recallRule);
+		expect(postCompletionRule).toBeGreaterThan(hygieneRule);
 	});
 
 	test("carries no fence, so the stored rules message is never an elide target", () => {

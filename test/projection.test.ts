@@ -210,6 +210,14 @@ describe("project tail assembly", () => {
 	});
 });
 
+// The tail budget the projection computes (the spec formula: the window
+// share minus the head's measured bytes and the 32_768-byte reserve);
+// eviction's stop target is that budget less one chunk.
+function tailBudget(windowTokens: number, headBytes: number) {
+	const budget = Math.floor((windowTokens * 4 * DEFAULT_PARAMS.promptBudgetPercent) / 100) - headBytes - 32_768;
+	return { budget, chunk: Math.floor((budget * DEFAULT_PARAMS.evictionChunkPercent) / 100) };
+}
+
 describe("project tail budget", () => {
 	test("an over-budget tail evicts down to the newest message when the budget is zero", () => {
 		const h = head();
@@ -223,6 +231,72 @@ describe("project tail budget", () => {
 		expect(asToolResult(out[3]!).toolCallId).toBe("t2");
 		expect(asToolResult(out[3]!).content.slice(1)).toEqual(newest.content);
 		expect(out.at(-1)).toEqual(perCall(h.scratch));
+	});
+
+	test("an over-budget tail settles at or under the budget less one chunk, the newest message still present", () => {
+		const h = head();
+		const windowTokens = 100_000;
+		const { budget, chunk } = tailBudget(windowTokens, h.all.reduce((sum, message) => sum + byteSize(message), 0));
+		// Six messages of exactly one chunk each: the drain crosses the
+		// ceilings only on whole-chunk steps, so draining to the budget and
+		// draining to the budget less a chunk stop one message apart.
+		const chunkSized = (): AgentMessage => {
+			const base = userMsg("");
+			return { role: "user", content: "x".repeat(chunk - byteSize(base)), timestamp: base.timestamp };
+		};
+		const tail = [chunkSized(), chunkSized(), chunkSized(), chunkSized(), chunkSized(), chunkSized()];
+
+		const out = projected([...h.all, ...tail], 32768, { windowTokens });
+
+		const tailBytes = out.slice(3, -1).reduce((sum, message) => sum + byteSize(message), 0);
+		expect(tailBytes).toBeLessThanOrEqual(budget - chunk);
+		expect(out[3]).toBe(tail[3]);
+		expect(out[5]).toBe(tail[5]);
+	});
+
+	test("a tail already under the budget less one chunk is byte-unchanged", () => {
+		const h = head();
+		const windowTokens = 100_000;
+		const { budget, chunk } = tailBudget(windowTokens, h.all.reduce((sum, message) => sum + byteSize(message), 0));
+		const tail = [userMsg("older"), assistantText("kept")];
+		expect(tail.reduce((sum, message) => sum + byteSize(message), 0)).toBeLessThan(budget - chunk);
+
+		const out = projected([...h.all, ...tail], 32768, { windowTokens });
+
+		expect(out.slice(3, -1)).toEqual(tail);
+		expect(out[3]).toBe(tail[0]);
+		expect(out[4]).toBe(tail[1]);
+	});
+
+	test("a tail both ceilings fit evicts nothing: the survivors match the no-drain layout", () => {
+		const h = head();
+		const windowTokens = 100_000;
+		const { budget, chunk } = tailBudget(windowTokens, h.all.reduce((sum, message) => sum + byteSize(message), 0));
+		const tail = [userMsg("a"), assistantText("b"), userMsg("c"), assistantText("d")];
+		// Under the old ceiling and the new one alike, so draining to the
+		// budget and stopping short of it leave the identical front.
+		const totalBytes = tail.reduce((sum, message) => sum + byteSize(message), 0);
+		expect(totalBytes).toBeLessThanOrEqual(budget);
+		expect(totalBytes).toBeLessThanOrEqual(budget - chunk);
+
+		const out = projected([...h.all, ...tail], 32768, { windowTokens });
+
+		expect(out.slice(3, -1)).toEqual(tail);
+	});
+
+	test("a tiny tail over the ceiling keeps the newest message: the one-message floor", () => {
+		const h = head();
+		const headBytes = h.all.reduce((sum, message) => sum + byteSize(message), 0);
+		// A window sized so the budget is ~1200 bytes: positive, but any real
+		// tail rides over the ceiling, and the floor holds the newest message.
+		const windowTokens = Math.ceil((headBytes + 32_768 + 1200) / ((4 * DEFAULT_PARAMS.promptBudgetPercent) / 100));
+		expect(tailBudget(windowTokens, headBytes).budget).toBeGreaterThan(0);
+		const tail = [userMsg("old"), assistantToolCall("t9"), toolResult("t9", "y".repeat(2000))];
+
+		const out = projected([...h.all, ...tail], 32768, { windowTokens });
+
+		expect(out).toHaveLength(5);
+		expect(asToolResult(out[3]!).toolCallId).toBe("t9");
 	});
 
 	test("eviction is chunked: the tail's front holds still across many steps", () => {
@@ -256,17 +330,18 @@ describe("project tail budget", () => {
 	test("the projected prompt stays under the budget and sawtooths at evictions", () => {
 		const h = head();
 		const windowTokens = 100_000;
-		const windowBytes = windowTokens * 4;
-		const budget = windowBytes * (DEFAULT_PARAMS.promptBudgetPercent / 100);
+		const { budget, chunk } = tailBudget(windowTokens, h.all.reduce((sum, message) => sum + byteSize(message), 0));
 		const branch: AgentMessage[] = [...h.all];
 		const sizes: number[] = [];
 		for (let step = 1; step <= 60; step++) {
 			branch.push(assistantToolCall(`t${step}`), toolResult(`t${step}`, "x".repeat(2000)));
 			const out = projected([...branch], 32768, { windowTokens });
 			const total = out.reduce((sum, message) => sum + byteSize(message), 0);
-			// The budget may be exceeded by at most the newest message's size,
-			// which the per-result cap bounds.
-			expect(total).toBeLessThanOrEqual(budget + byteSize(branch.at(-1)!));
+			// Eviction stops under budget − chunk; each tailed result's tagged
+			// copy adds its 13-byte "[#xxxx read]\n" line, and the newest
+			// message rides on top, which the per-result cap bounds.
+			const tagBytes = 13 * out.filter((message) => message.role === "toolResult").length;
+			expect(total).toBeLessThanOrEqual(budget - chunk + byteSize(branch.at(-1)!) + tagBytes);
 			sizes.push(total);
 		}
 		// Sawtooth: at least one eviction drops the prompt by more than one

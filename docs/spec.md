@@ -224,7 +224,7 @@ A tailed tool result's own text is capped at `observationBytes`, default 65536. 
 
 ### Tail budget
 
-The tail is bounded by the prompt budget: `promptBudgetPercent` of the model's context window (`ctx.getContextUsage()`), default 30, minus the head, the scratch state and a reserve. While the projected tail exceeds that budget, the runtime evicts from the front one chunk at a time, the chunk being `evictionChunkPercent` of the budget (default 25) and always at least one message, so the front of the tail is stable for many steps and the cached prefix survives between evictions (ADR 0011). Eviction never touches the head, the scratch, or the newest message, so the prompt may exceed the budget by the newest message's size; the per-result cap bounds that excess.
+The tail is bounded by the prompt budget: `promptBudgetPercent` of the model's context window (`ctx.getContextUsage()`), default 30, minus the head, the scratch state and a reserve. While the projected tail exceeds the budget less one chunk, the chunk being `evictionChunkPercent` of the budget (default 25), the runtime evicts from the front one chunk at a time and always at least one message, so the front of the tail is stable for many steps and the cached prefix survives between evictions (ADR 0011). Eviction never touches the head, the scratch, or the newest message, so the prompt may exceed the budget by the newest message's size; the per-result cap bounds that excess.
 
 ### State cap
 

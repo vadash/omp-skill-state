@@ -119,16 +119,17 @@ function messageBytes(message: AgentMessage): number {
 	return Buffer.byteLength(JSON.stringify(message));
 }
 
-// Chunked eviction (ADR 0011): while the tail is over its budget, drop the
-// oldest messages in one chunk's worth at a time, so the front holds still
-// across many steps and the cached prefix survives between evictions. The
+// Chunked eviction (ADR 0011): while the tail is over the budget less one
+// chunk, drop the oldest messages in one chunk's worth at a time, so the
+// front holds still across many steps and the cached prefix survives
+// between evictions; the chunk of headroom is the ceiling from issue #40. The
 // newest message is never dropped, so a prompt may exceed the budget by the
 // newest message's size; the per-result cap bounds that excess.
 function evictOldest(candidates: readonly AgentMessage[], budget: number, chunk: number): AgentMessage[] {
 	const sizes = candidates.map(messageBytes);
 	let total = sizes.reduce((sum, size) => sum + size, 0);
 	let start = 0;
-	while (total > budget && candidates.length - start > 1) {
+	while (total > budget - chunk && candidates.length - start > 1) {
 		// One chunk from the front, at least one message so a zero chunk
 		// cannot stall the eviction.
 		let chunkBytes = 0;

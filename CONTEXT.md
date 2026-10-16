@@ -90,7 +90,7 @@ The share of the model's context window a projected prompt may use, 30% by defau
 _Avoid_: cap, limit, max tokens
 
 **Eviction**:
-The tail dropping its oldest messages when the budget is exceeded, in one chunk at a time rather than one message per step.
+The tail dropping its oldest messages until it fits under the budget less one chunk, in one chunk at a time rather than one message per step.
 _Avoid_: truncation, pruning, expiry
 
 **Recall**:

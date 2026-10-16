@@ -199,7 +199,7 @@ export default function (pi: ExtensionAPI): void {
 			const loaded = await loadStateSchema(found.name, pi.pi.getActiveSkills());
 			if (loaded.ok) {
 				const procedure = engage(ctx, ctx.sessionManager.getSessionId(), found.name, found.spec, loaded, found.state, found.stamp);
-				if (found.repair) sendHead(procedure, { deliverAs: ctx.isIdle() ? "nextTurn" : "aside" });
+				if (found.needsRepair) sendHead(procedure, { deliverAs: ctx.isIdle() ? "nextTurn" : "aside" });
 				return;
 			}
 		}

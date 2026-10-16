@@ -1,3 +1,4 @@
+import { newestByStamp } from "./branch";
 import { LEGACY_STATE_MESSAGE_TYPE, LIVE_STATE_CUSTOM_TYPES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, extractStateStamp } from "./messages";
 import type { StateParams } from "./state";
 import { isPlainObject } from "./types";
@@ -45,18 +46,8 @@ function lastCustom(messages: readonly AgentMessage[], customType: string): Agen
 // after the newer pair must not time-travel the prompt. Rules and spec keep
 // the positional-last lookup above.
 function lastStateCustom(messages: readonly AgentMessage[], customType: string): AgentMessage | undefined {
-	let best: AgentMessage | undefined;
-	let bestStamp = -1;
-	for (let i = 0; i < messages.length; i++) {
-		const message = messages[i]!;
-		if (message.role !== "custom" || message.customType !== customType) continue;
-		const stamp = extractStateStamp(message.details);
-		if (stamp >= bestStamp) {
-			best = message;
-			bestStamp = stamp;
-		}
-	}
-	return best;
+	const isStateHalf = (message: AgentMessage): message is Extract<AgentMessage, { role: "custom" }> => message.role === "custom" && message.customType === customType;
+	return newestByStamp(messages.filter(isStateHalf), (message) => extractStateStamp(message.details));
 }
 
 // Pair tag (CONTEXT.md): four lowercase hex digits, FNV-1a over the tool call

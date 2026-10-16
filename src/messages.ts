@@ -234,8 +234,8 @@ export function consolidationNudgeMessage(): AgentMessage {
 // eviction keeps the front still between evictions. The step policy appends
 // it before the nudges, so the data about the tail precedes the policy asks
 // built on it.
-export function windowNoticeMessage(window: readonly { tag: string; toolName: string }[]): AgentMessage {
-	const list = window.map((pair) => `#${pair.tag} ${pair.toolName}`).join(", ");
+export function windowNoticeMessage(tailedResults: readonly { tag: string; toolName: string }[]): AgentMessage {
+	const list = tailedResults.map((pair) => `#${pair.tag} ${pair.toolName}`).join(", ");
 	return {
 		role: "developer",
 		content: `tail oldest→newest: ${list} — oldest evict first when the prompt outgrows its budget`,

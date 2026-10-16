@@ -25,7 +25,7 @@ export interface ProcedureOnBranch {
 	// True when a mirror exists and the newest stored state messages disagree
 	// with it: re-derive repairs by re-sending the head (ADR 0012). No
 	// mirror, no repair.
-	repair: boolean;
+	needsRepair: boolean;
 	// The effective source's write stamp, seeding the engaged record so its
 	// next commit orders above everything already on the branch.
 	stamp: number;
@@ -91,16 +91,17 @@ interface StoredStateMessage {
 	content?: unknown;
 }
 
-// The message with the highest write stamp; equal stamps keep the last
-// position, so a parked older send landing after a newer commit never
-// time-travels the read. A message with no stamp reads as stamp 0.
-function newestByStamp(entries: readonly StoredStateMessage[]): StoredStateMessage | undefined {
-	let best: StoredStateMessage | undefined;
+// The item with the highest write stamp (CONTEXT.md "Write stamp"); equal
+// stamps keep the last position, so branch position is the final tiebreak and
+// a parked older send landing after a newer commit never time-travels the
+// read (ADR 0012's ordering). An item whose stamp is missing reads as 0.
+export function newestByStamp<T>(items: readonly T[], stampOf: (item: T) => number): T | undefined {
+	let best: T | undefined;
 	let bestStamp = -1;
-	for (const entry of entries) {
-		const stamp = extractStateStamp(entry.details);
+	for (const item of items) {
+		const stamp = stampOf(item);
 		if (stamp >= bestStamp) {
-			best = entry;
+			best = item;
 			bestStamp = stamp;
 		}
 	}
@@ -160,25 +161,25 @@ export function scanBranch(entries: readonly SessionEntry[]): ProcedureOnBranch 
 	}
 	const pairs = statePairs(segment);
 	if (spec === undefined || pairs.length === 0 || stateMessages !== pairs.length * 2) return undefined;
-	const storedCore = newestByStamp(cores);
-	const storedScratch = newestByStamp(scratches);
+	const storedCore = newestByStamp(cores, (e) => extractStateStamp(e.details));
+	const storedScratch = newestByStamp(scratches, (e) => extractStateStamp(e.details));
 	// The completeness gate above guarantees both newest picks exist (a pair
 	// needs a closed core and scratch), so the non-null assertions and the
 	// payload reads below cannot miss.
 	const mirrors = stateMirrors(segment);
-	const mirror = mirrors.reduce<StateMirror | undefined>((best, current) => (best === undefined || current.stamp >= best.stamp ? current : best), undefined);
+	const mirror = newestByStamp(mirrors, (m) => m.stamp);
 	if (mirror !== undefined) {
 		return {
 			name,
 			spec,
 			state: { ...mirror.core, ...mirror.scratch },
-			repair: disagrees(storedCore, mirror.core) || disagrees(storedScratch, mirror.scratch),
+			needsRepair: disagrees(storedCore, mirror.core) || disagrees(storedScratch, mirror.scratch),
 			stamp: mirror.stamp,
 		};
 	}
 	const core = extractStatePayload(storedCore!.details)!;
 	const scratch = extractStatePayload(storedScratch!.details)!;
-	return { name, spec, state: { ...core, ...scratch }, repair: false, stamp: extractStateStamp(storedCore!.details) };
+	return { name, spec, state: { ...core, ...scratch }, needsRepair: false, stamp: extractStateStamp(storedCore!.details) };
 }
 
 // The compaction cut: the latest assistant message on the branch, i.e. the

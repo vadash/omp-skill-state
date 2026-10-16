@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, SessionEntry, Skill, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { zod } from "@oh-my-pi/pi-coding-agent";
-import { stateMirrors, statePairs } from "../src/branch";
+import { branchMessages, stateMirrors, statePairs } from "../src/branch";
 import extension from "../src/index";
 import { SKILL_PROMPT_MESSAGE_TYPE, skillAnnouncement } from "../src/messages";
 import type { StateMirror } from "../src/messages";
@@ -343,7 +343,9 @@ export class FakeSession {
 	}
 
 	private async context(): Promise<unknown[] | undefined> {
-		const messages = this.branchMessages();
+		// The runtime's own entry→message conversion, so the fake's view
+		// cannot drift from the harness's.
+		const messages = branchMessages(this.branch);
 		this.lastContextMessages = messages;
 		const out = (await this.dispatch("context", { type: "context", messages })) as { messages?: unknown[] } | undefined;
 		const prompt = out?.messages;
@@ -392,21 +394,6 @@ export class FakeSession {
 			isIdle: () => this.idle,
 			getContextUsage: () => this.contextUsage,
 		} as unknown as ExtensionContext;
-	}
-
-	// The message list a provider call sees: the stored entries in order,
-	// custom_message entries converted the way the harness converts them —
-	// `attribution` and the entry's own timestamp carried through, so a
-	// rebuilt custom compares deep-equal to the projection's branch rebuild.
-	private branchMessages(): unknown[] {
-		const messages: unknown[] = [];
-		for (const entry of this.branch) {
-			if (entry.type === "message") messages.push(entry.message);
-			else if (entry.type === "custom_message") {
-				messages.push({ role: "custom", customType: entry.customType, content: entry.content, display: entry.display, details: entry.details, timestamp: Date.parse(entry.timestamp), ...(entry.attribution === undefined ? {} : { attribution: entry.attribution }) });
-			}
-		}
-		return messages;
 	}
 
 	private appendToBranch(payload: Record<string, unknown>): void {

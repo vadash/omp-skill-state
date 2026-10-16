@@ -33,13 +33,13 @@ describe("scanBranch", () => {
 	test("a user invocation followed by its spec, a core and a scratch message re-derives the merged state", () => {
 		const found = scanBranch([invocationEntry("recon"), specEntry("recon"), coreStateEntry({ goal: "x", working_dir: "." }), scratchStateEntry({ plan: ["a"] })]);
 
-		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x", working_dir: ".", plan: ["a"] }, repair: false, stamp: 0 });
+		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x", working_dir: ".", plan: ["a"] }, needsRepair: false, stamp: 0 });
 	});
 
 	test("an empty scratch state still counts: the merged state is the core alone", () => {
 		const found = scanBranch([invocationEntry("recon"), specEntry("recon"), coreStateEntry({ goal: "x" }), scratchStateEntry({})]);
 
-		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x" }, repair: false, stamp: 0 });
+		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x" }, needsRepair: false, stamp: 0 });
 	});
 
 	test("the latest complete pair wins: a re-sent head supersedes the earlier one", () => {
@@ -74,7 +74,7 @@ describe("scanBranch", () => {
 		expect(scanBranch(branch)).toBeUndefined();
 
 		const found = scanBranch([...branch, specEntry("other"), coreStateEntry({ goal: "new" }), scratchStateEntry({})]);
-		expect(found).toEqual({ name: "other", spec: "Running skill other", state: { goal: "new" }, repair: false, stamp: 0 });
+		expect(found).toEqual({ name: "other", spec: "Running skill other", state: { goal: "new" }, needsRepair: false, stamp: 0 });
 	});
 
 	test("an agent-attributed invocation and one without a name never count", () => {
@@ -146,7 +146,7 @@ describe("scanBranch", () => {
 			mirrorEntry({ core: { goal: "mirror" }, scratch: { extra: 1 }, stamp: 4 }),
 		]);
 
-		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "mirror", extra: 1 }, repair: true, stamp: 4 });
+		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "mirror", extra: 1 }, needsRepair: true, stamp: 4 });
 	});
 
 	test("a mirror that agrees with the newest stored pair re-derives without repair", () => {
@@ -158,7 +158,7 @@ describe("scanBranch", () => {
 			mirrorEntry({ core: { goal: "x" }, scratch: {}, stamp: 1 }),
 		]);
 
-		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x" }, repair: false, stamp: 1 });
+		expect(found).toEqual({ name: "recon", spec: "Running skill recon", state: { goal: "x" }, needsRepair: false, stamp: 1 });
 	});
 
 	test("a stored message whose content was rewritten behind the mirror's back is repaired", () => {
@@ -166,7 +166,7 @@ describe("scanBranch", () => {
 		// with replaced content is exactly the disagreement ADR 0012 names.
 		const tamperedCore = { ...coreStateEntry({ goal: "x" }, { state: { goal: "x" }, stamp: 1 }), content: "an elide-pass placeholder" };
 
-		expect(scanBranch([invocationEntry("recon"), specEntry("recon"), tamperedCore, scratchStateEntry({}, { state: {}, stamp: 1 }), mirrorEntry({ core: { goal: "x" }, scratch: {}, stamp: 1 })])?.repair).toBe(true);
+		expect(scanBranch([invocationEntry("recon"), specEntry("recon"), tamperedCore, scratchStateEntry({}, { state: {}, stamp: 1 }), mirrorEntry({ core: { goal: "x" }, scratch: {}, stamp: 1 })])?.needsRepair).toBe(true);
 	});
 
 	test("a parked older-stamped pair after a newer pair does not time-travel the re-derive", () => {

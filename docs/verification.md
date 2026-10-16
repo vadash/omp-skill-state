@@ -55,7 +55,7 @@ Run H's settled pin band 9536–10304 sits 192–960 tokens under run G's 10496 
 
 ## Pending: the post-redesign acceptance runs
 
-No post-redesign figures exist yet. The pending re-measurements, taken on the acceptance runs below: the cache pin, with run H's 9536–10304 band as the floor (ADR 0011's layout lets the cached prefix reach through the tail); the tail's budget behaviour, prompt inside the budget with a sawtooth at evictions; the mirror repair on a resume whose stored head disagrees with it; and `state_recall`'s read-back with its cap marker.
+No post-redesign figures exist yet. The pending re-measurements, taken on the acceptance runs below: the cache pin — where the durable breakpoint lands under ADR 0011's layout, the tail's tagged tool-result copies included — with run H's 9536–10304 band as the floor; the tail's budget behaviour, prompt inside the budget with a sawtooth at evictions; the mirror repair on a resume whose stored head disagrees with it; and `state_recall`'s read-back with its cap marker.
 
 The four acceptance classes also await the user's recorded sessions, whose transcripts are read afterwards: an ordinary coding session, a long research run, a trajectory-as-objective run (an audit, "what changed and why", debug provenance), and a multi-skill session with a mid-run second-skill invocation. The measured cache-read figures and the prompt-size-inside-budget check are recorded with those transcripts and stay pending until they exist.
 

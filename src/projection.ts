@@ -159,11 +159,13 @@ interface CutPlan {
 
 // Builds the projected prompt: rules, P, the state core, the tail, the
 // scratch state (ADR 0011's order — the cached prefix reaches through the
-// tail). Rules, P and the core are the stored objects themselves, which keeps
-// them byte-equal to history. The scratch rides as a deliberately differing
-// copy: one extra field in details, outside the model-visible role and
-// content, makes the harness mark it per-call so the durable breakpoint
-// anchors on the newest stable message before it, the end of the tail. The
+// tail's stable front). Rules, P and the core are the stored objects
+// themselves, which keeps them byte-equal to history. The scratch rides as a
+// deliberately differing copy: one extra field in details, outside the
+// model-visible role and content, makes the harness mark it per-call; the
+// durable breakpoint anchors on the newest stable message before the first
+// per-call one — normally the tail's first tagged tool result, not this
+// copy. The
 // tail is read from the branch, so a harness compaction cut cannot shorten
 // it. A ProjectionFailure return means no projection: the call gets ordinary
 // context. That is the safe fallback whenever the head is incomplete; a wrong

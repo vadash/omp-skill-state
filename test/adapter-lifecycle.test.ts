@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import path from "node:path";
 import type { Skill } from "@oh-my-pi/pi-coding-agent";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, rulesMessage } from "../src/messages";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, rulesMessage, specMessage } from "../src/messages";
 import { coreStateEntry, invocationEntry, mirrorEntry, procedureBranch, scratchStateEntry, specEntry, stateEntries } from "./entries";
 import { fakeOmp } from "./fake-session";
 import { disengageNotices, engagedSession, engageAsideTypes, engageNotices, makeSkillSet, nudgeIn, patchStep, procedureSchema, projectingSession, smallcapSchema } from "./harness";
@@ -42,7 +42,7 @@ describe("omp-skill-state engage/disengage lifecycle", () => {
 
 		expect(s.sends.map((sent) => sent.payload)).toEqual([
 			{ customType: RULES_MESSAGE_TYPE, content: rules.content, display: false },
-			{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: "Running skill procedure", display: false, details: { name: "procedure" } },
+			specMessage({ spec: "Running skill procedure", name: "procedure" }) as Record<string, unknown>,
 			{ customType: STATE_CORE_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {}, stamp: 0 } },
 			{ customType: STATE_SCRATCH_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {}, stamp: 0 } },
 		]);

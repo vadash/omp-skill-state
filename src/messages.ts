@@ -1,7 +1,6 @@
 import type { CustomMessagePayload } from "@oh-my-pi/pi-coding-agent";
 import { isPlainObject } from "./types";
 import type { ExecutionState } from "./state";
-import type { AgentMessage, TailedResultPair } from "./types";
 
 export const STATE_CORE_MESSAGE_TYPE = "sh.omp.skill-state.core";
 export const STATE_SCRATCH_MESSAGE_TYPE = "sh.omp.skill-state.scratch";
@@ -125,18 +124,12 @@ export function skillInvocationName(msg: { customType?: string; attribution?: st
 	return typeof name === "string" && name.length > 0 ? name : undefined;
 }
 
-// The announcement line the harness prepends to the prompt of a user-invoked
-// skill, and the extraction of every name announced in a prompt (a joined
-// batch can carry several). Coupled to the pinned @oh-my-pi/pi-coding-agent
-// 18.10.3 template src/prompts/skills/user-invocation.md, first line; the pin
-// guard in messages.test.ts fails on a template change instead of letting
-// detection degrade silently. Only the first-step delivery reads prose: at
-// before_agent_start the invocation is not yet a stored message, so the
-// structural predicate above cannot see it.
-export function skillAnnouncement(name: string): string {
-	return `[IMPORTANT: User invoked the "${name}" skill; follow its instructions. Full skill below.]`;
-}
-
+// The extraction of every skill name announced in a prompt (a joined batch
+// can carry several). Coupled to the pinned @oh-my-pi/pi-coding-agent
+// 18.10.3 template src/prompts/skills/user-invocation.md, first line; the
+// pin guard in messages.test.ts fails on a template change instead of
+// letting detection degrade silently. The template itself lives with the
+// test fake.
 export function announcedSkillNames(prompt: string): string[] {
 	return [...prompt.matchAll(/\[IMPORTANT: User invoked the "([^"]+)" skill;/g)].map((match) => match[1]);
 }
@@ -163,6 +156,14 @@ export function coreMessage(core: ExecutionState, stamp: number): CustomMessageP
 
 export function scratchMessage(scratch: ExecutionState, stamp: number): CustomMessagePayload {
 	return { customType: STATE_SCRATCH_MESSAGE_TYPE, content: renderStateContent(scratch), display: true, details: { state: scratch, stamp } };
+}
+
+// One procedure-spec head message (the stored P), one shape everywhere it is
+// stored or asserted, byte-stable across head re-sends so the provider's
+// cache prefix never sees a difference. The structural param avoids importing
+// Procedure from ./procedure, which would close an import cycle.
+export function specMessage(procedure: { spec: string; name: string }): CustomMessagePayload {
+	return { customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: procedure.spec, display: false, details: { name: procedure.name } };
 }
 
 // Domain predicates and the payload accessor for the stored state messages:
@@ -205,73 +206,4 @@ export function extractMirrorPayload(data: unknown): StateMirror | undefined {
 	if (!isPlainObject(core) || !isPlainObject(scratch)) return undefined;
 	if (typeof stamp !== "number" || !Number.isFinite(stamp)) return undefined;
 	return { core: core as ExecutionState, scratch: scratch as ExecutionState, stamp };
-}
-
-// The idle ask the model sees after idleSteps consecutive steps without a
-// state change, once per quiet episode. Per-call by construction: the context
-// handler appends it to the projected prompt only, so it has no stored
-// counterpart, never anchors the cache breakpoint and is never re-sent from
-// history. A reminder, never a deadline: it names no consequence.
-export function idleNudgeMessage(idle: number): AgentMessage {
-	return {
-		role: "developer",
-		content: `The execution state has been unchanged for ${idle} consecutive steps. If there is anything worth keeping, record a meaningful fact in the state now with a state_update patch. This is a reminder, not a deadline.`,
-		timestamp: Date.now(),
-	};
-}
-
-// The ask the model sees while the execution state is over its soft size cap.
-// Per-call by construction, like the idle ask: appended to the projected
-// prompt only, never stored, never re-sent from history.
-export function consolidationNudgeMessage(): AgentMessage {
-	return {
-		role: "developer",
-		content: `The execution state has grown past its size cap. Consolidate it with a state_update patch: drop superseded findings — delete keys that no longer matter (null deletes a key) and rewrite values to only what the rest of the run needs. The cap never blocks anything; it only asks for this cleanup.`,
-		timestamp: Date.now(),
-	};
-}
-
-// The window notice (CONTEXT.md): one per-call developer line after the tail,
-// listing the tailed tool results' tags and tools oldest first with the drop
-// rule. Data only: it never predicts which result evicts, because the chunked
-// eviction keeps the front still between evictions. The step policy appends
-// it before the nudges, so the data about the tail precedes the policy asks
-// built on it.
-export function windowNoticeMessage(tailedResults: readonly TailedResultPair[]): AgentMessage {
-	const list = tailedResults.map((pair) => `#${pair.tag} ${pair.toolName}`).join(", ");
-	return {
-		role: "developer",
-		content: `tail oldest→newest: ${list} — oldest evict first when the prompt outgrows its budget`,
-		timestamp: Date.now(),
-	};
-}
-
-// The notice the model sees when the projection could not be built and the
-// step runs on ordinary context instead. Per-call by construction, like the
-// nudges: appended to the prompt only, never stored, never re-sent from
-// history. The step policy latches it, so one unprojected episode stays one
-// notice no matter how many steps it spans. The only failure reason is an
-// incomplete head: an empty tail degrades in place instead (ADR 0005).
-export function fallbackNoticeMessage(): AgentMessage {
-	return {
-		role: "developer",
-		content: `The state projection could not be built this step (the stored head is incomplete); the ordinary conversation is used instead. The projection resumes automatically once the head messages are back.`,
-		timestamp: Date.now(),
-	};
-}
-
-// The notice a degraded step carries (ADR 0005, narrowed by ADR 0010): the
-// head is intact but nothing is stored behind it, so the step's prompt has no
-// recent transcript in it. Per-call by construction, like the nudges:
-// appended to the prompt only, never stored, never re-sent from history. It
-// rides every degraded step with no latch, because a degraded model sees only
-// the head and cannot know why the tail is empty. The wording keeps this
-// projection gap apart from the procedure's retries-exhausted degrade, a
-// different failure.
-export function degradationNoticeMessage(): AgentMessage {
-	return {
-		role: "developer",
-		content: `No recent transcript is in the prompt this step: it carries the procedure head only (operating rules, skill, execution state). The execution state is intact and current; nothing was lost. Continue from the state.`,
-		timestamp: Date.now(),
-	};
 }

@@ -2,8 +2,8 @@ import type { ContextEvent } from "@oh-my-pi/pi-coding-agent";
 
 // The harness's transcript message union, taken from the context event payload:
 // the published package's root entry exports ContextEvent but not AgentMessage.
-// Its own module because messages.ts and projection.ts both need it, and one
-// importing the other would close an import cycle.
+// Its own module because branch.ts, procedure.ts and projection.ts all need
+// it, and one importing the other would close an import cycle.
 export type AgentMessage = ContextEvent["messages"][number];
 
 export function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -31,7 +31,8 @@ export type ProjectionFailure = "incomplete-head";
 
 // One tailed tool result's window-notice data: its pair tag and tool name,
 // collected oldest first (issue #52). Shared by the projection's result and
-// the window-notice builder, whose modules must not import each other.
+// the window-notice builder in procedure.ts; the projection must not import
+// procedure.ts.
 export interface TailedResultPair {
 	tag: string;
 	toolName: string;

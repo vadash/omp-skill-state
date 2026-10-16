@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, idleNudgeMessage, rulesMessage, scratchMessage } from "../src/messages";
-import { commitStep, compactionFor, headMessages, newProcedure, recordReply, stateMessages, stepPrompt } from "../src/procedure";
+import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, STATE_UPDATE_TOOL_NAME, coreMessage, rulesMessage, scratchMessage, specMessage } from "../src/messages";
+import { commitStep, compactionFor, consolidationNudgeMessage, degradationNoticeMessage, fallbackNoticeMessage, headMessages, idleNudgeMessage, newProcedure, recordReply, stateMessages, stepPrompt, windowNoticeMessage } from "../src/procedure";
 import type { Procedure } from "../src/procedure";
 import { DEFAULT_PARAMS } from "../src/state";
 import type { ExecutionState, StateParams, StateSchema } from "../src/state";
@@ -58,6 +58,78 @@ function commit(procedure: Procedure, reply: { patches: unknown[]; hasPatch: boo
 		if ("error" in committed) throw new Error(`patch rejected: ${committed.error}`);
 	}
 }
+
+describe("consolidationNudgeMessage", () => {
+	test("is a developer message asking for a state_update consolidation, with no fence, so it never becomes an elide target", () => {
+		const nudge = consolidationNudgeMessage();
+		expect(nudge).toEqual({
+			role: "developer",
+			content: expect.stringContaining("size cap"),
+			timestamp: expect.any(Number),
+		});
+		if (!("content" in nudge) || typeof nudge.content !== "string") throw new Error("developer message without text content");
+		expect(nudge.content).toContain(STATE_UPDATE_TOOL_NAME);
+		expect(nudge.content.split("\n").some((line) => line.trimStart().startsWith("```"))).toBe(false);
+	});
+});
+
+describe("idleNudgeMessage", () => {
+	test("is a developer message naming the quiet run and asking for a state_update record, naming no cutoff and carrying no fence", () => {
+		const ask = idleNudgeMessage(4);
+		expect(ask).toEqual({
+			role: "developer",
+			content: expect.stringContaining("unchanged for 4 consecutive steps"),
+			timestamp: expect.any(Number),
+		});
+		if (!("content" in ask) || typeof ask.content !== "string") throw new Error("developer message without text content");
+		expect(ask.content).toContain(STATE_UPDATE_TOOL_NAME);
+		expect(ask.content).not.toContain("disengage");
+		expect(ask.content.split("\n").some((line) => line.trimStart().startsWith("```"))).toBe(false);
+	});
+});
+
+describe("fallbackNoticeMessage", () => {
+	test("is a developer message naming the incomplete head and the ordinary-context fallback", () => {
+		const head = fallbackNoticeMessage();
+		expect(head).toEqual({
+			role: "developer",
+			content: expect.stringContaining("the stored head is incomplete"),
+			timestamp: expect.any(Number),
+		});
+		if (!("content" in head) || typeof head.content !== "string") throw new Error("developer message without text content");
+		expect(head.content).toContain("projection");
+	});
+});
+
+describe("degradationNoticeMessage", () => {
+	test("is a developer message naming the missing transcript, the intact state and the continue ask", () => {
+		const notice = degradationNoticeMessage();
+		expect(notice).toEqual({
+			role: "developer",
+			content: expect.stringContaining("No recent transcript is in the prompt"),
+			timestamp: expect.any(Number),
+		});
+		if (!("content" in notice) || typeof notice.content !== "string") throw new Error("developer message without text content");
+		expect(notice.content).toContain("head only");
+		expect(notice.content).toContain("intact and current");
+		expect(notice.content).toContain("Continue from the state");
+		// The projection gap never borrows the procedure's degrade wording.
+		expect(notice.content).not.toContain("degrade");
+	});
+});
+
+describe("windowNoticeMessage", () => {
+	test("is one developer line listing the tail's tags oldest first with the eviction rule", () => {
+		const notice = windowNoticeMessage([
+			{ tag: "a3f2", toolName: "read" },
+			{ tag: "b71c", toolName: "grep" },
+		]);
+
+		expect(notice.role).toBe("developer");
+		if (!("content" in notice) || typeof notice.content !== "string") throw new Error("notice without text content");
+		expect(notice.content).toBe("tail oldest→newest: #a3f2 read, #b71c grep — oldest evict first when the prompt outgrows its budget");
+	});
+});
 
 describe("newProcedure", () => {
 	test("starts with fresh counters and nothing pending", () => {
@@ -797,7 +869,7 @@ describe("headMessages", () => {
 
 		expect(headMessages(p)).toEqual([
 			rulesMessage(),
-			{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: "Running skill recon", display: false, details: { name: "recon" } },
+			specMessage({ spec: "Running skill recon", name: "recon" }),
 			coreMessage({ goal: "x" }, 0),
 			scratchMessage({ plan: ["a"] }, 0),
 		]);

@@ -13,8 +13,8 @@ The universal redesign (ADR 0010-0012, spec section 20) has landed in full: the 
 | `package.json` | Plugin manifest: `"omp": { "extensions": ["./src/index.ts"] }` |
 | `src/index.ts` | The extension: a thin harness adapter over the modules below. omp imports the TypeScript directly; there is no build step. |
 | `src/branch.ts` | Pure reads over the stored branch: the re-derive scan (mirror-aware, with the repair verdict), the state-pair and mirror logs, and the compaction cut. |
-| `src/procedure.ts` | The procedure record and the step policy: patch outcomes, idle and retry counters, the write stamp, head and compaction construction. |
-| `src/messages.ts` | The message vocabulary: the head message types (rules, procedure spec, state core, scratch), the durable mirror entry type, the state renderer, the core and scratch state builders, and the two nudge message builders. |
+| `src/procedure.ts` | The procedure record and the step policy: patch outcomes, idle and retry counters, the write stamp, head and compaction construction, the per-call notice builders. |
+| `src/messages.ts` | The message vocabulary: the head message types (rules, procedure spec, state core, scratch), the invocation constant and its predicate, the durable mirror entry type, the state renderer, and the core, scratch and spec state builders. |
 | `src/projection.ts` | The projection (pure message assembly): the head, the tail with its pair tags and result caps, the prompt budget and chunked eviction, and the scratch's per-call copy. |
 | `src/state.ts` | The execution state module: schema and params loading, patch validation, merge and apply, the core/scratch split. |
 | `src/recall.ts` | The recall read: transcript lines matched against the query and packed oldest-first under the byte cap. |

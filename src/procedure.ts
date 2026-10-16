@@ -1,7 +1,7 @@
 import type { CustomMessagePayload, SessionBeforeCompactEvent, SessionBeforeCompactResult } from "@oh-my-pi/pi-coding-agent";
 import { currentStepCut } from "./branch";
-import type { AgentMessage } from "./types";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, degradationNoticeMessage, fallbackNoticeMessage, idleNudgeMessage, renderStateContent, rulesMessage, scratchMessage, windowNoticeMessage } from "./messages";
+import type { AgentMessage, TailedResultPair } from "./types";
+import { coreMessage, renderStateContent, rulesMessage, scratchMessage, specMessage } from "./messages";
 import type { StateMirror } from "./messages";
 import { project } from "./projection";
 import { applyPatch, splitState } from "./state";
@@ -190,6 +190,75 @@ function overCap(procedure: Procedure): boolean {
 	return Buffer.byteLength(renderStateContent(core)) + Buffer.byteLength(renderStateContent(scratch)) > procedure.params.stateBytes;
 }
 
+// The idle ask the model sees after idleSteps consecutive steps without a
+// state change, once per quiet episode. Per-call by construction: the context
+// handler appends it to the projected prompt only, so it has no stored
+// counterpart, never anchors the cache breakpoint and is never re-sent from
+// history. A reminder, never a deadline: it names no consequence.
+export function idleNudgeMessage(idle: number): AgentMessage {
+	return {
+		role: "developer",
+		content: `The execution state has been unchanged for ${idle} consecutive steps. If there is anything worth keeping, record a meaningful fact in the state now with a state_update patch. This is a reminder, not a deadline.`,
+		timestamp: Date.now(),
+	};
+}
+
+// The ask the model sees while the execution state is over its soft size cap.
+// Per-call by construction, like the idle ask: appended to the projected
+// prompt only, never stored, never re-sent from history.
+export function consolidationNudgeMessage(): AgentMessage {
+	return {
+		role: "developer",
+		content: `The execution state has grown past its size cap. Consolidate it with a state_update patch: drop superseded findings — delete keys that no longer matter (null deletes a key) and rewrite values to only what the rest of the run needs. The cap never blocks anything; it only asks for this cleanup.`,
+		timestamp: Date.now(),
+	};
+}
+
+// The window notice (CONTEXT.md): one per-call developer line after the tail,
+// listing the tailed tool results' tags and tools oldest first with the drop
+// rule. Data only: it never predicts which result evicts, because the chunked
+// eviction keeps the front still between evictions. The step policy in this
+// file appends it before the nudges, so the data about the tail precedes the
+// policy asks built on it.
+export function windowNoticeMessage(tailedResults: readonly TailedResultPair[]): AgentMessage {
+	const list = tailedResults.map((pair) => `#${pair.tag} ${pair.toolName}`).join(", ");
+	return {
+		role: "developer",
+		content: `tail oldest→newest: ${list} — oldest evict first when the prompt outgrows its budget`,
+		timestamp: Date.now(),
+	};
+}
+
+// The notice the model sees when the projection could not be built and the
+// step runs on ordinary context instead. Per-call by construction, like the
+// nudges: appended to the prompt only, never stored, never re-sent from
+// history. The step policy latches it, so one unprojected episode stays one
+// notice no matter how many steps it spans. The only failure reason is an
+// incomplete head: an empty tail degrades in place instead (ADR 0005).
+export function fallbackNoticeMessage(): AgentMessage {
+	return {
+		role: "developer",
+		content: `The state projection could not be built this step (the stored head is incomplete); the ordinary conversation is used instead. The projection resumes automatically once the head messages are back.`,
+		timestamp: Date.now(),
+	};
+}
+
+// The notice a degraded step carries (ADR 0005, narrowed by ADR 0010): the
+// head is intact but nothing is stored behind it, so the step's prompt has no
+// recent transcript in it. Per-call by construction, like the nudges:
+// appended to the prompt only, never stored, never re-sent from history. It
+// rides every degraded step with no latch, because a degraded model sees only
+// the head and cannot know why the tail is empty. The wording keeps this
+// projection gap apart from the procedure's retries-exhausted degrade, a
+// different failure.
+export function degradationNoticeMessage(): AgentMessage {
+	return {
+		role: "developer",
+		content: `No recent transcript is in the prompt this step: it carries the procedure head only (operating rules, skill, execution state). The execution state is intact and current; nothing was lost. Continue from the state.`,
+		timestamp: Date.now(),
+	};
+}
+
 // The turn-scoped nudges the next provider call should carry, in delivery
 // order: the consolidation ask first, the idle ask last. Only for a call
 // whose prompt carries the stored head. Idempotent within a step: repeated
@@ -262,8 +331,8 @@ export function stepPrompt(
 	}
 	procedure.projected = true;
 	procedure.fallbackNoticed = false;
-	// The window notice rides this seam ahead of the nudges: data about the
-	// tail precedes the policy asks built on it.
+	// The window notice is built in this file and rides ahead of the nudges:
+	// data about the tail precedes the policy asks built on it.
 	const notice = projection.tailedResults.length > 0 ? [windowNoticeMessage(projection.tailedResults)] : [];
 	const nudges = pendingNudges(procedure);
 	const perCall = [...notice, ...nudges];
@@ -294,7 +363,7 @@ export function stateMessages(procedure: Procedure): CustomMessagePayload[] {
 export function headMessages(procedure: Procedure): CustomMessagePayload[] {
 	return [
 		rulesMessage(),
-		{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: procedure.spec, display: false, details: { name: procedure.name } },
+		specMessage(procedure),
 		...stateMessages(procedure),
 	];
 }

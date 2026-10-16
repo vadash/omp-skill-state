@@ -2,10 +2,21 @@ import type { ExtensionAPI, ExtensionContext, SessionEntry, Skill, ToolDefinitio
 import { zod } from "@oh-my-pi/pi-coding-agent";
 import { branchMessages, stateMirrors, statePairs } from "../src/branch";
 import extension from "../src/index";
-import { SKILL_PROMPT_MESSAGE_TYPE, skillAnnouncement } from "../src/messages";
+import { SKILL_PROMPT_MESSAGE_TYPE } from "../src/messages";
 import type { StateMirror } from "../src/messages";
 import type { ExecutionState } from "../src/state";
 import { ZERO_USAGE } from "./entries";
+
+// The announcement line the harness prepends to the prompt of a user-invoked
+// skill. Lives here, with the template-side prose, because harness.ts imports
+// fake-session and hosting it there would close an import cycle. Coupled to
+// the pinned @oh-my-pi/pi-coding-agent 18.10.3 template
+// src/prompts/skills/user-invocation.md, first line; the pin guard in
+// messages.test.ts fails on a template change instead of letting detection
+// degrade silently.
+export function skillAnnouncement(name: string): string {
+	return `[IMPORTANT: User invoked the "${name}" skill; follow its instructions. Full skill below.]`;
+}
 
 // A fake omp session for the adapter tests: one factory (one handler map) with
 // N sessions keyed by id. Each session owns its branch, sends, notices, idle

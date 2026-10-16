@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, rulesMessage } from "../src/messages";
+import { RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, rulesMessage, specMessage } from "../src/messages";
 import { procedureBranch } from "./entries";
 import { fakeOmp } from "./fake-session";
 import { disengageNotices, engageAsideTypes, engageNotices, makeSkillSet, patchStep, procedureSchema } from "./harness";
@@ -103,7 +103,7 @@ describe("omp-skill-state compaction ownership", () => {
 		if (typeof rules !== "object" || typeof rules.content !== "string") throw new Error("rules payload without text content");
 		expect(s.sends.map((sent) => sent.payload)).toEqual([
 			{ customType: RULES_MESSAGE_TYPE, content: rules.content, display: false },
-			{ customType: PROCEDURE_SPEC_MESSAGE_TYPE, content: "Running skill procedure", display: false, details: { name: "procedure" } },
+			specMessage({ spec: "Running skill procedure", name: "procedure" }) as Record<string, unknown>,
 			{ customType: STATE_CORE_MESSAGE_TYPE, content: renderStateContent({ goal: "x" }), display: true, details: { state: { goal: "x" }, stamp: 0 } },
 			{ customType: STATE_SCRATCH_MESSAGE_TYPE, content: renderStateContent({}), display: true, details: { state: {}, stamp: 0 } },
 		]);

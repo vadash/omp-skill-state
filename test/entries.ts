@@ -1,5 +1,5 @@
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
-import { PROCEDURE_SPEC_MESSAGE_TYPE, SKILL_PROMPT_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_MIRROR_ENTRY_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent } from "../src/messages";
+import { SKILL_PROMPT_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_MIRROR_ENTRY_TYPE, STATE_SCRATCH_MESSAGE_TYPE, renderStateContent, specMessage } from "../src/messages";
 import type { StateMirror } from "../src/messages";
 import type { ExecutionState } from "../src/state";
 
@@ -42,10 +42,7 @@ export function specEntry(name: string): SessionEntry {
 		id: seedId(),
 		parentId: null,
 		timestamp: stamp(),
-		customType: PROCEDURE_SPEC_MESSAGE_TYPE,
-		content: `Running skill ${name}`,
-		display: false,
-		details: { name },
+		...(specMessage({ spec: `Running skill ${name}`, name }) as { customType: string; content: string; display: boolean; details: { name: string } }),
 	};
 }
 

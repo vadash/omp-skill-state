@@ -355,9 +355,9 @@ omp-skill-state/
   src/index.ts          the harness adapter: event registrations, sends, blocks, notices
   src/projection.ts     the projection (pure message assembly)
   src/branch.ts         pure reads over the stored branch (re-derive scan, state pairs, compaction cut)
-  src/procedure.ts      the procedure record and the step policy (patch outcomes, head, compaction)
+  src/procedure.ts      the procedure record and the step policy (patch outcomes, head, compaction, the per-call notice builders)
   src/state.ts          the execution state module: schema and params loading, patch validation, merge and apply, the core/scratch split (volatileKeys, splitState)
-  src/messages.ts       the message vocabulary: the head message types, the invocation constant and its predicate, the announcement pair, the state renderer and the core and scratch state builders
+  src/messages.ts       the message vocabulary: the head message types, the invocation constant and its predicate, the announcement extractor, the state renderer and the core, scratch and procedure-spec state builders
   src/recall.ts         the recall read: pure match-and-pack over the transcript's JSONL lines, oldest first, under the 16,384-byte cap, and its render; the session entry wraps them around the one file read, where a missing file reads as empty
   src/types.ts          shared types: the harness message union, the structural object predicate and contentText, the shared text rendering
   test/*.test.ts        unit tests (bun test), one per source module; test/adapter-*.test.ts drive the factory through the fake session, one file per concern

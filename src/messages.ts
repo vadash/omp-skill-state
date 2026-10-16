@@ -1,7 +1,7 @@
 import type { CustomMessagePayload } from "@oh-my-pi/pi-coding-agent";
 import { isPlainObject } from "./types";
 import type { ExecutionState } from "./state";
-import type { AgentMessage } from "./types";
+import type { AgentMessage, TailedResultPair } from "./types";
 
 export const STATE_CORE_MESSAGE_TYPE = "sh.omp.skill-state.core";
 export const STATE_SCRATCH_MESSAGE_TYPE = "sh.omp.skill-state.scratch";
@@ -237,7 +237,7 @@ export function consolidationNudgeMessage(): AgentMessage {
 // eviction keeps the front still between evictions. The step policy appends
 // it before the nudges, so the data about the tail precedes the policy asks
 // built on it.
-export function windowNoticeMessage(tailedResults: readonly { tag: string; toolName: string }[]): AgentMessage {
+export function windowNoticeMessage(tailedResults: readonly TailedResultPair[]): AgentMessage {
 	const list = tailedResults.map((pair) => `#${pair.tag} ${pair.toolName}`).join(", ");
 	return {
 		role: "developer",

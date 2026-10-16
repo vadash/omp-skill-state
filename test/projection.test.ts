@@ -59,7 +59,7 @@ function asToolResult(message: AgentMessage): Extract<AgentMessage, { role: "too
 	return message;
 }
 
-// The success branch of project: the projected prompt itself.
+// The success branch of project: the result object's prompt.
 function projected(
 	messages: AgentMessage[],
 	observationBytes = 32768,
@@ -67,8 +67,8 @@ function projected(
 ): AgentMessage[] {
 	const out = project(messages, opts.branch ?? messages, { ...DEFAULT_PARAMS, observationBytes }, opts.windowTokens);
 	if (typeof out === "string") throw new Error(`unexpected fallback: ${out}`);
-	if (!Array.isArray(out)) throw new Error("unexpected degraded projection");
-	return out;
+	if ("head" in out) throw new Error("unexpected degraded projection");
+	return out.prompt;
 }
 
 function textBytes(messages: readonly AgentMessage[]): number {
@@ -231,6 +231,20 @@ describe("project tail budget", () => {
 		expect(asToolResult(out[3]!).toolCallId).toBe("t2");
 		expect(asToolResult(out[3]!).content.slice(1)).toEqual(newest.content);
 		expect(out.at(-1)).toEqual(perCall(h.scratch));
+	});
+
+	test("evictedCount equals the dropped prefix's length, and the evicted result leaves the tailed results", () => {
+		const h = head();
+		const tail = [userMsg("old"), assistantText("old"), assistantToolCall("t1"), toolResult("t1", "x".repeat(2000)), assistantToolCall("t2"), toolResult("t2", "newest")];
+		// The same zero-budget window as the test above: everything but the
+		// newest message evicts, so five of the six tail messages drop.
+		const out = project([...h.all, ...tail], [...h.all, ...tail], { ...DEFAULT_PARAMS, observationBytes: 32768 }, 1000);
+		if (typeof out === "string" || !("prompt" in out)) throw new Error("expected a projected result");
+
+		expect(out.evictedCount).toBe(5);
+		// The dropped t1 result is not tailed: the pairs name exactly the
+		// prompt's tagged copies, not the branch's stored results.
+		expect(out.tailedResults).toEqual([{ tag: "eb43", toolName: "read" }]);
 	});
 
 	test("an over-budget tail settles at or under the budget less one chunk, the newest message still present", () => {
@@ -549,6 +563,27 @@ describe("project pair tags", () => {
 		]);
 	});
 
+	test("tailedResults are the prompt's tagged tool results, oldest first, tag and tool name each", () => {
+		const h = head();
+		const messages = [...h.all, assistantToolCall("t1"), toolResult("t1", "first"), assistantToolCall("t2", "bash"), toolResult("t2", "second", "bash")];
+		const out = project(messages, messages, { ...DEFAULT_PARAMS, observationBytes: 32768 }, undefined);
+		if (typeof out === "string" || !("prompt" in out)) throw new Error("expected a projected result");
+
+		// The known tags of t1 and t2, in tail order with their tool names.
+		expect(out.tailedResults).toEqual([
+			{ tag: "ecd6", toolName: "read" },
+			{ tag: "eb43", toolName: "bash" },
+		]);
+		// The same pairs the prompt's tagged copies open with, in prompt order.
+		const tagged = out.prompt.filter((m) => m.role === "toolResult").map((m) => {
+			const result = asToolResult(m);
+			const first = result.content[0]!;
+			const tag = first.type === "text" && first.text.startsWith("[#") ? first.text.slice(2, 6) : "";
+			return { tag, toolName: result.toolName };
+		});
+		expect(out.tailedResults).toEqual(tagged);
+	});
+
 	test("stored tool results pass through untouched: the projection copies, never mutates", () => {
 		const h = head();
 		const stored = toolResult("t1", "x");
@@ -560,13 +595,30 @@ describe("project pair tags", () => {
 	});
 });
 
+describe("project result object", () => {
+	test("a projected step returns one result object carrying prompt, tailedResults and evictedCount, never a bare array", () => {
+		const h = head();
+		const messages = [...h.all, userMsg("turn"), assistantText("prose")];
+		const out = project(messages, messages, { ...DEFAULT_PARAMS, observationBytes: 32768 }, undefined);
+
+		expect(Array.isArray(out)).toBe(false);
+		if (typeof out === "string" || !("prompt" in out)) throw new Error(`expected a projected result, got ${JSON.stringify(out)}`);
+		expect(out.prompt[0]).toBe(h.rules);
+		expect(Array.isArray(out.tailedResults)).toBe(true);
+		expect(typeof out.evictedCount).toBe("number");
+		// A tail without tool results tails nothing and evicts nothing.
+		expect(out.tailedResults).toEqual([]);
+		expect(out.evictedCount).toBe(0);
+	});
+});
+
 describe("project degradation and fallback", () => {
 	// The degraded branch of project: the head is intact but nothing is
 	// stored behind it. The projection returns the head and never history.
 	function degraded(messages: AgentMessage[]): { head: AgentMessage[] } {
 		const out = project(messages, messages, { ...DEFAULT_PARAMS }, undefined);
 		if (typeof out === "string") throw new Error(`expected a degraded projection, got the failure ${out}`);
-		if (Array.isArray(out)) throw new Error("expected a degraded projection, got a plain projection");
+		if (!("head" in out)) throw new Error("expected a degraded projection, got a projected result");
 		return out;
 	}
 

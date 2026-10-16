@@ -15,3 +15,11 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
 // an intact head degrades in place instead (ADR 0010). project returns it
 // instead of a projected prompt.
 export type ProjectionFailure = "incomplete-head";
+
+// One tailed tool result's window-notice data: its pair tag and tool name,
+// collected oldest first (issue #52). Shared by the projection's result and
+// the window-notice builder, whose modules must not import each other.
+export interface TailedResultPair {
+	tag: string;
+	toolName: string;
+}

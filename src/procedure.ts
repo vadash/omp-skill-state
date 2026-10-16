@@ -3,7 +3,7 @@ import { currentStepCut } from "./branch";
 import type { AgentMessage } from "./types";
 import { PROCEDURE_SPEC_MESSAGE_TYPE, consolidationNudgeMessage, coreMessage, degradationNoticeMessage, fallbackNoticeMessage, idleNudgeMessage, renderStateContent, rulesMessage, scratchMessage, windowNoticeMessage } from "./messages";
 import type { StateMirror } from "./messages";
-import { pairTag, project } from "./projection";
+import { project } from "./projection";
 import { applyPatch, splitState } from "./state";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
 
@@ -263,16 +263,11 @@ export function stepPrompt(
 	procedure.projected = true;
 	procedure.fallbackNoticed = false;
 	// The window notice rides this seam ahead of the nudges: data about the
-	// tail precedes the policy asks built on it. The projected prompt's tool
-	// results are exactly the tailed results, and the tags re-mint from the
-	// tool call ids, so no tail state crosses the seam.
-	const tailed = projection.filter((message): message is Extract<AgentMessage, { role: "toolResult" }> => message.role === "toolResult");
-	const notice = tailed.length > 0
-		? [windowNoticeMessage(tailed.map((result) => ({ tag: pairTag(result.toolCallId), toolName: result.toolName })))]
-		: [];
+	// tail precedes the policy asks built on it.
+	const notice = projection.tailedResults.length > 0 ? [windowNoticeMessage(projection.tailedResults)] : [];
 	const nudges = pendingNudges(procedure);
 	const perCall = [...notice, ...nudges];
-	return perCall.length > 0 ? [...projection, ...perCall] : projection;
+	return perCall.length > 0 ? [...projection.prompt, ...perCall] : projection.prompt;
 }
 
 // The current state split into its two stored partitions, derived from the

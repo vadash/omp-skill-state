@@ -2,7 +2,7 @@ import { newestByStamp } from "./branch";
 import { LEGACY_STATE_MESSAGE_TYPE, LIVE_STATE_CUSTOM_TYPES, PROCEDURE_SPEC_MESSAGE_TYPE, RULES_MESSAGE_TYPE, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, extractStateStamp } from "./messages";
 import type { StateParams } from "./state";
 import { isPlainObject } from "./types";
-import type { AgentMessage, ProjectionFailure } from "./types";
+import type { AgentMessage, ProjectionFailure, TailedResultPair } from "./types";
 
 type ToolResult = Extract<AgentMessage, { role: "toolResult" }>;
 type ResultContent = ToolResult["content"];
@@ -13,6 +13,16 @@ type ResultContent = ToolResult["content"];
 // so the cache ceiling is unchanged. Never ordinary history.
 export interface DegradedProjection {
 	head: AgentMessage[];
+}
+
+// The success arm of project (issue #52): one result object, so the step
+// prompt builds the window notice from it instead of re-walking the
+// assembled prompt. tailedResults is oldest first and names exactly the
+// prompt's tagged tool results; evictedCount is the dropped prefix's length.
+export interface ProjectionResult {
+	prompt: AgentMessage[];
+	tailedResults: readonly TailedResultPair[];
+	evictedCount: number;
 }
 
 // The window read, in tokens, when ctx.getContextUsage() gives no usable
@@ -53,7 +63,7 @@ function lastStateCustom(messages: readonly AgentMessage[], customType: string):
 // Pair tag (CONTEXT.md): four lowercase hex digits, FNV-1a over the tool call
 // id's UTF-8 bytes. A pure function of the id alone, so a re-derive or rewind
 // recomputes identical tags with no memo state.
-export function pairTag(toolCallId: string): string {
+function pairTag(toolCallId: string): string {
 	let hash = 0x811c9dc5;
 	for (const byte of Buffer.from(toolCallId, "utf8")) {
 		hash ^= byte;
@@ -125,7 +135,7 @@ function messageBytes(message: AgentMessage): number {
 // between evictions; the chunk of headroom is the ceiling from issue #40. The
 // newest message is never dropped, so a prompt may exceed the budget by the
 // newest message's size; the per-result cap bounds that excess.
-function evictOldest(candidates: readonly AgentMessage[], budget: number, chunk: number): AgentMessage[] {
+function evictOldest(candidates: readonly AgentMessage[], budget: number, chunk: number): { tail: AgentMessage[]; evictedCount: number } {
 	const sizes = candidates.map(messageBytes);
 	let total = sizes.reduce((sum, size) => sum + size, 0);
 	let start = 0;
@@ -141,7 +151,7 @@ function evictOldest(candidates: readonly AgentMessage[], budget: number, chunk:
 		start = end;
 		total -= chunkBytes;
 	}
-	return candidates.slice(start);
+	return { tail: candidates.slice(start), evictedCount: start };
 }
 
 interface CutPlan {
@@ -170,7 +180,7 @@ export function project(
 	branch: readonly AgentMessage[],
 	params: Pick<StateParams, "observationBytes" | "promptBudgetPercent" | "evictionChunkPercent">,
 	contextWindowTokens: number | undefined,
-): AgentMessage[] | ProjectionFailure | DegradedProjection {
+): ProjectionResult | ProjectionFailure | DegradedProjection {
 	const rules = lastCustom(messages, RULES_MESSAGE_TYPE);
 	const procedureSpec = lastCustom(messages, PROCEDURE_SPEC_MESSAGE_TYPE);
 	const core = lastStateCustom(messages, STATE_CORE_MESSAGE_TYPE);
@@ -202,18 +212,22 @@ export function project(
 	);
 	const chunk = Math.floor((budget * params.evictionChunkPercent) / 100);
 
-	const tail = evictOldest(candidates, budget, chunk);
+	const { tail, evictedCount } = evictOldest(candidates, budget, chunk);
 	// Tag bytes ride before the cap: the tailed results are the tagged copies,
 	// and each result's own cap sees the tag line as part of it.
 	const capped: CutPlan[] = [];
+	// Tail order is oldest first, so collecting while tagging keeps the pairs
+	// in the same order the prompt presents them.
+	const tailedResults: TailedResultPair[] = [];
 	const tailParts = tail.map((message, position) => {
 		if (message.role !== "toolResult") return message;
 		const tagged = taggedResult(message);
 		capped.push({ position, result: tagged });
+		tailedResults.push({ tag: pairTag(message.toolCallId), toolName: message.toolName });
 		return tagged;
 	});
 	const tailCapped = capResults(tailParts, capped, params.observationBytes);
-	return [rules, procedureSpec, core, ...tailCapped, scratchCopy];
+	return { prompt: [rules, procedureSpec, core, ...tailCapped, scratchCopy], tailedResults, evictedCount };
 }
 
 // Each tailed result's own text is capped at `cap` (per result, not

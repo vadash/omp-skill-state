@@ -242,8 +242,8 @@ function pendingNudges(procedure: Procedure): AgentMessage[] {
 export function stepPrompt(
 	procedure: Procedure,
 	messages: AgentMessage[],
-	branch: readonly AgentMessage[] = messages,
-	contextWindowTokens: number | undefined = undefined,
+	branch: readonly AgentMessage[],
+	contextWindowTokens: number | undefined,
 ): AgentMessage[] | undefined {
 	const projection = project(messages, branch, procedure.params, contextWindowTokens);
 	if (typeof projection === "string") {

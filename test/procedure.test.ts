@@ -9,6 +9,11 @@ import { assistantEntry, ZERO_USAGE } from "./entries";
 
 const schema: StateSchema = { type: "object", properties: { goal: { type: "string" } } };
 
+// Every fixture tail is a handful of short messages, so a 100k-token window
+// keeps each whole prompt far under the 30% prompt budget: nothing evicts,
+// and the window notice only ever lists what the step actually carried.
+const window = 100_000;
+
 function procedure(params: Partial<StateParams> = {}, state: ExecutionState = {}): Procedure {
 	return newProcedure("recon", "Running skill recon", schema, { ...DEFAULT_PARAMS, ...params }, state);
 }
@@ -30,7 +35,8 @@ function headWithTurn(procedure: Procedure): AgentMessage[] {
 // production sets it, through the stepPrompt seam.
 function projected(params: Partial<StateParams> = {}, state: ExecutionState = {}): Procedure {
 	const p = procedure(params, state);
-	if (stepPrompt(p, headWithTurn(p)) === undefined) throw new Error("head did not project");
+	const msgs = headWithTurn(p);
+	if (stepPrompt(p, msgs, msgs, window) === undefined) throw new Error("head did not project");
 	return p;
 }
 
@@ -208,7 +214,8 @@ describe("recordReply and idle steps", () => {
 		for (let i = 0; i < 3; i++) expect(recordReply(p, empty())).toEqual({ kind: "none" });
 		expect(p.idle).toBe(0);
 
-		if (stepPrompt(p, headWithTurn(p)) === undefined) throw new Error("head did not project");
+		const msgs = headWithTurn(p);
+		if (stepPrompt(p, msgs, msgs, window) === undefined) throw new Error("head did not project");
 		for (let i = 0; i < 7; i++) expect(recordReply(p, empty())).toEqual({ kind: "none" });
 		expect(p.idle).toBe(7);
 	});
@@ -247,12 +254,13 @@ describe("recordReply and idle steps", () => {
 		recordReply(p, empty());
 		// The first unprojected step carries the fallback notice; the repeat
 		// keeps the ordinary context untouched.
-		if (stepPrompt(p, []) === undefined) throw new Error("notice step returned nothing");
-		if (stepPrompt(p, []) !== undefined) throw new Error("headless prompt projected");
+		if (stepPrompt(p, [], [], window) === undefined) throw new Error("notice step returned nothing");
+		if (stepPrompt(p, [], [], window) !== undefined) throw new Error("headless prompt projected");
 		recordReply(p, empty());
 		expect(p.idle).toBe(1);
 
-		if (stepPrompt(p, headWithTurn(p)) === undefined) throw new Error("head did not project");
+		const msgs = headWithTurn(p);
+		if (stepPrompt(p, msgs, msgs, window) === undefined) throw new Error("head did not project");
 		for (let i = 0; i < 5; i++) expect(recordReply(p, empty())).toEqual({ kind: "none" });
 		expect(p.idle).toBe(6);
 	});
@@ -342,7 +350,8 @@ describe("commitStep", () => {
 describe("stepPrompt nudges", () => {
 	// The developer messages one step's prompt carries beyond its projection.
 	function nudgesFor(procedure: Procedure): AgentMessage[] {
-		const out = stepPrompt(procedure, headWithTurn(procedure));
+		const msgs = headWithTurn(procedure);
+		const out = stepPrompt(procedure, msgs, msgs, window);
 		if (out === undefined) throw new Error("head did not project");
 		return out.filter((message) => message.role === "developer");
 	}
@@ -484,13 +493,13 @@ describe("stepPrompt nudges", () => {
 		const p = procedure({ stateBytes: 100 }, { blob: "x".repeat(200) });
 
 		// The first unprojected step carries the fallback notice...
-		const first = stepPrompt(p, []);
+		const first = stepPrompt(p, [], [], window);
 		if (first === undefined) throw new Error("first unprojected step returned nothing");
 		expect(first.filter((message) => message.role === "developer")).toHaveLength(1);
 		expect(p.capNudged).toBe(false);
 
 		// ...and the second keeps the ordinary context untouched.
-		expect(stepPrompt(p, [])).toBeUndefined();
+		expect(stepPrompt(p, [], [], window)).toBeUndefined();
 		expect(p.capNudged).toBe(false);
 
 		// From the next step, with the head back, the ask rides.
@@ -535,7 +544,7 @@ describe("stepPrompt fallback notice", () => {
 	test("the first unprojected step carries exactly one developer notice naming the reason", () => {
 		const p = procedure();
 
-		const notices = noticesIn(stepPrompt(p, []));
+		const notices = noticesIn(stepPrompt(p, [], [], window));
 		expect(notices).toHaveLength(1);
 		expect(notices[0]!.role).toBe("developer");
 		expect(noticeText(notices[0])).toContain("the stored head is incomplete");
@@ -545,19 +554,20 @@ describe("stepPrompt fallback notice", () => {
 	test("an immediate repeat keeps the ordinary context untouched, never a second notice", () => {
 		const p = procedure();
 
-		expect(noticesIn(stepPrompt(p, []))).toHaveLength(1);
-		expect(stepPrompt(p, [])).toBeUndefined();
+		expect(noticesIn(stepPrompt(p, [], [], window))).toHaveLength(1);
+		expect(stepPrompt(p, [], [], window)).toBeUndefined();
 	});
 
 	test("a projected step ends the episode and re-arms the notice", () => {
 		const p = procedure();
 
-		expect(noticesIn(stepPrompt(p, []))).toHaveLength(1);
-		if (stepPrompt(p, headWithTurn(p)) === undefined) throw new Error("head did not project");
+		expect(noticesIn(stepPrompt(p, [], [], window))).toHaveLength(1);
+		const msgs = headWithTurn(p);
+		if (stepPrompt(p, msgs, msgs, window) === undefined) throw new Error("head did not project");
 		expect(p.projected).toBe(true);
 
 		// Fallback again: a fresh notice, latched anew for the new episode.
-		const notices = noticesIn(stepPrompt(p, []));
+		const notices = noticesIn(stepPrompt(p, [], [], window));
 		expect(notices).toHaveLength(1);
 		expect(noticeText(notices[0])).toContain("the stored head is incomplete");
 	});
@@ -565,8 +575,8 @@ describe("stepPrompt fallback notice", () => {
 	test("fallback steps neither latch the cap ask nor move the idle count", () => {
 		const p = procedure({ stateBytes: 100 }, { blob: "x".repeat(200) });
 
-		expect(noticesIn(stepPrompt(p, []))).toHaveLength(1);
-		expect(stepPrompt(p, [])).toBeUndefined();
+		expect(noticesIn(stepPrompt(p, [], [], window))).toHaveLength(1);
+		expect(stepPrompt(p, [], [], window)).toBeUndefined();
 		expect(p.capNudged).toBe(false);
 
 		recordReply(p, empty());
@@ -592,7 +602,8 @@ describe("stepPrompt window notice", () => {
 		const p = procedure({ stateBytes: 100 }, { blob: "x".repeat(200) });
 		const h = headContext(p);
 
-		const out = stepPrompt(p, [...h, callMsg("t1"), resultMsg("t1", "a")]);
+		const msgs = [...h, callMsg("t1"), resultMsg("t1", "a")];
+		const out = stepPrompt(p, msgs, msgs, window);
 		if (out === undefined) throw new Error("head did not project");
 
 		const texts = devTexts(out);
@@ -605,7 +616,8 @@ describe("stepPrompt window notice", () => {
 		const p = procedure();
 		const h = headContext(p);
 
-		const out = stepPrompt(p, [...h, callMsg("t1"), resultMsg("t1", "a"), callMsg("t2"), resultMsg("t2", "b"), callMsg("t3"), resultMsg("t3", "c")]);
+		const msgs = [...h, callMsg("t1"), resultMsg("t1", "a"), callMsg("t2"), resultMsg("t2", "b"), callMsg("t3"), resultMsg("t3", "c")];
+		const out = stepPrompt(p, msgs, msgs, window);
 		if (out === undefined) throw new Error("head did not project");
 
 		expect(devTexts(out)).toEqual(["tail oldest→newest: #ecd6 read, #eb43 read, #e9b0 read — oldest evict first when the prompt outgrows its budget"]);
@@ -614,14 +626,18 @@ describe("stepPrompt window notice", () => {
 	test("the notice rides before the idle ask at the threshold step", () => {
 		const p = procedure({ idleSteps: 3 });
 		const h = headContext(p);
-		stepPrompt(p, [...h, callMsg("t1"), resultMsg("t1", "a")]);
+		const msgs1 = [...h, callMsg("t1"), resultMsg("t1", "a")];
+		stepPrompt(p, msgs1, msgs1, window);
 		recordReply(p, empty());
-		stepPrompt(p, [...h, callMsg("t2"), resultMsg("t2", "b")]);
+		const msgs2 = [...h, callMsg("t2"), resultMsg("t2", "b")];
+		stepPrompt(p, msgs2, msgs2, window);
 		recordReply(p, empty());
-		stepPrompt(p, [...h, callMsg("t3"), resultMsg("t3", "c")]);
+		const msgs3 = [...h, callMsg("t3"), resultMsg("t3", "c")];
+		stepPrompt(p, msgs3, msgs3, window);
 		recordReply(p, empty());
 
-		const out = stepPrompt(p, [...h, callMsg("t4"), resultMsg("t4", "d")]);
+		const msgs4 = [...h, callMsg("t4"), resultMsg("t4", "d")];
+		const out = stepPrompt(p, msgs4, msgs4, window);
 		if (out === undefined) throw new Error("head did not project");
 
 		const texts = devTexts(out);
@@ -634,7 +650,8 @@ describe("stepPrompt window notice", () => {
 		const p = procedure();
 		const h = headContext(p);
 
-		const out = stepPrompt(p, [...h, { role: "user", content: "go on", timestamp: Date.now() }]);
+		const msgs: AgentMessage[] = [...h, { role: "user", content: "go on", timestamp: Date.now() }];
+		const out = stepPrompt(p, msgs, msgs, window);
 		if (out === undefined) throw new Error("head did not project");
 
 		expect(devTexts(out)).toEqual([]);
@@ -643,13 +660,14 @@ describe("stepPrompt window notice", () => {
 	test("absent on an unprojected step and when the head never reaches the seam", () => {
 		const p = procedure();
 
-		const first = stepPrompt(p, [callMsg("t1"), resultMsg("t1", "a")]);
+		const msgs = [callMsg("t1"), resultMsg("t1", "a")];
+		const first = stepPrompt(p, msgs, msgs, window);
 		if (first === undefined) throw new Error("the first unprojected step returned nothing");
 		const texts = devTexts(first);
 		expect(texts).toHaveLength(1);
 		expect(texts[0]).toContain("the stored head is incomplete");
 
-		expect(stepPrompt(p, [callMsg("t1"), resultMsg("t1", "a")])).toBeUndefined();
+		expect(stepPrompt(p, msgs, msgs, window)).toBeUndefined();
 	});
 
 	test("absent on a degraded step: the degradation notice is the only developer signal", () => {
@@ -657,7 +675,7 @@ describe("stepPrompt window notice", () => {
 		const h = headContext(p);
 
 		// Nothing is stored behind the head: the step is degraded.
-		const out = stepPrompt(p, [...h]);
+		const out = stepPrompt(p, [...h], [...h], window);
 		if (out === undefined) throw new Error("the degraded step returned nothing");
 
 		const texts = devTexts(out);
@@ -670,7 +688,8 @@ describe("stepPrompt window notice", () => {
 // A degraded step's context: the head with nothing stored behind it. Returns
 // the prompt and its notice text.
 function degradedStep(procedure: Procedure): { prompt: AgentMessage[]; notice: string } {
-	const out = stepPrompt(procedure, headContext(procedure));
+	const msgs = headContext(procedure);
+	const out = stepPrompt(procedure, msgs, msgs, window);
 	if (out === undefined) throw new Error("the degraded step returned nothing");
 	const notice = out.find((message) => message.role === "developer");
 	if (notice === undefined || !("content" in notice) || typeof notice.content !== "string") throw new Error("degraded step without its notice");
@@ -733,7 +752,8 @@ describe("stepPrompt degradation notice", () => {
 		const p = projected();
 
 		degradedStep(p);
-		const clean = stepPrompt(p, [...headContext(p), ...healthyTail("t2")]);
+		const msgs = [...headContext(p), ...healthyTail("t2")];
+		const clean = stepPrompt(p, msgs, msgs, window);
 		if (clean === undefined) throw new Error("the projected step returned nothing");
 		const cleanDevs = clean.filter((message) => message.role === "developer");
 		expect(cleanDevs).toHaveLength(1); // the window notice only

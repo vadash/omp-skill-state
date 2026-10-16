@@ -1,5 +1,5 @@
-import { contentText } from "./branch";
-import { isPlainObject } from "./types";
+import { readFileSync } from "node:fs";
+import { contentText, isPlainObject } from "./types";
 
 // Recall (CONTEXT.md) reads the transcript's own text back verbatim; the cap
 // bounds the packed matches only. The marker that names a truncation rides
@@ -60,4 +60,29 @@ export function recallTranscript(lines: string[], query: string, capBytes: numbe
 		matches.push(text);
 	}
 	return { matches, truncated };
+}
+
+// Pure render over a match-and-pack result: the packed text stays the
+// transcript's own; the marker rule is the module header's.
+export function renderRecall(result: RecallResult): string {
+	const text = result.matches.join(SHOWN_SEPARATOR);
+	if (!result.truncated) return text;
+	return text === "" ? RECALL_CAP_MARKER : `${text}${SHOWN_SEPARATOR}${RECALL_CAP_MARKER}`;
+}
+
+// Pure match-and-pack over the transcript file's text is recallTranscript, its
+// render renderRecall: the in-memory seam the unit tests table over.
+// recallSession wraps them around the one file read — a missing session file
+// is an empty result, not an error, and any other read failure is real and
+// propagates.
+export function recallSession(sessionFile: string | undefined, query: string): string {
+	if (sessionFile === undefined) return "";
+	let raw: string;
+	try {
+		raw = readFileSync(sessionFile, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		return "";
+	}
+	return renderRecall(recallTranscript(raw.split(/\r?\n/), query));
 }

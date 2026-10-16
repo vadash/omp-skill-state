@@ -1,22 +1,10 @@
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import { PROCEDURE_SPEC_MESSAGE_TYPE, STATE_MIRROR_ENTRY_TYPE, extractMirrorPayload, extractStatePayload, extractStateStamp, isStateCoreMessage, isStateScratchMessage, renderStateContent, skillInvocationName } from "./messages";
 import type { StateMirror } from "./messages";
-import { isPlainObject } from "./types";
+import { contentText } from "./types";
 import type { AgentMessage } from "./types";
 import { stateEquals } from "./state";
 import type { ExecutionState } from "./state";
-
-// Custom message content is a string or text blocks; the invocation's P is
-// taken from and the stored P is read back through the same path.
-export function contentText(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (Array.isArray(content)) {
-		return content
-			.flatMap((block) => (isPlainObject(block) && block.type === "text" && typeof block.text === "string" ? [block.text] : []))
-			.join("\n");
-	}
-	return String(content);
-}
 
 export interface ProcedureOnBranch {
 	name: string;

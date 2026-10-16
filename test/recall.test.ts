@@ -1,5 +1,9 @@
-import { describe, expect, test } from "bun:test";
-import { RECALL_CAP_MARKER, RECALL_RESULT_BYTES, recallTranscript } from "../src/recall";
+import { afterAll, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { RECALL_CAP_MARKER, RECALL_RESULT_BYTES, recallTranscript, recallSession, renderRecall } from "../src/recall";
 import { messageLine, titleSlotLine, transcriptStamp } from "./entries";
 
 // The pure recall read (CONTEXT.md "Recall"): matches are the transcript's own
@@ -108,5 +112,76 @@ describe("recallTranscript", () => {
 
 		expect(matches).toEqual(["crimson after the noise"]);
 		expect(truncated).toBe(false);
+	});
+});
+
+describe("renderRecall", () => {
+	test("a result that fit is the joined matches, no marker", () => {
+		expect(renderRecall({ matches: ["first", "second"], truncated: false })).toBe("first\n\nsecond");
+		expect(renderRecall({ matches: [], truncated: false })).toBe("");
+	});
+
+	test("a truncated result carries the exact cap marker after the joined matches", () => {
+		expect(renderRecall({ matches: ["first", "second"], truncated: true })).toBe(`first\n\nsecond\n\n${RECALL_CAP_MARKER}`);
+	});
+
+	test("the marker rides outside the capped text, never counted into the pack", () => {
+		const match = "m".repeat(100);
+		// Two shown matches cost 100 + 2 + 100 = 202 bytes, one over this cap.
+		const result = recallTranscript([messageLine("user", match), messageLine("user", match)], "m", 201);
+
+		const rendered = renderRecall(result);
+		const joined = result.matches.join("\n\n");
+
+		expect(Buffer.byteLength(joined)).toBeLessThanOrEqual(201);
+		expect(rendered.indexOf(RECALL_CAP_MARKER)).toBeGreaterThan(joined.length - 1);
+	});
+
+	test("a truncated result with nothing shown is the bare marker", () => {
+		expect(renderRecall({ matches: [], truncated: true })).toBe(RECALL_CAP_MARKER);
+	});
+});
+
+const root = await mkdtemp(path.join(tmpdir(), "recall-session-"));
+
+describe("recallSession", () => {
+	const jsonl = (name: string, lines: string[]) => {
+		const file = path.join(root, name);
+		writeFileSync(file, lines.join("\n") + "\n");
+		return file;
+	};
+
+	afterAll(() => rm(root, { recursive: true, force: true }));
+
+	test("a missing session file is an empty result, not an error", () => {
+		expect(recallSession(path.join(root, "absent.jsonl"), "crimson")).toBe("");
+	});
+
+	test("no session file at all is an empty result", () => {
+		expect(recallSession(undefined, "crimson")).toBe("");
+	});
+
+	test("a real transcript is matched verbatim, oldest first", () => {
+		const file = jsonl("session.jsonl", [
+			titleSlotLine(),
+			messageLine("user", "find the crimson report"),
+			"{oops",
+			messageLine("assistant", "the CRIMSON report is filed"),
+		]);
+
+		expect(recallSession(file, "crimson")).toBe("find the crimson report\n\nthe CRIMSON report is filed");
+	});
+
+	test("any read failure other than a missing file propagates", () => {
+		let error: unknown;
+		try {
+			recallSession(root, "crimson"); // a directory is not readable as a transcript file
+		} catch (caught) {
+			error = caught;
+		}
+		expect(error).toBeDefined();
+		// The exact errno differs per platform (EISDIR on the majors); what the
+		// seam pins is that only a missing file reads as empty.
+		expect((error as NodeJS.ErrnoException).code).not.toBe("ENOENT");
 	});
 });

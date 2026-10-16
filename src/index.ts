@@ -1,13 +1,12 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Text } from "@oh-my-pi/pi-coding-agent";
-import { readFileSync } from "node:fs";
-import { branchMessages, contentText, highestStamp, scanBranch } from "./branch";
+import { branchMessages, highestStamp, scanBranch } from "./branch";
 import { STATE_UPDATE_TOOL_NAME, STATE_UPDATE_DESCRIPTION, STATE_RECALL_TOOL_NAME, STATE_RECALL_DESCRIPTION, STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE, STATE_MIRROR_ENTRY_TYPE, announcedSkillNames, rulesMessage, skillInvocationName } from "./messages";
-import { RECALL_CAP_MARKER, recallTranscript } from "./recall";
+import { recallSession } from "./recall";
 import { commitStep, compactionFor, headMessages, newProcedure, recordReply, stateMessages, stepPrompt } from "./procedure";
 import type { Procedure } from "./procedure";
 import { loadStateSchema } from "./state";
-import { isPlainObject } from "./types";
+import { contentText, isPlainObject } from "./types";
 import type { ExecutionState, StateParams, StateSchema } from "./state";
 
 // The final state waits for the session to go idle before it is stored; the
@@ -129,23 +128,7 @@ export default function (pi: ExtensionAPI): void {
 		approval: { tier: "read", policy: "allow" } as const,
 		concurrency: "exclusive" as const,
 		async execute(_toolCallId: string, params: { query: string }, _signal: AbortSignal | undefined, _onUpdate: undefined, ctx: ExtensionContext): Promise<AgentToolResult> {
-			const sessionFile = ctx.sessionManager.getSessionFile();
-			let text = "";
-			if (sessionFile !== undefined) {
-				let raw = "";
-				try {
-					raw = readFileSync(sessionFile, "utf8");
-				} catch (error) {
-					// A missing file is an empty result, not an error; any other
-					// read failure is real and propagates.
-					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-				}
-				const { matches, truncated } = recallTranscript(raw.split(/\r?\n/), params.query);
-				text = matches.join("\n\n");
-				// The marker rides after the packed matches, outside the cap.
-				if (truncated) text = text === "" ? RECALL_CAP_MARKER : `${text}\n\n${RECALL_CAP_MARKER}`;
-			}
-			return { content: [{ type: "text", text }] };
+			return { content: [{ type: "text", text: recallSession(ctx.sessionManager.getSessionFile(), params.query) }] };
 		},
 	};
 	pi.registerTool(stateRecall);

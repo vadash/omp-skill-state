@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { CustomMessagePayload, SessionEntry } from "@oh-my-pi/pi-coding-agent";
-import { contentText, currentStepCut, scanBranch, stateMirrors, statePairs } from "../src/branch";
+import { currentStepCut, scanBranch, stateMirrors, statePairs } from "../src/branch";
 import { STATE_CORE_MESSAGE_TYPE, STATE_SCRATCH_MESSAGE_TYPE } from "../src/messages";
 import type { StateMirror } from "../src/messages";
 import { commitStep, headMessages, newProcedure, stateMessages } from "../src/procedure";
@@ -243,22 +243,6 @@ describe("currentStepCut", () => {
 	test("is undefined when the branch holds no assistant message", () => {
 		expect(currentStepCut([])).toBeUndefined();
 		expect(currentStepCut([invocationEntry("recon"), specEntry("recon"), coreStateEntry({}), scratchStateEntry({})])).toBeUndefined();
-	});
-});
-
-describe("contentText", () => {
-	test("a string passes through", () => {
-		expect(contentText("body")).toBe("body");
-	});
-
-	test("text blocks join with newlines and other blocks are skipped", () => {
-		const blocks = [{ type: "text", text: "a" }, { type: "image", data: "x", mimeType: "image/png" }, { type: "text", text: "b" }];
-
-		expect(contentText(blocks)).toBe("a\nb");
-	});
-
-	test("anything else is stringified", () => {
-		expect(contentText(42)).toBe("42");
 	});
 });
 
